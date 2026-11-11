@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"go-web-template/config"
+	"gost/config"
 	"strconv"
 	"time"
 

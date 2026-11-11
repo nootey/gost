@@ -2,9 +2,9 @@ package user_test
 
 import (
 	"encoding/json"
-	"go-web-template/internal/apperr"
-	"go-web-template/internal/domains/user"
-	"go-web-template/mocks"
+	"gost/internal/apperr"
+	"gost/internal/domains/user"
+	"gost/mocks"
 	"net/http"
 	"net/http/httptest"
 	"testing"

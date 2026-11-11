@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"go-web-template/config"
+	"gost/config"
 	"time"
 
 	_ "github.com/lib/pq"

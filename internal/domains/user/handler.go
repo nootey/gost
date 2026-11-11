@@ -1,7 +1,7 @@
 package user
 
 import (
-	"go-web-template/internal/apperr"
+	"gost/internal/apperr"
 	"net/http"
 	"strconv"
 

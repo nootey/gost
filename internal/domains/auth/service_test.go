@@ -4,8 +4,8 @@ package auth_test
 
 import (
 	"context"
-	"go-web-template/internal/domains/auth"
-	"go-web-template/tests/integration"
+	"gost/internal/domains/auth"
+	"gost/tests/integration"
 	"net/url"
 	"testing"
 

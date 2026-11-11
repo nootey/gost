@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"go-web-template/internal/database"
+	"gost/internal/database"
 
 	"go.uber.org/zap"
 )

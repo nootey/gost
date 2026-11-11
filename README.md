@@ -1,22 +1,13 @@
-# Go Web Template
+# Gost
 
-A Go web application template with clean architecture, testing, and CI/CD workflows.
+A Go web application with clean architecture, testing, and CI/CD workflows.
 
 ## Quick Start
 
-### Clone the Template
+### Clone the Repository
 ```bash
-git clone https://github.com/yourusername/go-web-template.git myapp
-cd myapp
-```
-
-### Update Module Name
-
-Replace `go-web-template` with your app name:
-```bash
-# Update go.mod
-
-# Update all imports
+git clone https://github.com/nootey/gost.git
+cd gost
 ```
 
 ### Install Dependencies

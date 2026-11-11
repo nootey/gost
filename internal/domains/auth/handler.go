@@ -2,9 +2,9 @@ package auth
 
 import (
 	"encoding/json"
-	"go-web-template/internal/apperr"
-	"go-web-template/internal/middleware"
-	"go-web-template/internal/sessions"
+	"gost/internal/apperr"
+	"gost/internal/middleware"
+	"gost/internal/sessions"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"

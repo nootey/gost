@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
-	"go-web-template/config"
-	"go-web-template/internal/store"
-	"go-web-template/internal/store/seeders"
-	"go-web-template/pkg/logging"
+	"gost/config"
+	"gost/internal/store"
+	"gost/internal/store/seeders"
+	"gost/pkg/logging"
 	"os"
 	"time"
 

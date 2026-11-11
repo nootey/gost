@@ -49,7 +49,7 @@ type Service struct {
 }
 
 func New(logger *zap.Logger) (*Service, error) {
-	gauge, err := otel.GetMeterProvider().Meter("go-web-template").Float64Gauge(
+	gauge, err := otel.GetMeterProvider().Meter("gost").Float64Gauge(
 		"health_check_up",
 		metric.WithDescription("1 = healthy, 0 = unhealthy"),
 	)

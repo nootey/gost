@@ -3,18 +3,18 @@ filename: "mock_{{.InterfaceName}}.go"
 pkgname: "mocks"
 structname: "Mock{{.InterfaceName}}"
 packages:
-  go-web-template/internal/domains/user:
+  gost/internal/domains/user:
     interfaces:
       UserServiceInterface:
-  go-web-template/internal/domains/auth:
+  gost/internal/domains/auth:
     interfaces:
       AuthServiceInterface:
-  go-web-template/internal/middleware:
+  gost/internal/middleware:
     interfaces:
       AuthMiddlewareInterface:
-  go-web-template/internal/mailer:
+  gost/internal/mailer:
     interfaces:
       MailerInterface:
-  go-web-template/internal/tokens:
+  gost/internal/tokens:
     interfaces:
       TokenStoreInterface:

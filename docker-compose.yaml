@@ -1,3 +1,5 @@
+name: gost
+
 services:
   traefik:
     image: traefik:latest
@@ -30,13 +32,13 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-go_template}
+      POSTGRES_DB: ${POSTGRES_DB:-gost}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-go_template}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-gost}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,7 +71,7 @@ services:
       - DATABASE_PORT=5432
       - DATABASE_USER=${POSTGRES_USER:-postgres}
       - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - DATABASE_NAME=${POSTGRES_DB:-go_template}
+      - DATABASE_NAME=${POSTGRES_DB:-gost}
     entrypoint: ["migrate"]
     command: ["up"]
     networks:
@@ -95,7 +97,7 @@ services:
       - DATABASE_PORT=5432
       - DATABASE_USER=${POSTGRES_USER:-postgres}
       - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - DATABASE_NAME=${POSTGRES_DB:-go_template}
+      - DATABASE_NAME=${POSTGRES_DB:-gost}
       - DATABASE_SSL_MODE=disable
       - REDIS_HOST=redis
     volumes:

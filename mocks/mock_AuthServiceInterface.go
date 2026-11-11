@@ -6,7 +6,7 @@ package mocks
 
 import (
 	"context"
-	"go-web-template/internal/domains/user"
+	"gost/internal/domains/user"
 
 	mock "github.com/stretchr/testify/mock"
 )

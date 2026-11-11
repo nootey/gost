@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"go-web-template/config"
-	"go-web-template/internal/database"
+	"gost/config"
+	"gost/internal/database"
 
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"

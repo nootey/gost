@@ -2,8 +2,8 @@ package sessions_test
 
 import (
 	"context"
-	"go-web-template/config"
-	"go-web-template/internal/sessions"
+	"gost/config"
+	"gost/internal/sessions"
 	"testing"
 	"time"
 

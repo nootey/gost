@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
-	"go-web-template/config"
+	"gost/config"
 	"strconv"
 	"time"
 

@@ -99,7 +99,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.port", "5432")
 	v.SetDefault("database.user", "postgres")
 	v.SetDefault("database.password", "postgres")
-	v.SetDefault("database.name", "go-web-template")
+	v.SetDefault("database.name", "gost")
 
 	v.SetDefault("app.environment", "local")
 	v.SetDefault("app.log_level", "debug")
@@ -124,7 +124,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("mailer.username", "")
 	v.SetDefault("mailer.password", "")
 	v.SetDefault("mailer.from", "no-reply@localhost")
-	v.SetDefault("mailer.from_name", "Go Web Template")
+	v.SetDefault("mailer.from_name", "Gost")
 
 	v.SetDefault("token.confirm_ttl_hours", 24)
 	v.SetDefault("token.reset_ttl_minutes", 60)

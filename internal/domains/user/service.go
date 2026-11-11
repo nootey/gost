@@ -2,7 +2,7 @@ package user
 
 import (
 	"context"
-	"go-web-template/internal/database"
+	"gost/internal/database"
 	"math"
 )
 

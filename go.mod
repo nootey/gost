@@ -1,4 +1,4 @@
-module go-web-template
+module gost
 
 go 1.27.3
 

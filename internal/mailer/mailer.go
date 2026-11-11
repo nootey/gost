@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
-	"go-web-template/config"
+	"gost/config"
 	"html/template"
 
 	"go.uber.org/zap"

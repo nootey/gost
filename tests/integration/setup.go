@@ -3,12 +3,12 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"go-web-template/config"
-	"go-web-template/internal/database"
-	"go-web-template/internal/domains/auth"
-	"go-web-template/internal/domains/user"
-	"go-web-template/internal/store/seeders"
-	"go-web-template/internal/tokens"
+	"gost/config"
+	"gost/internal/database"
+	"gost/internal/domains/auth"
+	"gost/internal/domains/user"
+	"gost/internal/store/seeders"
+	"gost/internal/tokens"
 	"path/filepath"
 	"time"
 

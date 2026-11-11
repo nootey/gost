@@ -2,8 +2,8 @@ package tokens_test
 
 import (
 	"context"
-	"go-web-template/config"
-	"go-web-template/internal/tokens"
+	"gost/config"
+	"gost/internal/tokens"
 	"testing"
 	"time"
 

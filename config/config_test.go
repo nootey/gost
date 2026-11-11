@@ -7,7 +7,7 @@ import "testing"
 // underscores.
 func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("DATABASE_HOST", "db")
-	t.Setenv("DATABASE_NAME", "go_template")
+	t.Setenv("DATABASE_NAME", "gost")
 	t.Setenv("APP_ENVIRONMENT", "production")
 	t.Setenv("SEED_ROOT_USER", "seeded@example.com")
 	t.Setenv("REDIS_HOST", "redis")
@@ -24,8 +24,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	if c.Database.Host != "db" {
 		t.Errorf("Database.Host = %q, want %q", c.Database.Host, "db")
 	}
-	if c.Database.DBName != "go_template" {
-		t.Errorf("Database.DBName = %q, want %q", c.Database.DBName, "go_template")
+	if c.Database.DBName != "gost" {
+		t.Errorf("Database.DBName = %q, want %q", c.Database.DBName, "gost")
 	}
 	if c.App.Environment != "production" {
 		t.Errorf("App.Environment = %q, want %q", c.App.Environment, "production")

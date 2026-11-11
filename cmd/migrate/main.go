@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"go-web-template/config"
-	"go-web-template/pkg/logging"
+	"gost/config"
+	"gost/pkg/logging"
 	"os"
 	"time"
 

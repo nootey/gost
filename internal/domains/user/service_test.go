@@ -5,8 +5,8 @@ package user_test
 import (
 	"context"
 	"fmt"
-	"go-web-template/internal/database"
-	"go-web-template/tests/integration"
+	"gost/internal/database"
+	"gost/tests/integration"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
