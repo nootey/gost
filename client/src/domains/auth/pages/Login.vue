@@ -123,13 +123,11 @@ function forgotPassword() {
                 <div class="flex flex-row w-full justify-between">
                     <div class="flex flex-row items-center gap-2">
                         <Checkbox v-model="form.remember_me" input-id="rememberMe" :binary="true" class="scale-90" />
-                        <label for="rememberMe" class="text-sm cursor-pointer text-gray-600 dark:text-gray-400">
-                            Remember me
-                        </label>
+                        <label for="rememberMe" class="text-sm cursor-pointer text-fg-muted">Remember me</label>
                     </div>
 
                     <span
-                        class="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-pointer"
+                        class="text-sm font-medium text-accent hover:underline underline-offset-4 cursor-pointer"
                         @click="forgotPassword"
                     >
                         Forgot password?
@@ -139,16 +137,16 @@ function forgotPassword() {
                 <Button
                     :label="loading ? 'Signing in...' : 'Sign in'"
                     :icon="loading ? 'pi pi-spin pi-spinner mr-2' : ''"
-                    class="w-full auth-accent-button"
+                    class="w-full"
                     :disabled="loading"
                     @click="login"
                 />
             </div>
 
-            <div class="flex items-center justify-center gap-2 mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
-                <span class="text-sm text-gray-600 dark:text-gray-400">Don't have an account?</span>
+            <div class="flex items-center justify-center gap-2 mt-4 pt-3 border-t border-edge">
+                <span class="text-sm text-fg-muted">Don't have an account?</span>
                 <span
-                    class="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-pointer"
+                    class="text-sm font-medium text-accent hover:underline underline-offset-4 cursor-pointer"
                     @click="signUp"
                 >
                     Create account
