@@ -149,7 +149,7 @@ All configuration is managed through environment variables (`.env`).
 
 Access config anywhere:
 ```go
-import "myapp/internal/config"
+import "gost/config"
 
 cfg := config.Get()
 fmt.Println(cfg.Server.Port)
