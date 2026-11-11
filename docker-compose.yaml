@@ -17,6 +17,8 @@ services:
       - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.le.acme.httpchallenge=true
       - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      # Traefik cuts request reads at 60s by default, which is too short for large uploads
+      - --entrypoints.websecure.transport.respondingtimeouts.readtimeout=${UPLOAD_TIMEOUT_SECONDS:-300}s
     ports:
       - "80:80"
       - "443:443"
@@ -100,8 +102,12 @@ services:
       - DATABASE_NAME=${POSTGRES_DB:-gost}
       - DATABASE_SSL_MODE=disable
       - REDIS_HOST=redis
+      - UPLOAD_DIR=/app/data/uploads
+      - UPLOAD_MAX_SIZE_MB=${UPLOAD_MAX_SIZE_MB:-50}
+      - UPLOAD_TIMEOUT_SECONDS=${UPLOAD_TIMEOUT_SECONDS:-300}
     volumes:
       - ./logs:/app/logs
+      - uploads:/app/data/uploads
     labels:
       - traefik.enable=true
       - traefik.http.routers.api.rule=Host(`${HOST:-localhost}`) && PathPrefix(`/api`)
@@ -132,6 +138,7 @@ volumes:
   postgres_data:
   redis:
   traefik_letsencrypt:
+  uploads:
 
 networks:
   app_network:

@@ -12,6 +12,7 @@ type Querier interface {
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
 	CountUsers(ctx context.Context) (int64, error)
+	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)

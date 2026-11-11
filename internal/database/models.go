@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+type File struct {
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	Name        string    `json:"name"`
+	StorageKey  string    `json:"storage_key"`
+	ContentType string    `json:"content_type"`
+	SizeBytes   int64     `json:"size_bytes"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type Permission struct {
 	ID          int64          `json:"id"`
 	Name        string         `json:"name"`

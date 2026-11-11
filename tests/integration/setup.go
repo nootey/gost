@@ -6,6 +6,7 @@ import (
 	"gost/config"
 	"gost/internal/database"
 	"gost/internal/domains/auth"
+	"gost/internal/domains/file"
 	"gost/internal/domains/user"
 	"gost/internal/store/seeders"
 	"gost/internal/tokens"
@@ -29,12 +30,14 @@ type TestContainer struct {
 	Queries   *database.Queries
 	Redis     *miniredis.Miniredis
 	Mailer    *CaptureMailer
+	UploadDir string
 	Services  *Services
 }
 
 type Services struct {
 	UserService *user.UserService
 	AuthService *auth.AuthService
+	FileService *file.FileService
 	// Add more services here
 }
 
@@ -99,6 +102,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	// Seed basic data (roles, permissions)
 	logger := zap.NewNop()
 	cfg := testConfig()
+	cfg.Upload.Dir = s.T().TempDir()
 	err = seeders.SeedDatabase(s.Ctx, db, logger, cfg, "core")
 	s.Require().NoError(err, "seeding failed")
 
@@ -111,6 +115,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	// Initialize services
 	userService := user.NewUserService(queries)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
+	fileService := file.NewFileService(queries, cfg.Upload)
 
 	s.TC = &TestContainer{
 		Container: container,
@@ -118,9 +123,11 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 		Queries:   queries,
 		Redis:     mr,
 		Mailer:    captureMailer,
+		UploadDir: cfg.Upload.Dir,
 		Services: &Services{
 			UserService: userService,
 			AuthService: authService,
+			FileService: fileService,
 		},
 	}
 }
@@ -135,6 +142,8 @@ func testConfig() *config.Config {
 	cfg.WebClient.Port = "5173"
 	cfg.Token.ConfirmTTLHours = 24
 	cfg.Token.ResetTTLMinutes = 60
+	cfg.Upload.MaxSizeMB = 1
+	cfg.Upload.TimeoutSeconds = 60
 	return cfg
 }
 

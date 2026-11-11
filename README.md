@@ -154,3 +154,13 @@ import "gost/config"
 cfg := config.Get()
 fmt.Println(cfg.Server.Port)
 ```
+
+### File uploads
+
+Uploads are stored on local disk. The database keeps the owner, name, size and type of each file.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. Docker mounts the `uploads` named volume here. |
+| `UPLOAD_MAX_SIZE_MB` | `50` | Largest file the API accepts. |
+| `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request. |

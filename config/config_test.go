@@ -15,6 +15,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("REDIS_PASSWORD", "redis-secret")
 	t.Setenv("SESSION_TTL_HOURS", "48")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "https://a.example,https://b.example")
+	t.Setenv("UPLOAD_DIR", "/data/uploads")
+	t.Setenv("UPLOAD_MAX_SIZE_MB", "10")
 
 	if err := Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -38,6 +40,9 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if c.Session.TTLHours != 48 {
 		t.Errorf("Session.TTLHours = %d, want 48", c.Session.TTLHours)
+	}
+	if c.Upload.Dir != "/data/uploads" || c.Upload.MaxSizeMB != 10 {
+		t.Errorf("Upload = %+v, want dir /data/uploads max 10 MB", c.Upload)
 	}
 	want := []string{"https://a.example", "https://b.example"}
 	if len(c.Cors.AllowedOrigins) != len(want) {
@@ -67,6 +72,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.Session.RememberMeTTLHours != 720 {
 		t.Errorf("Session.RememberMeTTLHours = %d, want 720", c.Session.RememberMeTTLHours)
+	}
+	if c.Upload.Dir != "./storage/uploads" || c.Upload.MaxSizeMB != 50 || c.Upload.TimeoutSeconds != 300 {
+		t.Errorf("Upload = %+v, want dir ./storage/uploads max 50 MB timeout 300s", c.Upload)
 	}
 }
 

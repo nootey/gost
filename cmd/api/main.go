@@ -7,6 +7,7 @@ import (
 	"gost/internal/apperr"
 	"gost/internal/database"
 	"gost/internal/domains/auth"
+	"gost/internal/domains/file"
 	"gost/internal/domains/user"
 	"gost/internal/health"
 	"gost/internal/mailer"
@@ -17,6 +18,7 @@ import (
 	"gost/pkg/logging"
 	"gost/pkg/telemetry"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -34,6 +36,7 @@ import (
 type Handlers struct {
 	Auth   *auth.AuthHandler
 	User   *user.UserHandler
+	File   *file.FileHandler
 	Health *health.HealthHandler
 }
 
@@ -89,6 +92,10 @@ func main() {
 	tokenStore := tokens.NewStore(rdb, cfg.Token)
 	mail := mailer.NewMailer(cfg.Mailer, logger)
 
+	if err := os.MkdirAll(cfg.Upload.Dir, 0o750); err != nil {
+		logger.Fatal("failed to create upload directory", zap.Error(err))
+	}
+
 	tel, err := telemetry.New()
 	if err != nil {
 		logger.Fatal("failed to initialize telemetry", zap.Error(err))
@@ -111,18 +118,21 @@ func main() {
 	// Initialize services
 	userService := user.NewUserService(queries)
 	authService := auth.NewAuthService(queries, tokenStore, mail, cfg)
+	fileService := file.NewFileService(queries, cfg.Upload)
 	// Add more services as needed
 
 	// Initialize handlers
 	responder := apperr.NewResponder(logger)
 	userHandler := user.NewUserHandler(userService, responder)
 	authHandler := auth.NewAuthHandler(authService, authMiddleware, responder, logger)
+	fileHandler := file.NewFileHandler(fileService, cfg.Upload, responder)
 	healthHandler := health.NewHealthHandler(healthSvc, responder)
 	// Add more handlers as needed
 
 	h := Handlers{
 		Auth:   authHandler,
 		User:   userHandler,
+		File:   fileHandler,
 		Health: healthHandler,
 	}
 
@@ -158,7 +168,6 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 	r.Use(middleware.ClientIPFromRemoteAddr)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS
 	r.Use(cors.Handler(cors.Options{
@@ -170,21 +179,41 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 		MaxAge:           300,
 	}))
 
-	r.Get("/health", h.Health.Report)
+	// Timeout is set per group, because uploads need a longer one than the rest.
+	requestTimeout := middleware.Timeout(60 * time.Second)
+	uploadTimeout := middleware.Timeout(time.Duration(cfg.Upload.TimeoutSeconds) * time.Second)
 
-	r.Handle("/metrics", tel.MetricsHandler)
+	r.Group(func(r chi.Router) {
+		r.Use(requestTimeout)
+
+		r.Get("/health", h.Health.Report)
+
+		r.Handle("/metrics", tel.MetricsHandler)
+	})
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
-		// Public routes
-		r.Mount("/auth", h.Auth.Routes())
-
-		// Protected routes
 		r.Group(func(r chi.Router) {
+			r.Use(requestTimeout)
+
+			// Public routes
+			r.Mount("/auth", h.Auth.Routes())
+
+			// Protected routes
+			r.Group(func(r chi.Router) {
+				r.Use(authMiddleware.WebClientAuthentication)
+
+				r.Mount("/users", h.User.Routes())
+				// Mount more protected handlers as needed
+			})
+		})
+
+		// Protected upload routes
+		r.Group(func(r chi.Router) {
+			r.Use(uploadTimeout)
 			r.Use(authMiddleware.WebClientAuthentication)
 
-			r.Mount("/users", h.User.Routes())
-			// Mount more protected handlers as needed
+			r.Mount("/files", h.File.Routes())
 		})
 	})
 
