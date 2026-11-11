@@ -11,3 +11,11 @@ export interface UploadResponse {
     message: string;
     file: StoredFile;
 }
+
+export interface PaginatedFiles {
+    data: StoredFile[];
+    page: number;
+    page_size: number;
+    total: number;
+    total_pages: number;
+}

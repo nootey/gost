@@ -14,6 +14,8 @@ const ICON_BY_GROUP: Partial<Record<string, string>> = {
     text: "pi pi-file-edit",
 };
 
+const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
 const vueHelper = {
     formatBytes(bytes: number): string {
         if (bytes < 1024) return `${bytes} B`;
@@ -26,9 +28,17 @@ const vueHelper = {
         return `${value.toFixed(value < 10 ? 1 : 0)} ${SIZE_UNITS[unit]}`;
     },
 
+    mimeType(contentType: string): string {
+        return contentType.split(";")[0].trim();
+    },
+
     fileIcon(contentType: string): string {
         const mimeType = contentType.split(";")[0];
         return ICON_BY_TYPE[mimeType] ?? ICON_BY_GROUP[mimeType.split("/")[0]] ?? "pi pi-file";
+    },
+
+    formatDate(iso: string): string {
+        return DATE_FORMAT.format(new Date(iso));
     },
 };
 

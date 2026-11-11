@@ -26,6 +26,7 @@ var (
 
 type FileServiceInterface interface {
 	Upload(ctx context.Context, userID int64, name string, src io.Reader) (*File, error)
+	List(ctx context.Context, userID int64, page, pageSize int) (*PaginatedFiles, error)
 }
 
 var _ FileServiceInterface = (*FileService)(nil)
@@ -39,6 +40,16 @@ func NewFileService(queries *database.Queries, cfg config.UploadConfig) *FileSer
 	return &FileService{
 		queries: queries,
 		cfg:     cfg,
+	}
+}
+
+func toFileModel(dbFile database.File) *File {
+	return &File{
+		ID:          dbFile.ID,
+		Name:        dbFile.Name,
+		ContentType: dbFile.ContentType,
+		SizeBytes:   dbFile.SizeBytes,
+		CreatedAt:   dbFile.CreatedAt,
 	}
 }
 
@@ -82,11 +93,36 @@ func (s *FileService) Upload(ctx context.Context, userID int64, name string, src
 		return nil, err
 	}
 
-	return &File{
-		ID:          dbFile.ID,
-		Name:        dbFile.Name,
-		ContentType: dbFile.ContentType,
-		SizeBytes:   dbFile.SizeBytes,
-		CreatedAt:   dbFile.CreatedAt,
+	return toFileModel(dbFile), nil
+}
+
+func (s *FileService) List(ctx context.Context, userID int64, page, pageSize int) (*PaginatedFiles, error) {
+	p := utils.NewPagination(page, pageSize)
+
+	dbFiles, err := s.queries.ListFilesByUserPaginated(ctx, database.ListFilesByUserPaginatedParams{
+		UserID: userID,
+		Limit:  p.Limit,
+		Offset: p.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	total, err := s.queries.CountFilesByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]*File, len(dbFiles))
+	for i, dbFile := range dbFiles {
+		files[i] = toFileModel(dbFile)
+	}
+
+	return &PaginatedFiles{
+		Data:       files,
+		Page:       p.Page,
+		PageSize:   p.PageSize,
+		Total:      int(total),
+		TotalPages: p.TotalPages(total),
 	}, nil
 }

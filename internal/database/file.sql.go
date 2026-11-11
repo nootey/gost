@@ -9,6 +9,18 @@ import (
 	"context"
 )
 
+const countFilesByUser = `-- name: CountFilesByUser :one
+SELECT COUNT(*) FROM files
+WHERE user_id = $1
+`
+
+func (q *Queries) CountFilesByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countFilesByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createFile = `-- name: CreateFile :one
 INSERT INTO files (user_id, name, storage_key, content_type, size_bytes)
 VALUES ($1, $2, $3, $4, $5)
@@ -43,4 +55,49 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listFilesByUserPaginated = `-- name: ListFilesByUserPaginated :many
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at FROM files
+WHERE user_id = $1
+ORDER BY created_at DESC, id DESC
+    LIMIT $2 OFFSET $3
+`
+
+type ListFilesByUserPaginatedParams struct {
+	UserID int64 `json:"user_id"`
+	Limit  int32 `json:"limit"`
+	Offset int32 `json:"offset"`
+}
+
+func (q *Queries) ListFilesByUserPaginated(ctx context.Context, arg ListFilesByUserPaginatedParams) ([]File, error) {
+	rows, err := q.db.QueryContext(ctx, listFilesByUserPaginated, arg.UserID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

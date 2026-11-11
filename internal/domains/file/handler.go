@@ -7,9 +7,8 @@ import (
 	"gost/internal/utils"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
-
-	"github.com/go-chi/chi/v5"
 )
 
 const multipartOverhead = 1 << 20
@@ -28,10 +27,23 @@ func NewFileHandler(srv FileServiceInterface, cfg config.UploadConfig, resp *app
 	}
 }
 
-func (h *FileHandler) Routes() chi.Router {
-	r := chi.NewRouter()
-	r.Post("/", h.Upload)
-	return r
+func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.List(r.Context(), userID, page, pageSize)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
 }
 
 func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {

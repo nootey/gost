@@ -38,7 +38,8 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.handler = file.NewFileHandler(suite.mockService, cfg, apperr.NewResponder(zap.NewNop()))
 
 	suite.router = chi.NewRouter()
-	suite.router.Mount("/files", suite.handler.Routes())
+	suite.router.Get("/files", suite.handler.List)
+	suite.router.Post("/files", suite.handler.Upload)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -166,6 +167,68 @@ func (suite *FileHandlerTestSuite) TestUpload_InternalError() {
 
 	body, ct := suite.multipartBody(nil, "a.txt", "x")
 	w := suite.upload(body, ct, true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+	suite.Equal("something went wrong", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/files"+query, nil)
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestList_Success() {
+	suite.mockService.EXPECT().
+		List(mock.Anything, testUserID, 2, 5).
+		Return(&file.PaginatedFiles{
+			Data:       []*file.File{{ID: 3, Name: "c.txt"}, {ID: 2, Name: "b.txt"}},
+			Page:       2,
+			PageSize:   5,
+			Total:      7,
+			TotalPages: 2,
+		}, nil).
+		Once()
+
+	w := suite.list("?page=2&page_size=5", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.PaginatedFiles
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Data, 2)
+	suite.Equal("c.txt", resp.Data[0].Name)
+	suite.Equal(2, resp.Page)
+	suite.Equal(7, resp.Total)
+}
+
+// Missing or bad values reach the service as zero, so the service picks the defaults.
+func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
+	suite.mockService.EXPECT().
+		List(mock.Anything, testUserID, 0, 0).
+		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
+		Twice()
+
+	suite.Equal(http.StatusOK, suite.list("", true).Code)
+	suite.Equal(http.StatusOK, suite.list("?page=abc&page_size=-x", true).Code)
+}
+
+func (suite *FileHandlerTestSuite) TestList_Unauthenticated() {
+	w := suite.list("", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestList_ServiceError() {
+	suite.mockService.EXPECT().
+		List(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, assert.AnError).
+		Once()
+
+	w := suite.list("", true)
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
 	suite.Equal("something went wrong", suite.errorMessage(w))

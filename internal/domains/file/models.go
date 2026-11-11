@@ -13,6 +13,14 @@ type File struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type PaginatedFiles struct {
+	Data       []*File `json:"data"`
+	Page       int     `json:"page"`
+	PageSize   int     `json:"page_size"`
+	Total      int     `json:"total"`
+	TotalPages int     `json:"total_pages"`
+}
+
 type UploadResponse struct {
 	apperr.SuccessResponse
 	File *File `json:"file"`

@@ -204,6 +204,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Use(authMiddleware.WebClientAuthentication)
 
 				r.Mount("/users", h.User.Routes())
+				r.Get("/files", h.File.List)
 				// Mount more protected handlers as needed
 			})
 		})
@@ -213,7 +214,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 			r.Use(uploadTimeout)
 			r.Use(authMiddleware.WebClientAuthentication)
 
-			r.Mount("/files", h.File.Routes())
+			r.Post("/files", h.File.Upload)
 		})
 	})
 
