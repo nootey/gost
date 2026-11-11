@@ -3,6 +3,7 @@ package file
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"gost/config"
@@ -12,21 +13,24 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 )
 
-const maxNameLength = 255
+const nameIndex = "idx_files_user_parent_name"
+
+const maxNameAttempts = 3
 
 var (
-	errNameRequired = apperr.New(apperr.KindValidation, "file name is required")
-	errNameInvalid  = apperr.New(apperr.KindValidation, "file name has invalid characters")
-	errNameTooLong  = apperr.New(apperr.KindValidation, "file name is too long")
-	errEmptyFile    = apperr.New(apperr.KindValidation, "file is empty")
+	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
+	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
+	errNameTaken      = apperr.New(apperr.KindConflict, "an item with this name already exists")
 )
 
+// A parentID of 0 means the root folder.
 type FileServiceInterface interface {
-	Upload(ctx context.Context, userID int64, name string, src io.Reader) (*File, error)
-	List(ctx context.Context, userID int64, page, pageSize int) (*PaginatedFiles, error)
+	Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error)
+	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
+	List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error)
+	FolderPath(ctx context.Context, userID, folderID int64) (*FolderPath, error)
 }
 
 var _ FileServiceInterface = (*FileService)(nil)
@@ -44,8 +48,15 @@ func NewFileService(queries *database.Queries, cfg config.UploadConfig) *FileSer
 }
 
 func toFileModel(dbFile database.File) *File {
+	var parentID *int64
+	if dbFile.ParentID.Valid {
+		parentID = &dbFile.ParentID.Int64
+	}
+
 	return &File{
 		ID:          dbFile.ID,
+		ParentID:    parentID,
+		IsFolder:    !dbFile.StorageKey.Valid,
 		Name:        dbFile.Name,
 		ContentType: dbFile.ContentType,
 		SizeBytes:   dbFile.SizeBytes,
@@ -53,15 +64,13 @@ func toFileModel(dbFile database.File) *File {
 	}
 }
 
-func (s *FileService) Upload(ctx context.Context, userID int64, name string, src io.Reader) (*File, error) {
-	if name == "" {
-		return nil, errNameRequired
+func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error) {
+	if err := utils.ValidateName(name, utils.FileName); err != nil {
+		return nil, err
 	}
-	if !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
-		return nil, errNameInvalid
-	}
-	if utf8.RuneCountInString(name) > maxNameLength {
-		return nil, errNameTooLong
+	// Check the folder before writing bytes, so a bad folder leaves nothing on disk.
+	if err := s.checkFolder(ctx, userID, parentID); err != nil {
+		return nil, err
 	}
 
 	br := bufio.NewReader(src)
@@ -81,12 +90,15 @@ func (s *FileService) Upload(ctx context.Context, userID int64, name string, src
 		return nil, err
 	}
 
-	dbFile, err := s.queries.CreateFile(ctx, database.CreateFileParams{
-		UserID:      userID,
-		Name:        name,
-		StorageKey:  key,
-		ContentType: http.DetectContentType(head),
-		SizeBytes:   size,
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, func(freeName string) (database.File, error) {
+		return s.queries.CreateFile(ctx, database.CreateFileParams{
+			UserID:      userID,
+			ParentID:    sql.NullInt64{Int64: parentID, Valid: parentID != 0},
+			Name:        freeName,
+			StorageKey:  sql.NullString{String: key, Valid: true},
+			ContentType: http.DetectContentType(head),
+			SizeBytes:   size,
+		})
 	})
 	if err != nil {
 		_ = utils.RemoveStoredFile(s.cfg.Dir, key)
@@ -96,19 +108,50 @@ func (s *FileService) Upload(ctx context.Context, userID int64, name string, src
 	return toFileModel(dbFile), nil
 }
 
-func (s *FileService) List(ctx context.Context, userID int64, page, pageSize int) (*PaginatedFiles, error) {
-	p := utils.NewPagination(page, pageSize)
+func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error) {
+	name = strings.TrimSpace(name)
+	if err := utils.ValidateName(name, utils.FolderName); err != nil {
+		return nil, err
+	}
+	if err := s.checkFolder(ctx, userID, parentID); err != nil {
+		return nil, err
+	}
 
-	dbFiles, err := s.queries.ListFilesByUserPaginated(ctx, database.ListFilesByUserPaginatedParams{
-		UserID: userID,
-		Limit:  p.Limit,
-		Offset: p.Offset,
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FolderName, func(freeName string) (database.File, error) {
+		return s.queries.CreateFolder(ctx, database.CreateFolderParams{
+			UserID:   userID,
+			ParentID: sql.NullInt64{Int64: parentID, Valid: parentID != 0},
+			Name:     freeName,
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	total, err := s.queries.CountFilesByUser(ctx, userID)
+	return toFileModel(dbFile), nil
+}
+
+func (s *FileService) List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error) {
+	if err := s.checkFolder(ctx, userID, parentID); err != nil {
+		return nil, err
+	}
+
+	p := utils.NewPagination(page, pageSize)
+
+	dbFiles, err := s.queries.ListFilesByParentPaginated(ctx, database.ListFilesByParentPaginatedParams{
+		UserID:    userID,
+		ParentID:  parentID,
+		RowLimit:  p.Limit,
+		RowOffset: p.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	total, err := s.queries.CountFilesByParent(ctx, database.CountFilesByParentParams{
+		UserID:   userID,
+		ParentID: parentID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -125,4 +168,70 @@ func (s *FileService) List(ctx context.Context, userID int64, page, pageSize int
 		Total:      int(total),
 		TotalPages: p.TotalPages(total),
 	}, nil
+}
+
+func (s *FileService) FolderPath(ctx context.Context, userID, folderID int64) (*FolderPath, error) {
+	rows, err := s.queries.ListFolderPath(ctx, database.ListFolderPathParams{ID: folderID, UserID: userID})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, errFolderNotFound
+	}
+
+	path := make([]*PathEntry, len(rows))
+	for i, row := range rows {
+		path[i] = &PathEntry{ID: row.ID, Name: row.Name}
+	}
+
+	return &FolderPath{Path: path}, nil
+}
+
+func (s *FileService) checkFolder(ctx context.Context, userID, folderID int64) error {
+	if folderID == 0 {
+		return nil
+	}
+
+	exists, err := s.queries.FolderExists(ctx, database.FolderExistsParams{ID: folderID, UserID: userID})
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errFolderNotFound
+	}
+	return nil
+}
+
+func (s *FileService) insertWithFreeName(
+	ctx context.Context,
+	userID, parentID int64,
+	name string,
+	kind utils.NameKind,
+	insert func(freeName string) (database.File, error),
+) (database.File, error) {
+	base, _ := utils.SplitName(name, kind)
+
+	for range maxNameAttempts {
+		taken, err := s.queries.ListNamesByParentAndPrefix(ctx, database.ListNamesByParentAndPrefixParams{
+			UserID:   userID,
+			ParentID: parentID,
+			Prefix:   base,
+		})
+		if err != nil {
+			return database.File{}, err
+		}
+
+		freeName, err := utils.FreeName(name, kind, taken)
+		if err != nil {
+			return database.File{}, err
+		}
+
+		dbFile, err := insert(freeName)
+		if utils.IsUniqueViolation(err, nameIndex) {
+			continue
+		}
+		return dbFile, err
+	}
+
+	return database.File{}, errNameTaken
 }

@@ -11,18 +11,23 @@ import (
 type Querier interface {
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
-	CountFilesByUser(ctx context.Context, userID int64) (int64, error)
+	CountFilesByParent(ctx context.Context, arg CountFilesByParentParams) (int64, error)
 	CountUsers(ctx context.Context) (int64, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
+	CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error)
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
 	GetPermissionByName(ctx context.Context, name string) (Permission, error)
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
-	ListFilesByUserPaginated(ctx context.Context, arg ListFilesByUserPaginatedParams) ([]File, error)
+	ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error)
+	// Returns the folder and its parents, root first. Empty when the folder is not one of the user's.
+	ListFolderPath(ctx context.Context, arg ListFolderPathParams) ([]ListFolderPathRow, error)
+	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 }

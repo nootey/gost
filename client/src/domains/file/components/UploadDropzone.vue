@@ -5,6 +5,7 @@ import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import type { FileUploadUploaderEvent } from "primevue/fileupload";
 import type { StoredFile } from "../models.ts";
 
+const props = defineProps<{ folderId: number | null; folderName?: string }>();
 const emit = defineEmits<{ uploaded: [file: StoredFile] }>();
 
 const fileStore = useFileStore();
@@ -24,12 +25,14 @@ function browse(): void {
 async function onUpload(event: FileUploadUploaderEvent): Promise<void> {
     const files = Array.isArray(event.files) ? [...event.files] : [event.files];
     uploadRef.value?.clear();
+    // Keep the folder from the drop, so opening another folder mid-batch does not split the batch.
+    const folderId = props.folderId;
 
     remaining.value = files.length;
     for (const file of files) {
         current.value = file;
         try {
-            const response = await fileStore.upload(file);
+            const response = await fileStore.upload(file, folderId);
             toastStore.successResponseToast(response);
             emit("uploaded", response.file);
         } catch (error) {
@@ -75,7 +78,13 @@ async function onUpload(event: FileUploadUploaderEvent): Promise<void> {
                     </span>
                     <div class="flex flex-col gap-1">
                         <span class="text-base font-medium text-fg">Drop files here to upload</span>
-                        <span class="text-sm text-fg-muted">You can add more than one file at a time.</span>
+                        <span class="text-sm text-fg-muted">
+                            <template v-if="folderName">
+                                Files go into
+                                <span class="font-medium text-fg">{{ folderName }}</span>
+                            </template>
+                            <template v-else>You can add more than one file at a time.</template>
+                        </span>
                     </div>
                     <Button label="Browse files" icon="pi pi-folder-open" size="small" @click="browse" />
                 </template>

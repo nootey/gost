@@ -1,23 +1,43 @@
 import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
-import type { PaginatedFiles, UploadResponse } from "../../domains/file/models.ts";
+import type {
+    FolderForm,
+    FolderPath,
+    FolderResponse,
+    PaginatedFiles,
+    UploadResponse,
+} from "../../domains/file/models.ts";
 
+// The API client leaves null params out.
 export const useFileStore = defineStore("file", {
     state: () => ({
         apiPrefix: "files",
+        folderPrefix: "folders",
     }),
     actions: {
-        async list(page: number, pageSize: number): Promise<PaginatedFiles> {
+        async list(folderId: number | null, page: number, pageSize: number): Promise<PaginatedFiles> {
             const response = await apiClient.get<PaginatedFiles>(this.apiPrefix, {
-                params: { page, page_size: pageSize },
+                params: { parent_id: folderId, page, page_size: pageSize },
             });
             return response.data;
         },
 
-        async upload(file: File): Promise<UploadResponse> {
+        async upload(file: File, folderId: number | null): Promise<UploadResponse> {
             const body = new FormData();
             body.append("file", file);
-            const response = await apiClient.post<UploadResponse>(this.apiPrefix, body);
+            const response = await apiClient.post<UploadResponse>(this.apiPrefix, body, {
+                params: { parent_id: folderId },
+            });
+            return response.data;
+        },
+
+        async createFolder(form: FolderForm): Promise<FolderResponse> {
+            const response = await apiClient.post<FolderResponse>(this.folderPrefix, form);
+            return response.data;
+        },
+
+        async folderPath(folderId: number): Promise<FolderPath> {
+            const response = await apiClient.get<FolderPath>(`${this.folderPrefix}/${folderId}/path`);
             return response.data;
         },
     },

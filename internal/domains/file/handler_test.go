@@ -40,6 +40,8 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router = chi.NewRouter()
 	suite.router.Get("/files", suite.handler.List)
 	suite.router.Post("/files", suite.handler.Upload)
+	suite.router.Post("/folders", suite.handler.CreateFolder)
+	suite.router.Get("/folders/{id}/path", suite.handler.FolderPath)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -63,8 +65,8 @@ func (suite *FileHandlerTestSuite) multipartBody(fields map[string]string, filen
 	return &buf, mw.FormDataContentType()
 }
 
-func (suite *FileHandlerTestSuite) upload(body io.Reader, contentType string, authenticated bool) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/files", body)
+func (suite *FileHandlerTestSuite) upload(query string, body io.Reader, contentType string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/files"+query, body)
 	req.Header.Set("Content-Type", contentType)
 	if authenticated {
 		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
@@ -82,8 +84,8 @@ func (suite *FileHandlerTestSuite) errorMessage(w *httptest.ResponseRecorder) st
 
 func (suite *FileHandlerTestSuite) TestUpload_Success() {
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, "notes.txt", mock.Anything).
-		RunAndReturn(func(_ context.Context, _ int64, name string, src io.Reader) (*file.File, error) {
+		Upload(mock.Anything, testUserID, int64(0), "notes.txt", mock.Anything).
+		RunAndReturn(func(_ context.Context, _, _ int64, name string, src io.Reader) (*file.File, error) {
 			content, err := io.ReadAll(src)
 			suite.Require().NoError(err)
 			suite.Equal("hello", string(content))
@@ -92,7 +94,7 @@ func (suite *FileHandlerTestSuite) TestUpload_Success() {
 		Once()
 
 	body, ct := suite.multipartBody(nil, "notes.txt", "hello")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusCreated, w.Code)
 	var resp file.UploadResponse
@@ -104,25 +106,45 @@ func (suite *FileHandlerTestSuite) TestUpload_Success() {
 
 func (suite *FileHandlerTestSuite) TestUpload_SkipsFieldsBeforeFile() {
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, "a.txt", mock.Anything).
+		Upload(mock.Anything, testUserID, int64(0), "a.txt", mock.Anything).
 		Return(&file.File{ID: 1, Name: "a.txt"}, nil).
 		Once()
 
 	body, ct := suite.multipartBody(map[string]string{"note": "ignored"}, "a.txt", "x")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusCreated, w.Code)
 }
 
+func (suite *FileHandlerTestSuite) TestUpload_IntoFolder() {
+	suite.mockService.EXPECT().
+		Upload(mock.Anything, testUserID, int64(12), "a.txt", mock.Anything).
+		Return(&file.File{ID: 1, Name: "a.txt"}, nil).
+		Once()
+
+	body, ct := suite.multipartBody(nil, "a.txt", "x")
+	w := suite.upload("?parent_id=12", body, ct, true)
+
+	suite.Equal(http.StatusCreated, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestUpload_InvalidParentID() {
+	body, ct := suite.multipartBody(nil, "a.txt", "x")
+	w := suite.upload("?parent_id=abc", body, ct, true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid parent_id", suite.errorMessage(w))
+}
+
 func (suite *FileHandlerTestSuite) TestUpload_Unauthenticated() {
 	body, ct := suite.multipartBody(nil, "notes.txt", "hello")
-	w := suite.upload(body, ct, false)
+	w := suite.upload("", body, ct, false)
 
 	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
 func (suite *FileHandlerTestSuite) TestUpload_NotMultipart() {
-	w := suite.upload(strings.NewReader(`{"file":"x"}`), "application/json", true)
+	w := suite.upload("", strings.NewReader(`{"file":"x"}`), "application/json", true)
 
 	suite.Equal(http.StatusBadRequest, w.Code)
 	suite.Equal("expected a multipart form", suite.errorMessage(w))
@@ -130,7 +152,7 @@ func (suite *FileHandlerTestSuite) TestUpload_NotMultipart() {
 
 func (suite *FileHandlerTestSuite) TestUpload_NoFile() {
 	body, ct := suite.multipartBody(map[string]string{"note": "no file here"}, "", "")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusBadRequest, w.Code)
 	suite.Equal("no file was sent", suite.errorMessage(w))
@@ -140,7 +162,7 @@ func (suite *FileHandlerTestSuite) TestUpload_NoFile() {
 func (suite *FileHandlerTestSuite) TestUpload_BodyTooLarge() {
 	huge := strings.Repeat("a", 3<<20)
 	body, ct := suite.multipartBody(map[string]string{"padding": huge}, "a.txt", "x")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusRequestEntityTooLarge, w.Code)
 	suite.Equal("request body is too large", suite.errorMessage(w))
@@ -148,12 +170,12 @@ func (suite *FileHandlerTestSuite) TestUpload_BodyTooLarge() {
 
 func (suite *FileHandlerTestSuite) TestUpload_ServiceError() {
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, "big.bin", mock.Anything).
+		Upload(mock.Anything, testUserID, int64(0), "big.bin", mock.Anything).
 		Return(nil, apperr.New(apperr.KindTooLarge, "file is larger than the 1 MB limit")).
 		Once()
 
 	body, ct := suite.multipartBody(nil, "big.bin", "x")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusRequestEntityTooLarge, w.Code)
 	suite.Equal("file is larger than the 1 MB limit", suite.errorMessage(w))
@@ -161,12 +183,12 @@ func (suite *FileHandlerTestSuite) TestUpload_ServiceError() {
 
 func (suite *FileHandlerTestSuite) TestUpload_InternalError() {
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Upload(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nil, assert.AnError).
 		Once()
 
 	body, ct := suite.multipartBody(nil, "a.txt", "x")
-	w := suite.upload(body, ct, true)
+	w := suite.upload("", body, ct, true)
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
 	suite.Equal("something went wrong", suite.errorMessage(w))
@@ -184,7 +206,7 @@ func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httpt
 
 func (suite *FileHandlerTestSuite) TestList_Success() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, 2, 5).
+		List(mock.Anything, testUserID, int64(0), 2, 5).
 		Return(&file.PaginatedFiles{
 			Data:       []*file.File{{ID: 3, Name: "c.txt"}, {ID: 2, Name: "b.txt"}},
 			Page:       2,
@@ -208,12 +230,33 @@ func (suite *FileHandlerTestSuite) TestList_Success() {
 // Missing or bad values reach the service as zero, so the service picks the defaults.
 func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, 0, 0).
+		List(mock.Anything, testUserID, int64(0), 0, 0).
 		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
 		Twice()
 
 	suite.Equal(http.StatusOK, suite.list("", true).Code)
 	suite.Equal(http.StatusOK, suite.list("?page=abc&page_size=-x", true).Code)
+}
+
+func (suite *FileHandlerTestSuite) TestList_InFolder() {
+	suite.mockService.EXPECT().
+		List(mock.Anything, testUserID, int64(12), 1, 10).
+		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 10}, nil).
+		Once()
+
+	w := suite.list("?parent_id=12&page=1&page_size=10", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+}
+
+// Unlike page values, a bad folder id is an error: falling back to the root would show the wrong folder.
+func (suite *FileHandlerTestSuite) TestList_InvalidParentID() {
+	for _, query := range []string{"?parent_id=abc", "?parent_id=0", "?parent_id=-4"} {
+		w := suite.list(query, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, query)
+		suite.Equal("invalid parent_id", suite.errorMessage(w), query)
+	}
 }
 
 func (suite *FileHandlerTestSuite) TestList_Unauthenticated() {
@@ -224,7 +267,7 @@ func (suite *FileHandlerTestSuite) TestList_Unauthenticated() {
 
 func (suite *FileHandlerTestSuite) TestList_ServiceError() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		List(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nil, assert.AnError).
 		Once()
 
@@ -232,4 +275,133 @@ func (suite *FileHandlerTestSuite) TestList_ServiceError() {
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
 	suite.Equal("something went wrong", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) createFolder(body string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/folders", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolder_Success() {
+	parentID := int64(12)
+	suite.mockService.EXPECT().
+		CreateFolder(mock.Anything, testUserID, int64(12), "Photos").
+		Return(&file.File{ID: 4, ParentID: &parentID, IsFolder: true, Name: "Photos"}, nil).
+		Once()
+
+	w := suite.createFolder(`{"name":"Photos","parent_id":12}`, true)
+
+	suite.Equal(http.StatusCreated, w.Code)
+	var resp file.FolderResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Photos created.", resp.Message)
+	suite.Require().NotNil(resp.Folder)
+	suite.True(resp.Folder.IsFolder)
+	suite.Equal(&parentID, resp.Folder.ParentID)
+}
+
+// A missing or null parent_id reaches the service as 0, the root.
+func (suite *FileHandlerTestSuite) TestCreateFolder_AtRoot() {
+	suite.mockService.EXPECT().
+		CreateFolder(mock.Anything, testUserID, int64(0), "Photos").
+		Return(&file.File{ID: 4, IsFolder: true, Name: "Photos"}, nil).
+		Twice()
+
+	suite.Equal(http.StatusCreated, suite.createFolder(`{"name":"Photos"}`, true).Code)
+	suite.Equal(http.StatusCreated, suite.createFolder(`{"name":"Photos","parent_id":null}`, true).Code)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolder_InvalidBody() {
+	for _, body := range []string{`not json`, `{"name":"Photos","parent_id":"12"}`} {
+		w := suite.createFolder(body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid request body", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolder_InvalidParentID() {
+	for _, body := range []string{`{"name":"Photos","parent_id":0}`, `{"name":"Photos","parent_id":-4}`} {
+		w := suite.createFolder(body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid parent_id", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolder_Unauthenticated() {
+	w := suite.createFolder(`{"name":"Photos"}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolder_ServiceError() {
+	suite.mockService.EXPECT().
+		CreateFolder(mock.Anything, testUserID, int64(99), "Photos").
+		Return(nil, apperr.New(apperr.KindNotFound, "folder not found")).
+		Once()
+
+	w := suite.createFolder(`{"name":"Photos","parent_id":99}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("folder not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) folderPath(id string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/folders/"+id+"/path", nil)
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestFolderPath_Success() {
+	suite.mockService.EXPECT().
+		FolderPath(mock.Anything, testUserID, int64(7)).
+		Return(&file.FolderPath{Path: []*file.PathEntry{{ID: 3, Name: "Photos"}, {ID: 7, Name: "2026"}}}, nil).
+		Once()
+
+	w := suite.folderPath("7", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.FolderPath
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Path, 2)
+	suite.Equal("Photos", resp.Path[0].Name)
+	suite.Equal(int64(7), resp.Path[1].ID)
+}
+
+func (suite *FileHandlerTestSuite) TestFolderPath_InvalidID() {
+	for _, id := range []string{"abc", "0", "-3"} {
+		w := suite.folderPath(id, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, id)
+		suite.Equal("invalid id", suite.errorMessage(w), id)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestFolderPath_Unauthenticated() {
+	w := suite.folderPath("7", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestFolderPath_ServiceError() {
+	suite.mockService.EXPECT().
+		FolderPath(mock.Anything, testUserID, int64(99)).
+		Return(nil, apperr.New(apperr.KindNotFound, "folder not found")).
+		Once()
+
+	w := suite.folderPath("99", true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("folder not found", suite.errorMessage(w))
 }

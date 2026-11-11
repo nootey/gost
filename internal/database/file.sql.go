@@ -7,37 +7,46 @@ package database
 
 import (
 	"context"
+	"database/sql"
 )
 
-const countFilesByUser = `-- name: CountFilesByUser :one
+const countFilesByParent = `-- name: CountFilesByParent :one
 SELECT COUNT(*) FROM files
 WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
 `
 
-func (q *Queries) CountFilesByUser(ctx context.Context, userID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countFilesByUser, userID)
+type CountFilesByParentParams struct {
+	UserID   int64 `json:"user_id"`
+	ParentID int64 `json:"parent_id"`
+}
+
+func (q *Queries) CountFilesByParent(ctx context.Context, arg CountFilesByParentParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countFilesByParent, arg.UserID, arg.ParentID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const createFile = `-- name: CreateFile :one
-INSERT INTO files (user_id, name, storage_key, content_type, size_bytes)
-VALUES ($1, $2, $3, $4, $5)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
 `
 
 type CreateFileParams struct {
-	UserID      int64  `json:"user_id"`
-	Name        string `json:"name"`
-	StorageKey  string `json:"storage_key"`
-	ContentType string `json:"content_type"`
-	SizeBytes   int64  `json:"size_bytes"`
+	UserID      int64          `json:"user_id"`
+	ParentID    sql.NullInt64  `json:"parent_id"`
+	Name        string         `json:"name"`
+	StorageKey  sql.NullString `json:"storage_key"`
+	ContentType string         `json:"content_type"`
+	SizeBytes   int64          `json:"size_bytes"`
 }
 
 func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, error) {
 	row := q.db.QueryRowContext(ctx, createFile,
 		arg.UserID,
+		arg.ParentID,
 		arg.Name,
 		arg.StorageKey,
 		arg.ContentType,
@@ -53,25 +62,81 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.SizeBytes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ParentID,
 	)
 	return i, err
 }
 
-const listFilesByUserPaginated = `-- name: ListFilesByUserPaginated :many
-SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at FROM files
-WHERE user_id = $1
-ORDER BY created_at DESC, id DESC
-    LIMIT $2 OFFSET $3
+const createFolder = `-- name: CreateFolder :one
+INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+VALUES ($1, $2, $3, '', 0)
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
 `
 
-type ListFilesByUserPaginatedParams struct {
-	UserID int64 `json:"user_id"`
-	Limit  int32 `json:"limit"`
-	Offset int32 `json:"offset"`
+type CreateFolderParams struct {
+	UserID   int64         `json:"user_id"`
+	ParentID sql.NullInt64 `json:"parent_id"`
+	Name     string        `json:"name"`
 }
 
-func (q *Queries) ListFilesByUserPaginated(ctx context.Context, arg ListFilesByUserPaginatedParams) ([]File, error) {
-	rows, err := q.db.QueryContext(ctx, listFilesByUserPaginated, arg.UserID, arg.Limit, arg.Offset)
+func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, createFolder, arg.UserID, arg.ParentID, arg.Name)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+	)
+	return i, err
+}
+
+const folderExists = `-- name: FolderExists :one
+SELECT EXISTS (
+    SELECT 1 FROM files
+    WHERE id = $1 AND user_id = $2 AND storage_key IS NULL
+)
+`
+
+type FolderExistsParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, folderExists, arg.ID, arg.UserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const listFilesByParentPaginated = `-- name: ListFilesByParentPaginated :many
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
+ORDER BY (storage_key IS NULL) DESC, created_at DESC, id DESC
+    LIMIT $4 OFFSET $3
+`
+
+type ListFilesByParentPaginatedParams struct {
+	UserID    int64 `json:"user_id"`
+	ParentID  int64 `json:"parent_id"`
+	RowOffset int32 `json:"row_offset"`
+	RowLimit  int32 `json:"row_limit"`
+}
+
+func (q *Queries) ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error) {
+	rows, err := q.db.QueryContext(ctx, listFilesByParentPaginated,
+		arg.UserID,
+		arg.ParentID,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -88,10 +153,95 @@ func (q *Queries) ListFilesByUserPaginated(ctx context.Context, arg ListFilesByU
 			&i.SizeBytes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFolderPath = `-- name: ListFolderPath :many
+WITH RECURSIVE path AS (
+    SELECT files.id, files.parent_id, files.name, 0 AS depth
+    FROM files
+    WHERE files.id = $1 AND files.user_id = $2 AND files.storage_key IS NULL
+    UNION ALL
+    SELECT f.id, f.parent_id, f.name, path.depth + 1
+    FROM files f
+    JOIN path ON f.id = path.parent_id
+)
+SELECT id, name FROM path
+ORDER BY depth DESC
+`
+
+type ListFolderPathParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+type ListFolderPathRow struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// Returns the folder and its parents, root first. Empty when the folder is not one of the user's.
+func (q *Queries) ListFolderPath(ctx context.Context, arg ListFolderPathParams) ([]ListFolderPathRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFolderPath, arg.ID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFolderPathRow
+	for rows.Next() {
+		var i ListFolderPathRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNamesByParentAndPrefix = `-- name: ListNamesByParentAndPrefix :many
+SELECT name FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
+  AND starts_with(name, $3::text)
+`
+
+type ListNamesByParentAndPrefixParams struct {
+	UserID   int64  `json:"user_id"`
+	ParentID int64  `json:"parent_id"`
+	Prefix   string `json:"prefix"`
+}
+
+func (q *Queries) ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listNamesByParentAndPrefix, arg.UserID, arg.ParentID, arg.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

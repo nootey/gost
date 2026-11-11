@@ -10,14 +10,15 @@ import (
 )
 
 type File struct {
-	ID          int64     `json:"id"`
-	UserID      int64     `json:"user_id"`
-	Name        string    `json:"name"`
-	StorageKey  string    `json:"storage_key"`
-	ContentType string    `json:"content_type"`
-	SizeBytes   int64     `json:"size_bytes"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64          `json:"id"`
+	UserID      int64          `json:"user_id"`
+	Name        string         `json:"name"`
+	StorageKey  sql.NullString `json:"storage_key"`
+	ContentType string         `json:"content_type"`
+	SizeBytes   int64          `json:"size_bytes"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	ParentID    sql.NullInt64  `json:"parent_id"`
 }
 
 type Permission struct {

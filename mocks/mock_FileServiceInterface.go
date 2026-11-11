@@ -48,9 +48,163 @@ func (_m *MockFileServiceInterface) EXPECT() *MockFileServiceInterface_Expecter 
 	return &MockFileServiceInterface_Expecter{mock: &_m.Mock}
 }
 
+// CreateFolder provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) CreateFolder(ctx context.Context, userID int64, parentID int64, name string) (*file.File, error) {
+	ret := _mock.Called(ctx, userID, parentID, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateFolder")
+	}
+
+	var r0 *file.File
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string) (*file.File, error)); ok {
+		return returnFunc(ctx, userID, parentID, name)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string) *file.File); ok {
+		r0 = returnFunc(ctx, userID, parentID, name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.File)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, string) error); ok {
+		r1 = returnFunc(ctx, userID, parentID, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_CreateFolder_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateFolder'
+type MockFileServiceInterface_CreateFolder_Call struct {
+	*mock.Call
+}
+
+// CreateFolder is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - parentID int64
+//   - name string
+func (_e *MockFileServiceInterface_Expecter) CreateFolder(ctx any, userID any, parentID any, name any) *MockFileServiceInterface_CreateFolder_Call {
+	return &MockFileServiceInterface_CreateFolder_Call{Call: _e.mock.On("CreateFolder", ctx, userID, parentID, name)}
+}
+
+func (_c *MockFileServiceInterface_CreateFolder_Call) Run(run func(ctx context.Context, userID int64, parentID int64, name string)) *MockFileServiceInterface_CreateFolder_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CreateFolder_Call) Return(file1 *file.File, err error) *MockFileServiceInterface_CreateFolder_Call {
+	_c.Call.Return(file1, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string) (*file.File, error)) *MockFileServiceInterface_CreateFolder_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FolderPath provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) FolderPath(ctx context.Context, userID int64, folderID int64) (*file.FolderPath, error) {
+	ret := _mock.Called(ctx, userID, folderID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FolderPath")
+	}
+
+	var r0 *file.FolderPath
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.FolderPath, error)); ok {
+		return returnFunc(ctx, userID, folderID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.FolderPath); ok {
+		r0 = returnFunc(ctx, userID, folderID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.FolderPath)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+		r1 = returnFunc(ctx, userID, folderID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_FolderPath_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FolderPath'
+type MockFileServiceInterface_FolderPath_Call struct {
+	*mock.Call
+}
+
+// FolderPath is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - folderID int64
+func (_e *MockFileServiceInterface_Expecter) FolderPath(ctx any, userID any, folderID any) *MockFileServiceInterface_FolderPath_Call {
+	return &MockFileServiceInterface_FolderPath_Call{Call: _e.mock.On("FolderPath", ctx, userID, folderID)}
+}
+
+func (_c *MockFileServiceInterface_FolderPath_Call) Run(run func(ctx context.Context, userID int64, folderID int64)) *MockFileServiceInterface_FolderPath_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_FolderPath_Call) Return(folderPath *file.FolderPath, err error) *MockFileServiceInterface_FolderPath_Call {
+	_c.Call.Return(folderPath, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_FolderPath_Call) RunAndReturn(run func(ctx context.Context, userID int64, folderID int64) (*file.FolderPath, error)) *MockFileServiceInterface_FolderPath_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // List provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, page int, pageSize int) (*file.PaginatedFiles, error) {
-	ret := _mock.Called(ctx, userID, page, pageSize)
+func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error) {
+	ret := _mock.Called(ctx, userID, parentID, page, pageSize)
 
 	if len(ret) == 0 {
 		panic("no return value specified for List")
@@ -58,18 +212,18 @@ func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, p
 
 	var r0 *file.PaginatedFiles
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int, int) (*file.PaginatedFiles, error)); ok {
-		return returnFunc(ctx, userID, page, pageSize)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, int, int) (*file.PaginatedFiles, error)); ok {
+		return returnFunc(ctx, userID, parentID, page, pageSize)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int, int) *file.PaginatedFiles); ok {
-		r0 = returnFunc(ctx, userID, page, pageSize)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, int, int) *file.PaginatedFiles); ok {
+		r0 = returnFunc(ctx, userID, parentID, page, pageSize)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*file.PaginatedFiles)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int, int) error); ok {
-		r1 = returnFunc(ctx, userID, page, pageSize)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, int, int) error); ok {
+		r1 = returnFunc(ctx, userID, parentID, page, pageSize)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -84,13 +238,14 @@ type MockFileServiceInterface_List_Call struct {
 // List is a helper method to define mock.On call
 //   - ctx context.Context
 //   - userID int64
+//   - parentID int64
 //   - page int
 //   - pageSize int
-func (_e *MockFileServiceInterface_Expecter) List(ctx any, userID any, page any, pageSize any) *MockFileServiceInterface_List_Call {
-	return &MockFileServiceInterface_List_Call{Call: _e.mock.On("List", ctx, userID, page, pageSize)}
+func (_e *MockFileServiceInterface_Expecter) List(ctx any, userID any, parentID any, page any, pageSize any) *MockFileServiceInterface_List_Call {
+	return &MockFileServiceInterface_List_Call{Call: _e.mock.On("List", ctx, userID, parentID, page, pageSize)}
 }
 
-func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, userID int64, page int, pageSize int)) *MockFileServiceInterface_List_Call {
+func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, userID int64, parentID int64, page int, pageSize int)) *MockFileServiceInterface_List_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -100,19 +255,24 @@ func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, 
 		if args[1] != nil {
 			arg1 = args[1].(int64)
 		}
-		var arg2 int
+		var arg2 int64
 		if args[2] != nil {
-			arg2 = args[2].(int)
+			arg2 = args[2].(int64)
 		}
 		var arg3 int
 		if args[3] != nil {
 			arg3 = args[3].(int)
+		}
+		var arg4 int
+		if args[4] != nil {
+			arg4 = args[4].(int)
 		}
 		run(
 			arg0,
 			arg1,
 			arg2,
 			arg3,
+			arg4,
 		)
 	})
 	return _c
@@ -123,14 +283,14 @@ func (_c *MockFileServiceInterface_List_Call) Return(paginatedFiles *file.Pagina
 	return _c
 }
 
-func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, page int, pageSize int) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
+func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Upload provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) Upload(ctx context.Context, userID int64, name string, src io.Reader) (*file.File, error) {
-	ret := _mock.Called(ctx, userID, name, src)
+func (_mock *MockFileServiceInterface) Upload(ctx context.Context, userID int64, parentID int64, name string, src io.Reader) (*file.File, error) {
+	ret := _mock.Called(ctx, userID, parentID, name, src)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Upload")
@@ -138,18 +298,18 @@ func (_mock *MockFileServiceInterface) Upload(ctx context.Context, userID int64,
 
 	var r0 *file.File
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, string, io.Reader) (*file.File, error)); ok {
-		return returnFunc(ctx, userID, name, src)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, io.Reader) (*file.File, error)); ok {
+		return returnFunc(ctx, userID, parentID, name, src)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, string, io.Reader) *file.File); ok {
-		r0 = returnFunc(ctx, userID, name, src)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, io.Reader) *file.File); ok {
+		r0 = returnFunc(ctx, userID, parentID, name, src)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*file.File)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, string, io.Reader) error); ok {
-		r1 = returnFunc(ctx, userID, name, src)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, string, io.Reader) error); ok {
+		r1 = returnFunc(ctx, userID, parentID, name, src)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -164,13 +324,14 @@ type MockFileServiceInterface_Upload_Call struct {
 // Upload is a helper method to define mock.On call
 //   - ctx context.Context
 //   - userID int64
+//   - parentID int64
 //   - name string
 //   - src io.Reader
-func (_e *MockFileServiceInterface_Expecter) Upload(ctx any, userID any, name any, src any) *MockFileServiceInterface_Upload_Call {
-	return &MockFileServiceInterface_Upload_Call{Call: _e.mock.On("Upload", ctx, userID, name, src)}
+func (_e *MockFileServiceInterface_Expecter) Upload(ctx any, userID any, parentID any, name any, src any) *MockFileServiceInterface_Upload_Call {
+	return &MockFileServiceInterface_Upload_Call{Call: _e.mock.On("Upload", ctx, userID, parentID, name, src)}
 }
 
-func (_c *MockFileServiceInterface_Upload_Call) Run(run func(ctx context.Context, userID int64, name string, src io.Reader)) *MockFileServiceInterface_Upload_Call {
+func (_c *MockFileServiceInterface_Upload_Call) Run(run func(ctx context.Context, userID int64, parentID int64, name string, src io.Reader)) *MockFileServiceInterface_Upload_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -180,19 +341,24 @@ func (_c *MockFileServiceInterface_Upload_Call) Run(run func(ctx context.Context
 		if args[1] != nil {
 			arg1 = args[1].(int64)
 		}
-		var arg2 string
+		var arg2 int64
 		if args[2] != nil {
-			arg2 = args[2].(string)
+			arg2 = args[2].(int64)
 		}
-		var arg3 io.Reader
+		var arg3 string
 		if args[3] != nil {
-			arg3 = args[3].(io.Reader)
+			arg3 = args[3].(string)
+		}
+		var arg4 io.Reader
+		if args[4] != nil {
+			arg4 = args[4].(io.Reader)
 		}
 		run(
 			arg0,
 			arg1,
 			arg2,
 			arg3,
+			arg4,
 		)
 	})
 	return _c
@@ -203,7 +369,7 @@ func (_c *MockFileServiceInterface_Upload_Call) Return(file1 *file.File, err err
 	return _c
 }
 
-func (_c *MockFileServiceInterface_Upload_Call) RunAndReturn(run func(ctx context.Context, userID int64, name string, src io.Reader) (*file.File, error)) *MockFileServiceInterface_Upload_Call {
+func (_c *MockFileServiceInterface_Upload_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string, src io.Reader) (*file.File, error)) *MockFileServiceInterface_Upload_Call {
 	_c.Call.Return(run)
 	return _c
 }

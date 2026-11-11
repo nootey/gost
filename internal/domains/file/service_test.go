@@ -5,6 +5,7 @@ package file_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"gost/internal/apperr"
 	"gost/internal/database"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -31,10 +33,12 @@ func TestIntegrationFileServiceTestSuite(t *testing.T) {
 func (s *FileServiceTestSuite) TestUpload_StoresFileAndRecord() {
 	userID := s.seedUser()
 
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, "notes.txt", strings.NewReader("hello world"))
+	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "notes.txt", strings.NewReader("hello world"))
 
 	s.Require().NoError(err)
 	s.Equal("notes.txt", f.Name)
+	s.False(f.IsFolder)
+	s.Nil(f.ParentID)
 	s.Equal(int64(11), f.SizeBytes)
 	s.Equal("text/plain; charset=utf-8", f.ContentType)
 
@@ -54,7 +58,7 @@ func (s *FileServiceTestSuite) TestUpload_StoresFileAndRecord() {
 func (s *FileServiceTestSuite) TestUpload_AtLimit() {
 	userID := s.seedUser()
 
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, "exact.bin", bytes.NewReader(make([]byte, 1<<20)))
+	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "exact.bin", bytes.NewReader(make([]byte, 1<<20)))
 
 	s.Require().NoError(err)
 	s.Equal(int64(1<<20), f.SizeBytes)
@@ -64,7 +68,7 @@ func (s *FileServiceTestSuite) TestUpload_TooLargeLeavesNothingBehind() {
 	userID := s.seedUser()
 	before := s.dirEntries()
 
-	_, err := s.TC.Services.FileService.Upload(context.Background(), userID, "big.bin", bytes.NewReader(make([]byte, 1<<20+1)))
+	_, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "big.bin", bytes.NewReader(make([]byte, 1<<20+1)))
 
 	status, msg := apperr.Resolve(err)
 	s.Equal(http.StatusRequestEntityTooLarge, status)
@@ -83,13 +87,16 @@ func (s *FileServiceTestSuite) TestUpload_RejectsBadInput() {
 		message string
 	}{
 		{"", "x", "file name is required"},
+		{"   ", "x", "file name is required"},
 		{"bad\xffname.txt", "x", "file name has invalid characters"},
 		{"nul\x00.txt", "x", "file name has invalid characters"},
+		{"a/b.txt", "x", "file name has invalid characters"},
+		{"..", "x", "file name has invalid characters"},
 		{strings.Repeat("a", 256), "x", "file name is too long"},
 		{"empty.txt", "", "file is empty"},
 	}
 	for _, tc := range cases {
-		_, err := svc.Upload(context.Background(), userID, tc.name, strings.NewReader(tc.content))
+		_, err := svc.Upload(context.Background(), userID, 0, tc.name, strings.NewReader(tc.content))
 
 		status, msg := apperr.Resolve(err)
 		s.Equal(http.StatusBadRequest, status, tc.message)
@@ -105,13 +112,13 @@ func (s *FileServiceTestSuite) TestList_OnlyOwnFiles() {
 	s.seedFile(alice, "alice-2.txt")
 	s.seedFile(bob, "bob-1.txt")
 
-	result, err := s.TC.Services.FileService.List(context.Background(), alice, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), alice, 0, 1, 10)
 
 	s.Require().NoError(err)
 	s.Equal(2, result.Total)
 	s.Equal([]string{"alice-2.txt", "alice-1.txt"}, fileNames(result.Data))
 
-	result, err = s.TC.Services.FileService.List(context.Background(), bob, 1, 10)
+	result, err = s.TC.Services.FileService.List(context.Background(), bob, 0, 1, 10)
 
 	s.Require().NoError(err)
 	s.Equal(1, result.Total)
@@ -129,7 +136,7 @@ func (s *FileServiceTestSuite) TestList_NewestFirst() {
 		`UPDATE files SET created_at = NOW() + INTERVAL '1 hour' WHERE id = $1`, first)
 	s.Require().NoError(err)
 
-	result, err := s.TC.Services.FileService.List(context.Background(), userID, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, 0, 1, 10)
 
 	s.Require().NoError(err)
 	s.Equal([]string{"a.txt", "c.txt", "b.txt"}, fileNames(result.Data))
@@ -142,14 +149,14 @@ func (s *FileServiceTestSuite) TestList_Pagination() {
 	}
 	svc := s.TC.Services.FileService
 
-	second, err := svc.List(context.Background(), userID, 2, 2)
+	second, err := svc.List(context.Background(), userID, 0, 2, 2)
 
 	s.Require().NoError(err)
 	s.Equal([]string{"file-3.txt", "file-2.txt"}, fileNames(second.Data))
 	s.Equal(5, second.Total)
 	s.Equal(3, second.TotalPages)
 
-	last, err := svc.List(context.Background(), userID, 3, 2)
+	last, err := svc.List(context.Background(), userID, 0, 3, 2)
 
 	s.Require().NoError(err)
 	s.Equal([]string{"file-1.txt"}, fileNames(last.Data))
@@ -169,7 +176,7 @@ func (s *FileServiceTestSuite) TestList_ClampsPageValues() {
 		{math.MaxInt, 20, math.MaxInt32 / 20, 20},
 	}
 	for _, tc := range cases {
-		result, err := svc.List(context.Background(), userID, tc.page, tc.pageSize)
+		result, err := svc.List(context.Background(), userID, 0, tc.page, tc.pageSize)
 
 		s.Require().NoError(err)
 		s.Equal(tc.wantPage, result.Page)
@@ -178,6 +185,270 @@ func (s *FileServiceTestSuite) TestList_ClampsPageValues() {
 		s.NotNil(result.Data)
 		s.Empty(result.Data)
 	}
+}
+
+func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	folder := s.createFolder(userID, 0, "Docs")
+
+	f, err := svc.Upload(context.Background(), userID, folder.ID, "notes.txt", strings.NewReader("hello"))
+
+	s.Require().NoError(err)
+	s.Require().NotNil(f.ParentID)
+	s.Equal(folder.ID, *f.ParentID)
+
+	inFolder, err := svc.List(context.Background(), userID, folder.ID, 1, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"notes.txt"}, fileNames(inFolder.Data))
+
+	atRoot, err := svc.List(context.Background(), userID, 0, 1, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"Docs"}, fileNames(atRoot.Data))
+}
+
+func (s *FileServiceTestSuite) TestUpload_UnknownFolderLeavesNothingBehind() {
+	userID := s.seedUser()
+	before := s.dirEntries()
+
+	_, err := s.TC.Services.FileService.Upload(context.Background(), userID, 999, "a.txt", strings.NewReader("x"))
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("folder not found", msg)
+	s.Equal(before, s.dirEntries())
+	s.Equal(0, s.fileRows())
+}
+
+func (s *FileServiceTestSuite) TestUpload_RenamesOnClash() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	cases := []struct{ name, want string }{
+		{"a.txt", "a.txt"},
+		{"a.txt", "a (1).txt"},
+		{"a.txt", "a (2).txt"},
+		{".env", ".env"},
+		{".env", ".env (1)"},
+		{"archive.tar.gz", "archive.tar.gz"},
+		{"archive.tar.gz", "archive.tar (1).gz"},
+	}
+	for _, tc := range cases {
+		f, err := svc.Upload(context.Background(), userID, 0, tc.name, strings.NewReader("x"))
+
+		s.Require().NoError(err)
+		s.Equal(tc.want, f.Name)
+	}
+}
+
+// The lowest free number wins, so a gap left by a missing copy is filled first.
+func (s *FileServiceTestSuite) TestUpload_RenameFillsGaps() {
+	userID := s.seedUser()
+	s.seedFile(userID, "b.txt")
+	s.seedFile(userID, "b (2).txt")
+
+	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "b.txt", strings.NewReader("x"))
+
+	s.Require().NoError(err)
+	s.Equal("b (1).txt", f.Name)
+}
+
+func (s *FileServiceTestSuite) TestCreateFolder_AtRootAndNested() {
+	userID := s.seedUser()
+
+	photos := s.createFolder(userID, 0, "Photos")
+	s.True(photos.IsFolder)
+	s.Nil(photos.ParentID)
+	s.Equal(int64(0), photos.SizeBytes)
+
+	year := s.createFolder(userID, photos.ID, "2026")
+	s.Require().NotNil(year.ParentID)
+	s.Equal(photos.ID, *year.ParentID)
+
+	var key sql.NullString
+	err := s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT storage_key FROM files WHERE id = $1`, year.ID).Scan(&key)
+	s.Require().NoError(err)
+	s.False(key.Valid)
+}
+
+func (s *FileServiceTestSuite) TestCreateFolder_TrimsName() {
+	userID := s.seedUser()
+
+	f := s.createFolder(userID, 0, "  Photos  ")
+
+	s.Equal("Photos", f.Name)
+}
+
+func (s *FileServiceTestSuite) TestCreateFolder_RejectsBadNames() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	cases := []struct{ name, message string }{
+		{"", "folder name is required"},
+		{"   ", "folder name is required"},
+		{"a/b", "folder name has invalid characters"},
+		{".", "folder name has invalid characters"},
+		{"..", "folder name has invalid characters"},
+		{"nul\x00", "folder name has invalid characters"},
+		{strings.Repeat("a", 256), "folder name is too long"},
+	}
+	for _, tc := range cases {
+		_, err := svc.CreateFolder(context.Background(), userID, 0, tc.name)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+	s.Equal(0, s.fileRows())
+}
+
+// A parent must be a folder the user owns: unknown ids, files and other users' folders all fail the same way.
+func (s *FileServiceTestSuite) TestCreateFolder_UnknownParent() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	aliceFile := s.seedFile(alice, "a.txt")
+	bobFolder := s.createFolder(bob, 0, "Bob")
+
+	for _, parentID := range []int64{999, -1, aliceFile, bobFolder.ID} {
+		_, err := s.TC.Services.FileService.CreateFolder(context.Background(), alice, parentID, "New")
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, parentID)
+		s.Equal("folder not found", msg)
+	}
+}
+
+// Folders and files share one set of names in a folder. A folder has no extension, so the number goes at the end.
+func (s *FileServiceTestSuite) TestCreateFolder_RenamesOnClash() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	s.seedFile(userID, "a.txt")
+
+	s.Equal("Photos", s.createFolder(userID, 0, "Photos").Name)
+	s.Equal("Photos (1)", s.createFolder(userID, 0, "Photos").Name)
+	s.Equal("a.txt (1)", s.createFolder(userID, 0, "a.txt").Name)
+
+	f, err := svc.Upload(context.Background(), userID, 0, "Photos", strings.NewReader("x"))
+	s.Require().NoError(err)
+	s.Equal("Photos (2)", f.Name)
+}
+
+// Names only clash inside one folder of one user.
+func (s *FileServiceTestSuite) TestCreateFolder_SameNameElsewhere() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+
+	parent := s.createFolder(alice, 0, "Photos")
+	s.Equal("Photos", s.createFolder(alice, parent.ID, "Photos").Name)
+	s.Equal("Photos", s.createFolder(bob, 0, "Photos").Name)
+}
+
+func (s *FileServiceTestSuite) TestCreateFolder_NoRoomForNumber() {
+	userID := s.seedUser()
+	name := strings.Repeat("a", 255)
+	s.createFolder(userID, 0, name)
+
+	_, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, 0, name)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("folder name is too long", msg)
+}
+
+// Parallel creates all pick the same free name first; the losers must retry and get the next one.
+func (s *FileServiceTestSuite) TestCreateFolder_ParallelClash() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	const n = 3
+	names := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			f, err := svc.CreateFolder(context.Background(), userID, 0, "Shared")
+			errs[i] = err
+			if err == nil {
+				names[i] = f.Name
+			}
+		})
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		s.Require().NoError(err)
+	}
+	s.ElementsMatch([]string{"Shared", "Shared (1)", "Shared (2)"}, names)
+}
+
+func (s *FileServiceTestSuite) TestList_FoldersFirst() {
+	userID := s.seedUser()
+	s.seedFile(userID, "z.txt")
+	s.createFolder(userID, 0, "B")
+	s.seedFile(userID, "y.txt")
+	s.createFolder(userID, 0, "A")
+
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, 0, 1, 10)
+
+	s.Require().NoError(err)
+	s.Equal([]string{"A", "B", "y.txt", "z.txt"}, fileNames(result.Data))
+	s.Equal(4, result.Total)
+}
+
+func (s *FileServiceTestSuite) TestList_UnknownFolder() {
+	userID := s.seedUser()
+	fileID := s.seedFile(userID, "a.txt")
+
+	for _, parentID := range []int64{999, fileID} {
+		_, err := s.TC.Services.FileService.List(context.Background(), userID, parentID, 1, 10)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, parentID)
+		s.Equal("folder not found", msg)
+	}
+}
+
+func (s *FileServiceTestSuite) TestFolderPath_RootFirst() {
+	userID := s.seedUser()
+	photos := s.createFolder(userID, 0, "Photos")
+	year := s.createFolder(userID, photos.ID, "2026")
+	trip := s.createFolder(userID, year.ID, "Trip")
+	svc := s.TC.Services.FileService
+
+	result, err := svc.FolderPath(context.Background(), userID, trip.ID)
+
+	s.Require().NoError(err)
+	s.Require().Len(result.Path, 3)
+	s.Equal([]int64{photos.ID, year.ID, trip.ID}, []int64{result.Path[0].ID, result.Path[1].ID, result.Path[2].ID})
+	s.Equal([]string{"Photos", "2026", "Trip"}, []string{result.Path[0].Name, result.Path[1].Name, result.Path[2].Name})
+
+	top, err := svc.FolderPath(context.Background(), userID, photos.ID)
+
+	s.Require().NoError(err)
+	s.Require().Len(top.Path, 1)
+	s.Equal("Photos", top.Path[0].Name)
+}
+
+func (s *FileServiceTestSuite) TestFolderPath_UnknownFolder() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	aliceFile := s.seedFile(alice, "a.txt")
+	bobFolder := s.createFolder(bob, 0, "Bob")
+
+	for _, folderID := range []int64{999, aliceFile, bobFolder.ID} {
+		_, err := s.TC.Services.FileService.FolderPath(context.Background(), alice, folderID)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, folderID)
+		s.Equal("folder not found", msg)
+	}
+}
+
+func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
+	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
+	s.Require().NoError(err)
+	return f
 }
 
 func (s *FileServiceTestSuite) seedUser() int64 {
@@ -202,7 +473,7 @@ func (s *FileServiceTestSuite) seedFile(userID int64, name string) int64 {
 	f, err := s.TC.Queries.CreateFile(context.Background(), database.CreateFileParams{
 		UserID:      userID,
 		Name:        name,
-		StorageKey:  fmt.Sprintf("%d-%s", userID, name),
+		StorageKey:  sql.NullString{String: fmt.Sprintf("%d-%s", userID, name), Valid: true},
 		ContentType: "text/plain; charset=utf-8",
 		SizeBytes:   1,
 	})

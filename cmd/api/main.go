@@ -205,6 +205,8 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 
 				r.Mount("/users", h.User.Routes())
 				r.Get("/files", h.File.List)
+				r.Post("/folders", h.File.CreateFolder)
+				r.Get("/folders/{id}/path", h.File.FolderPath)
 				// Mount more protected handlers as needed
 			})
 		})
