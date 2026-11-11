@@ -27,12 +27,6 @@ const routes: RouteRecordRaw[] = [
         component: Dashboard,
     },
     {
-        path: "/folders/:id(\\d+)",
-        name: "folder",
-        meta: { title: "Files", requiresAuth: true },
-        component: Dashboard,
-    },
-    {
         path: "/login",
         name: "login",
         meta: { title: "Login", guestOnly: true, hideNavigation: true },

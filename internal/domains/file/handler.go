@@ -55,20 +55,20 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusOK, result)
 }
 
-func (h *FileHandler) FolderPath(w http.ResponseWriter, r *http.Request) {
+func (h *FileHandler) ResolveFolder(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {
 		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
 		return
 	}
 
-	folderID, err := utils.URLParamID(r, "id")
+	names, err := utils.QueryDir(r, "dir")
 	if err != nil {
 		h.resp.Error(w, r, err)
 		return
 	}
 
-	result, err := h.service.FolderPath(r.Context(), userID, folderID)
+	result, err := h.service.ResolveFolder(r.Context(), userID, names)
 	if err != nil {
 		h.resp.Error(w, r, err)
 		return

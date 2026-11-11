@@ -128,80 +128,6 @@ func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx 
 	return _c
 }
 
-// FolderPath provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) FolderPath(ctx context.Context, userID int64, folderID int64) (*file.FolderPath, error) {
-	ret := _mock.Called(ctx, userID, folderID)
-
-	if len(ret) == 0 {
-		panic("no return value specified for FolderPath")
-	}
-
-	var r0 *file.FolderPath
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.FolderPath, error)); ok {
-		return returnFunc(ctx, userID, folderID)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.FolderPath); ok {
-		r0 = returnFunc(ctx, userID, folderID)
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*file.FolderPath)
-		}
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
-		r1 = returnFunc(ctx, userID, folderID)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockFileServiceInterface_FolderPath_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FolderPath'
-type MockFileServiceInterface_FolderPath_Call struct {
-	*mock.Call
-}
-
-// FolderPath is a helper method to define mock.On call
-//   - ctx context.Context
-//   - userID int64
-//   - folderID int64
-func (_e *MockFileServiceInterface_Expecter) FolderPath(ctx any, userID any, folderID any) *MockFileServiceInterface_FolderPath_Call {
-	return &MockFileServiceInterface_FolderPath_Call{Call: _e.mock.On("FolderPath", ctx, userID, folderID)}
-}
-
-func (_c *MockFileServiceInterface_FolderPath_Call) Run(run func(ctx context.Context, userID int64, folderID int64)) *MockFileServiceInterface_FolderPath_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 int64
-		if args[1] != nil {
-			arg1 = args[1].(int64)
-		}
-		var arg2 int64
-		if args[2] != nil {
-			arg2 = args[2].(int64)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-		)
-	})
-	return _c
-}
-
-func (_c *MockFileServiceInterface_FolderPath_Call) Return(folderPath *file.FolderPath, err error) *MockFileServiceInterface_FolderPath_Call {
-	_c.Call.Return(folderPath, err)
-	return _c
-}
-
-func (_c *MockFileServiceInterface_FolderPath_Call) RunAndReturn(run func(ctx context.Context, userID int64, folderID int64) (*file.FolderPath, error)) *MockFileServiceInterface_FolderPath_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // List provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error) {
 	ret := _mock.Called(ctx, userID, parentID, page, pageSize)
@@ -284,6 +210,80 @@ func (_c *MockFileServiceInterface_List_Call) Return(paginatedFiles *file.Pagina
 }
 
 func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ResolveFolder provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) ResolveFolder(ctx context.Context, userID int64, names []string) (*file.FolderPath, error) {
+	ret := _mock.Called(ctx, userID, names)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ResolveFolder")
+	}
+
+	var r0 *file.FolderPath
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []string) (*file.FolderPath, error)); ok {
+		return returnFunc(ctx, userID, names)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []string) *file.FolderPath); ok {
+		r0 = returnFunc(ctx, userID, names)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.FolderPath)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, []string) error); ok {
+		r1 = returnFunc(ctx, userID, names)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_ResolveFolder_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ResolveFolder'
+type MockFileServiceInterface_ResolveFolder_Call struct {
+	*mock.Call
+}
+
+// ResolveFolder is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - names []string
+func (_e *MockFileServiceInterface_Expecter) ResolveFolder(ctx any, userID any, names any) *MockFileServiceInterface_ResolveFolder_Call {
+	return &MockFileServiceInterface_ResolveFolder_Call{Call: _e.mock.On("ResolveFolder", ctx, userID, names)}
+}
+
+func (_c *MockFileServiceInterface_ResolveFolder_Call) Run(run func(ctx context.Context, userID int64, names []string)) *MockFileServiceInterface_ResolveFolder_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []string
+		if args[2] != nil {
+			arg2 = args[2].([]string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ResolveFolder_Call) Return(folderPath *file.FolderPath, err error) *MockFileServiceInterface_ResolveFolder_Call {
+	_c.Call.Return(folderPath, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ResolveFolder_Call) RunAndReturn(run func(ctx context.Context, userID int64, names []string) (*file.FolderPath, error)) *MockFileServiceInterface_ResolveFolder_Call {
 	_c.Call.Return(run)
 	return _c
 }

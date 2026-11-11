@@ -36,8 +36,8 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
-        async folderPath(folderId: number): Promise<FolderPath> {
-            const response = await apiClient.get<FolderPath>(`${this.folderPrefix}/${folderId}/path`);
+        async resolveFolder(dir: string): Promise<FolderPath> {
+            const response = await apiClient.get<FolderPath>(`${this.folderPrefix}/resolve`, { params: { dir } });
             return response.data;
         },
     },

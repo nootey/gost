@@ -25,10 +25,11 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error)
-	// Returns the folder and its parents, root first. Empty when the folder is not one of the user's.
-	ListFolderPath(ctx context.Context, arg ListFolderPathParams) ([]ListFolderPathRow, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error)
+	// Walks folder names down from the root and returns each folder it finds, root first.
+	// Fewer rows than names means the path does not exist.
+	ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 }
 

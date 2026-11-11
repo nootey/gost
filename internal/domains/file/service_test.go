@@ -409,39 +409,47 @@ func (s *FileServiceTestSuite) TestList_UnknownFolder() {
 	}
 }
 
-func (s *FileServiceTestSuite) TestFolderPath_RootFirst() {
+func (s *FileServiceTestSuite) TestResolveFolder_RootFirst() {
 	userID := s.seedUser()
-	photos := s.createFolder(userID, 0, "Photos")
-	year := s.createFolder(userID, photos.ID, "2026")
-	trip := s.createFolder(userID, year.ID, "Trip")
-	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "My Photos")
+	cars := s.createFolder(userID, photos.ID, "Cars")
 
-	result, err := svc.FolderPath(context.Background(), userID, trip.ID)
+	result, err := s.TC.Services.FileService.ResolveFolder(context.Background(), userID, []string{"My Photos", "Cars"})
 
 	s.Require().NoError(err)
-	s.Require().Len(result.Path, 3)
-	s.Equal([]int64{photos.ID, year.ID, trip.ID}, []int64{result.Path[0].ID, result.Path[1].ID, result.Path[2].ID})
-	s.Equal([]string{"Photos", "2026", "Trip"}, []string{result.Path[0].Name, result.Path[1].Name, result.Path[2].Name})
-
-	top, err := svc.FolderPath(context.Background(), userID, photos.ID)
-
-	s.Require().NoError(err)
-	s.Require().Len(top.Path, 1)
-	s.Equal("Photos", top.Path[0].Name)
+	s.Require().Len(result.Path, 2)
+	s.Equal([]int64{photos.ID, cars.ID}, []int64{result.Path[0].ID, result.Path[1].ID})
+	s.Equal([]string{"My Photos", "Cars"}, []string{result.Path[0].Name, result.Path[1].Name})
 }
 
-func (s *FileServiceTestSuite) TestFolderPath_UnknownFolder() {
+func (s *FileServiceTestSuite) TestResolveFolder_Root() {
+	userID := s.seedUser()
+	s.createFolder(userID, 0, "Photos")
+
+	for _, names := range [][]string{nil, {}} {
+		result, err := s.TC.Services.FileService.ResolveFolder(context.Background(), userID, names)
+
+		s.Require().NoError(err, names)
+		s.NotNil(result.Path, names)
+		s.Empty(result.Path, names)
+	}
+}
+
+// Wrong case, a missing level, a file and another user's folder all fail the same way.
+func (s *FileServiceTestSuite) TestResolveFolder_UnknownFolder() {
 	alice := s.seedUserWithEmail("alice@example.com")
 	bob := s.seedUserWithEmail("bob@example.com")
-	aliceFile := s.seedFile(alice, "a.txt")
-	bobFolder := s.createFolder(bob, 0, "Bob")
+	photos := s.createFolder(alice, 0, "Photos")
+	s.createFolder(alice, photos.ID, "Cars")
+	s.seedFile(alice, "a.txt")
+	s.createFolder(bob, 0, "Bob")
 
-	for _, folderID := range []int64{999, aliceFile, bobFolder.ID} {
-		_, err := s.TC.Services.FileService.FolderPath(context.Background(), alice, folderID)
+	for _, names := range [][]string{{"photos"}, {"Cars"}, {"Photos", "Cars", "Old"}, {"a.txt"}, {"Bob"}} {
+		_, err := s.TC.Services.FileService.ResolveFolder(context.Background(), alice, names)
 
 		status, msg := apperr.Resolve(err)
-		s.Equal(http.StatusNotFound, status, folderID)
-		s.Equal("folder not found", msg)
+		s.Equal(http.StatusNotFound, status, names)
+		s.Equal("folder not found", msg, names)
 	}
 }
 

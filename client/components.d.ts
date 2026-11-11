@@ -17,6 +17,7 @@ declare module 'vue' {
     Checkbox: typeof import('primevue/checkbox')['default']
     Column: typeof import('primevue/column')['default']
     ConfirmDialog: typeof import('primevue/confirmdialog')['default']
+    ContextMenu: typeof import('primevue/contextmenu')['default']
     DataTable: typeof import('primevue/datatable')['default']
     Dialog: typeof import('primevue/dialog')['default']
     FileUpload: typeof import('primevue/fileupload')['default']

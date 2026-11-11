@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files", suite.handler.List)
 	suite.router.Post("/files", suite.handler.Upload)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
-	suite.router.Get("/folders/{id}/path", suite.handler.FolderPath)
+	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -353,8 +354,8 @@ func (suite *FileHandlerTestSuite) TestCreateFolder_ServiceError() {
 	suite.Equal("folder not found", suite.errorMessage(w))
 }
 
-func (suite *FileHandlerTestSuite) folderPath(id string, authenticated bool) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/folders/"+id+"/path", nil)
+func (suite *FileHandlerTestSuite) resolveFolder(dir string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/folders/resolve?"+url.Values{"dir": {dir}}.Encode(), nil)
 	if authenticated {
 		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
 	}
@@ -363,44 +364,58 @@ func (suite *FileHandlerTestSuite) folderPath(id string, authenticated bool) *ht
 	return w
 }
 
-func (suite *FileHandlerTestSuite) TestFolderPath_Success() {
+// The names reach the service decoded, spaces and all. Slashes at either end are optional.
+func (suite *FileHandlerTestSuite) TestResolveFolder_Success() {
 	suite.mockService.EXPECT().
-		FolderPath(mock.Anything, testUserID, int64(7)).
-		Return(&file.FolderPath{Path: []*file.PathEntry{{ID: 3, Name: "Photos"}, {ID: 7, Name: "2026"}}}, nil).
-		Once()
+		ResolveFolder(mock.Anything, testUserID, []string{"My Photos", "Cars & Bikes"}).
+		Return(&file.FolderPath{Path: []*file.PathEntry{{ID: 3, Name: "My Photos"}, {ID: 7, Name: "Cars & Bikes"}}}, nil).
+		Twice()
 
-	w := suite.folderPath("7", true)
+	for _, dir := range []string{"/My Photos/Cars & Bikes", "My Photos/Cars & Bikes/"} {
+		w := suite.resolveFolder(dir, true)
 
-	suite.Equal(http.StatusOK, w.Code)
-	var resp file.FolderPath
-	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
-	suite.Require().Len(resp.Path, 2)
-	suite.Equal("Photos", resp.Path[0].Name)
-	suite.Equal(int64(7), resp.Path[1].ID)
-}
-
-func (suite *FileHandlerTestSuite) TestFolderPath_InvalidID() {
-	for _, id := range []string{"abc", "0", "-3"} {
-		w := suite.folderPath(id, true)
-
-		suite.Equal(http.StatusBadRequest, w.Code, id)
-		suite.Equal("invalid id", suite.errorMessage(w), id)
+		suite.Equal(http.StatusOK, w.Code, dir)
+		var resp file.FolderPath
+		suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp), dir)
+		suite.Require().Len(resp.Path, 2, dir)
+		suite.Equal("My Photos", resp.Path[0].Name, dir)
+		suite.Equal(int64(7), resp.Path[1].ID, dir)
 	}
 }
 
-func (suite *FileHandlerTestSuite) TestFolderPath_Unauthenticated() {
-	w := suite.folderPath("7", false)
+func (suite *FileHandlerTestSuite) TestResolveFolder_Root() {
+	suite.mockService.EXPECT().
+		ResolveFolder(mock.Anything, testUserID, []string(nil)).
+		Return(&file.FolderPath{Path: []*file.PathEntry{}}, nil).
+		Twice()
+
+	for _, dir := range []string{"", "/"} {
+		suite.Equal(http.StatusOK, suite.resolveFolder(dir, true).Code, dir)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestResolveFolder_InvalidDir() {
+	for _, dir := range []string{"/Photos//Cars", "/Photos/./Cars", "/..", "/ ", "/" + strings.Repeat("a", 256)} {
+		w := suite.resolveFolder(dir, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, dir)
+		suite.Equal("invalid dir", suite.errorMessage(w), dir)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestResolveFolder_Unauthenticated() {
+	w := suite.resolveFolder("/Photos", false)
 
 	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
-func (suite *FileHandlerTestSuite) TestFolderPath_ServiceError() {
+func (suite *FileHandlerTestSuite) TestResolveFolder_ServiceError() {
 	suite.mockService.EXPECT().
-		FolderPath(mock.Anything, testUserID, int64(99)).
+		ResolveFolder(mock.Anything, testUserID, []string{"Nope"}).
 		Return(nil, apperr.New(apperr.KindNotFound, "folder not found")).
 		Once()
 
-	w := suite.folderPath("99", true)
+	w := suite.resolveFolder("/Nope", true)
 
 	suite.Equal(http.StatusNotFound, w.Code)
 	suite.Equal("folder not found", suite.errorMessage(w))

@@ -4,8 +4,7 @@ import (
 	"gost/internal/apperr"
 	"net/http"
 	"strconv"
-
-	"github.com/go-chi/chi/v5"
+	"strings"
 )
 
 // OptionalQueryID reads a positive id from the query string. A missing value is 0.
@@ -28,9 +27,20 @@ func OptionalBodyID(id *int64, key string) (int64, error) {
 	return *id, nil
 }
 
-// URLParamID reads a positive id from a chi route parameter such as {id}.
-func URLParamID(r *http.Request, key string) (int64, error) {
-	return parseID(chi.URLParam(r, key), key)
+// QueryDir reads a folder path such as "/Photos/Cars" from the query string as its names. The root has none.
+func QueryDir(r *http.Request, key string) ([]string, error) {
+	dir := strings.Trim(r.URL.Query().Get(key), "/")
+	if dir == "" {
+		return nil, nil
+	}
+
+	names := strings.Split(dir, "/")
+	for _, name := range names {
+		if ValidateName(name, FolderName) != nil {
+			return nil, apperr.New(apperr.KindInvalid, "invalid "+key)
+		}
+	}
+	return names, nil
 }
 
 func parseID(raw, key string) (int64, error) {

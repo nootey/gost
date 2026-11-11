@@ -4,7 +4,9 @@ import { useRouter } from "vue-router";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
-import type { DataTablePageEvent, DataTableRowClickEvent } from "primevue/datatable";
+import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
+import type { DataTablePageEvent, DataTableRowClickEvent, DataTableRowContextMenuEvent } from "primevue/datatable";
+import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
 import type { StoredFile } from "../models.ts";
 
@@ -24,7 +26,16 @@ const FOLDER_VIEW: ItemView = {
     row: "cursor-pointer",
 };
 
-const props = defineProps<{ folderId: number | null }>();
+const MENU_ITEMS: MenuItem[] = [
+    { label: "Add to favorites", icon: "pi pi-star" },
+    { label: "Rename", icon: "pi pi-pencil" },
+    { label: "Move", icon: "pi pi-arrow-right" },
+    { label: "Copy", icon: "pi pi-copy" },
+    { separator: true },
+    { label: "Delete", icon: "pi pi-trash", danger: true },
+];
+
+const props = defineProps<{ folderId: number | null; dir: string }>();
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
@@ -37,6 +48,9 @@ const loading = ref<boolean>(true);
 const page = ref<number>(1);
 const pageSize = ref<number>(rowOptions[0]);
 const total = ref<number>(0);
+
+const menuRef = ref<{ show: (event: Event) => void } | null>(null);
+const menuTarget = ref<StoredFile | undefined>();
 
 // Only the newest request may write the table, so a slow old page cannot replace a new one.
 let latestRequest = 0;
@@ -70,8 +84,8 @@ async function refresh(): Promise<void> {
     await getData();
 }
 
-function folderRoute(folder: StoredFile): RouteLocationRaw {
-    return { name: "folder", params: { id: folder.id } };
+function childRoute(folder: StoredFile): RouteLocationRaw {
+    return folderRoute(joinDir(props.dir, folder.name));
 }
 
 function itemView(item: StoredFile): ItemView {
@@ -93,7 +107,11 @@ function rowClass(item: StoredFile): string {
 async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<void> {
     if (!event.data.is_folder) return;
     if (event.originalEvent.target instanceof Element && event.originalEvent.target.closest("a")) return;
-    await router.push(folderRoute(event.data));
+    await router.push(childRoute(event.data));
+}
+
+function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
+    menuRef.value?.show(event.originalEvent);
 }
 
 onMounted(getData);
@@ -106,6 +124,7 @@ defineExpose({ refresh });
 <template>
     <div class="overflow-hidden rounded-2xl border border-edge bg-panel">
         <DataTable
+            v-model:context-menu-selection="menuTarget"
             :value="files"
             data-key="id"
             lazy
@@ -122,8 +141,10 @@ defineExpose({ refresh });
             current-page-report-template="{first}–{last} of {totalRecords}"
             table-class="table-fixed"
             :row-class="rowClass"
+            context-menu
             @page="onPage"
             @row-click="onRowClick"
+            @row-contextmenu="onRowContextMenu"
         >
             <template #empty>
                 <div class="flex flex-col items-center gap-1 py-8 text-center">
@@ -150,7 +171,7 @@ defineExpose({ refresh });
                         <div class="flex min-w-0 flex-col">
                             <router-link
                                 v-if="data.is_folder"
-                                :to="folderRoute(data)"
+                                :to="childRoute(data)"
                                 class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                 :title="data.name"
                             >
@@ -189,5 +210,14 @@ defineExpose({ refresh });
                 </template>
             </Column>
         </DataTable>
+
+        <ContextMenu ref="menuRef" :model="MENU_ITEMS" @hide="menuTarget = undefined">
+            <template #item="{ item, props: itemProps }">
+                <a v-bind="itemProps.action" :class="{ 'text-danger': item.danger }">
+                    <span v-bind="itemProps.icon" :class="{ 'text-danger': item.danger }" />
+                    <span v-bind="itemProps.label">{{ item.label }}</span>
+                </a>
+            </template>
+        </ContextMenu>
     </div>
 </template>

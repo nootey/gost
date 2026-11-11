@@ -30,7 +30,7 @@ type FileServiceInterface interface {
 	Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error)
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
 	List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error)
-	FolderPath(ctx context.Context, userID, folderID int64) (*FolderPath, error)
+	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 }
 
 var _ FileServiceInterface = (*FileService)(nil)
@@ -170,12 +170,16 @@ func (s *FileService) List(ctx context.Context, userID, parentID int64, page, pa
 	}, nil
 }
 
-func (s *FileService) FolderPath(ctx context.Context, userID, folderID int64) (*FolderPath, error) {
-	rows, err := s.queries.ListFolderPath(ctx, database.ListFolderPathParams{ID: folderID, UserID: userID})
+func (s *FileService) ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error) {
+	if len(names) == 0 {
+		return &FolderPath{Path: []*PathEntry{}}, nil
+	}
+
+	rows, err := s.queries.ResolveFolderPath(ctx, database.ResolveFolderPathParams{UserID: userID, Names: names})
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	if len(rows) < len(names) {
 		return nil, errFolderNotFound
 	}
 

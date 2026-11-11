@@ -8,6 +8,8 @@ package database
 import (
 	"context"
 	"database/sql"
+
+	"github.com/lib/pq"
 )
 
 const countFilesByParent = `-- name: CountFilesByParent :one
@@ -168,54 +170,6 @@ func (q *Queries) ListFilesByParentPaginated(ctx context.Context, arg ListFilesB
 	return items, nil
 }
 
-const listFolderPath = `-- name: ListFolderPath :many
-WITH RECURSIVE path AS (
-    SELECT files.id, files.parent_id, files.name, 0 AS depth
-    FROM files
-    WHERE files.id = $1 AND files.user_id = $2 AND files.storage_key IS NULL
-    UNION ALL
-    SELECT f.id, f.parent_id, f.name, path.depth + 1
-    FROM files f
-    JOIN path ON f.id = path.parent_id
-)
-SELECT id, name FROM path
-ORDER BY depth DESC
-`
-
-type ListFolderPathParams struct {
-	ID     int64 `json:"id"`
-	UserID int64 `json:"user_id"`
-}
-
-type ListFolderPathRow struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-}
-
-// Returns the folder and its parents, root first. Empty when the folder is not one of the user's.
-func (q *Queries) ListFolderPath(ctx context.Context, arg ListFolderPathParams) ([]ListFolderPathRow, error) {
-	rows, err := q.db.QueryContext(ctx, listFolderPath, arg.ID, arg.UserID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListFolderPathRow
-	for rows.Next() {
-		var i ListFolderPathRow
-		if err := rows.Scan(&i.ID, &i.Name); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listNamesByParentAndPrefix = `-- name: ListNamesByParentAndPrefix :many
 SELECT name FROM files
 WHERE user_id = $1
@@ -242,6 +196,61 @@ func (q *Queries) ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesB
 			return nil, err
 		}
 		items = append(items, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resolveFolderPath = `-- name: ResolveFolderPath :many
+WITH RECURSIVE path AS (
+    SELECT files.id, files.name, 1 AS depth
+    FROM files
+    WHERE files.user_id = $1
+      AND COALESCE(files.parent_id, 0) = 0
+      AND files.name = ($2::text[])[1]
+      AND files.storage_key IS NULL
+    UNION ALL
+    SELECT f.id, f.name, path.depth + 1
+    FROM files f
+    JOIN path ON COALESCE(f.parent_id, 0) = path.id
+    WHERE f.user_id = $1
+      AND f.name = ($2::text[])[path.depth + 1]
+      AND f.storage_key IS NULL
+)
+SELECT id, name FROM path
+ORDER BY depth
+`
+
+type ResolveFolderPathParams struct {
+	UserID int64    `json:"user_id"`
+	Names  []string `json:"names"`
+}
+
+type ResolveFolderPathRow struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// Walks folder names down from the root and returns each folder it finds, root first.
+// Fewer rows than names means the path does not exist.
+func (q *Queries) ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error) {
+	rows, err := q.db.QueryContext(ctx, resolveFolderPath, arg.UserID, pq.Array(arg.Names))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ResolveFolderPathRow
+	for rows.Next() {
+		var i ResolveFolderPathRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
