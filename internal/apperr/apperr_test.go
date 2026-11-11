@@ -19,6 +19,7 @@ func TestResolveKindStatus(t *testing.T) {
 		{KindForbidden, http.StatusForbidden},
 		{KindNotFound, http.StatusNotFound},
 		{KindConflict, http.StatusConflict},
+		{KindTooLarge, http.StatusRequestEntityTooLarge},
 	}
 
 	for _, c := range cases {

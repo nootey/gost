@@ -15,6 +15,7 @@ const (
 	KindForbidden
 	KindNotFound
 	KindConflict
+	KindTooLarge
 )
 
 const genericMessage = "something went wrong"
@@ -56,6 +57,8 @@ func statusFor(kind Kind) int {
 		return http.StatusNotFound
 	case KindConflict:
 		return http.StatusConflict
+	case KindTooLarge:
+		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusInternalServerError
 	}

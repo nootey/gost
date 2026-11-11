@@ -117,6 +117,11 @@ func (m *AuthMiddleware) respondUnauthorized(w http.ResponseWriter, message stri
 	}
 }
 
+// WithUserID stores userID in ctx, so tests can call handlers without the auth middleware.
+func WithUserID(ctx context.Context, userID int64) context.Context {
+	return context.WithValue(ctx, userIDKey, userID)
+}
+
 func GetUserID(r *http.Request) (int64, bool) {
 	userID, ok := r.Context().Value(userIDKey).(int64)
 	return userID, ok

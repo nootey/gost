@@ -1,4 +1,6 @@
-import "./pkg/style/global.scss";
+import "@fontsource-variable/figtree";
+import "primeicons/primeicons.css";
+import "./pkg/style/global.css";
 
 import { createApp } from "vue";
 import App from "./App.vue";
@@ -7,7 +9,7 @@ import { createPinia } from "pinia";
 
 // PrimeVue core + theme
 import PrimeVue from "primevue/config";
-import Material from "@primeuix/themes/material";
+import { GostPreset } from "./pkg/style/theme.ts";
 
 // PrimeVue services & directives
 import ConfirmationService from "primevue/confirmationservice";
@@ -22,11 +24,12 @@ app.use(createPinia());
 app.use(router);
 app.use(PrimeVue, {
     theme: {
-        preset: Material,
+        preset: GostPreset,
         options: {
             prefix: "p",
-            darkModeSelector: ".my-app-dark",
-            cssLayer: false,
+            darkModeSelector: ".app-dark",
+            // Must match the layer order declared in global.css.
+            cssLayer: { name: "primevue", order: "theme, base, primevue" },
         },
     },
     ripple: true,

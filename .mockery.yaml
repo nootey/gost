@@ -9,6 +9,9 @@ packages:
   gost/internal/domains/auth:
     interfaces:
       AuthServiceInterface:
+  gost/internal/domains/file:
+    interfaces:
+      FileServiceInterface:
   gost/internal/middleware:
     interfaces:
       AuthMiddlewareInterface:

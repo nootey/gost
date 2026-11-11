@@ -9,6 +9,8 @@ import ConfirmEmail from "../../domains/auth/pages/ConfirmEmail.vue";
 
 declare module "vue-router" {
     interface RouteMeta {
+        title?: string;
+        hideNavigation?: boolean;
         requiresAuth?: boolean;
         guestOnly?: boolean;
         emailConfirmed?: boolean;
@@ -21,7 +23,7 @@ const routes: RouteRecordRaw[] = [
     {
         path: "/",
         name: "dashboard",
-        meta: { title: "Dash", requiresAuth: true },
+        meta: { title: "Upload", requiresAuth: true },
         component: Dashboard,
     },
     {
@@ -58,7 +60,7 @@ const routes: RouteRecordRaw[] = [
         path: "/:pathMatch(.*)*",
         name: "NotFound",
         component: NotFound,
-        meta: { title: "404" },
+        meta: { title: "Not found" },
     },
 ];
 

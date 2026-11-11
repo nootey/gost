@@ -20,6 +20,7 @@ type Config struct {
 	Mailer    MailerConfig    `mapstructure:"mailer"`
 	Token     TokenConfig     `mapstructure:"token"`
 	WebClient WebClientConfig `mapstructure:"web_client"`
+	Upload    UploadConfig    `mapstructure:"upload"`
 }
 
 type ServerConfig struct {
@@ -83,6 +84,12 @@ type TokenConfig struct {
 	ResetTTLMinutes int `mapstructure:"reset_ttl_minutes" validate:"gt=0"`
 }
 
+type UploadConfig struct {
+	Dir            string `mapstructure:"dir" validate:"required"`
+	MaxSizeMB      int64  `mapstructure:"max_size_mb" validate:"gt=0"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds" validate:"gt=0"`
+}
+
 var cfg *Config
 
 // setDefaults doubles as the key registry: AutomaticEnv only resolves keys viper
@@ -128,6 +135,10 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("token.confirm_ttl_hours", 24)
 	v.SetDefault("token.reset_ttl_minutes", 60)
+
+	v.SetDefault("upload.dir", "./storage/uploads")
+	v.SetDefault("upload.max_size_mb", 50)
+	v.SetDefault("upload.timeout_seconds", 300)
 }
 
 func Load() error {
