@@ -14,6 +14,16 @@ SELECT EXISTS (
     WHERE id = $1 AND user_id = $2 AND storage_key IS NULL
 );
 
+-- name: GetFile :one
+SELECT * FROM files
+WHERE id = $1 AND user_id = $2;
+
+-- name: RenameFile :one
+UPDATE files
+SET name = sqlc.arg(name), updated_at = NOW()
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id)
+    RETURNING *;
+
 -- name: ListNamesByParentAndPrefix :many
 SELECT name FROM files
 WHERE user_id = sqlc.arg(user_id)

@@ -21,6 +21,15 @@ var nameLabels = map[NameKind]string{
 	FolderName: "folder name",
 }
 
+var nameKinds = map[bool]NameKind{
+	false: FileName,
+	true:  FolderName,
+}
+
+func NameKindOf(isFolder bool) NameKind {
+	return nameKinds[isFolder]
+}
+
 func nameError(kind NameKind, problem string) error {
 	return apperr.New(apperr.KindValidation, nameLabels[kind]+" "+problem)
 }

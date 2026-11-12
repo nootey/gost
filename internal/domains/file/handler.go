@@ -148,3 +148,34 @@ func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 		Folder:          f,
 	})
 }
+
+func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	var req RenameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	f, err := h.service.Rename(r.Context(), userID, id, req.Name)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, RenameResponse{
+		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: "Renamed to " + f.Name + "."},
+		File:            f,
+	})
+}

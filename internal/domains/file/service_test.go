@@ -453,6 +453,156 @@ func (s *FileServiceTestSuite) TestResolveFolder_UnknownFolder() {
 	}
 }
 
+func (s *FileServiceTestSuite) TestRename_File() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	id := s.seedFile(userID, "notes.txt")
+
+	f, err := svc.Rename(context.Background(), userID, id, "  report.md  ")
+
+	s.Require().NoError(err)
+	s.Equal(id, f.ID)
+	s.Equal("report.md", f.Name)
+	s.False(f.IsFolder)
+	s.Equal("text/plain; charset=utf-8", f.ContentType)
+
+	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"report.md"}, fileNames(result.Data))
+}
+
+// Children point at the folder by id, so they stay inside it, and the path resolves only by the new name.
+func (s *FileServiceTestSuite) TestRename_FolderKeepsChildren() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	s.createFolder(userID, photos.ID, "Cars")
+
+	f, err := svc.Rename(context.Background(), userID, photos.ID, "Pictures")
+
+	s.Require().NoError(err)
+	s.True(f.IsFolder)
+	s.Equal("Pictures", f.Name)
+
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Pictures", "Cars"})
+	s.Require().NoError(err)
+	s.Len(path.Path, 2)
+
+	_, err = svc.ResolveFolder(context.Background(), userID, []string{"Photos"})
+	status, _ := apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+}
+
+// The same name, or the same name in another case, is a valid rename. Names are case-sensitive.
+func (s *FileServiceTestSuite) TestRename_SameNameAndCase() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	id := s.seedFile(userID, "a.txt")
+
+	for _, name := range []string{"a.txt", "A.txt"} {
+		f, err := svc.Rename(context.Background(), userID, id, name)
+
+		s.Require().NoError(err, name)
+		s.Equal(name, f.Name)
+	}
+}
+
+// The messages name the kind of the item, as on upload and folder create.
+func (s *FileServiceTestSuite) TestRename_RejectsBadNames() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	fileID := s.seedFile(userID, "a.txt")
+	folder := s.createFolder(userID, 0, "Photos")
+
+	cases := []struct {
+		id      int64
+		name    string
+		message string
+	}{
+		{fileID, "", "file name is required"},
+		{fileID, "   ", "file name is required"},
+		{fileID, "a/b.txt", "file name has invalid characters"},
+		{fileID, strings.Repeat("a", 256), "file name is too long"},
+		{folder.ID, "", "folder name is required"},
+		{folder.ID, "..", "folder name has invalid characters"},
+		{folder.ID, "nul\x00", "folder name has invalid characters"},
+	}
+	for _, tc := range cases {
+		_, err := svc.Rename(context.Background(), userID, tc.id, tc.name)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+
+	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"Photos", "a.txt"}, fileNames(result.Data))
+}
+
+// Folders and files share one set of names, so a clash with either kind is refused. Nothing changes.
+func (s *FileServiceTestSuite) TestRename_NameTaken() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	fileID := s.seedFile(userID, "a.txt")
+	s.seedFile(userID, "b.txt")
+	folder := s.createFolder(userID, 0, "Photos")
+
+	cases := []struct {
+		id   int64
+		name string
+	}{
+		{fileID, "b.txt"},
+		{fileID, "Photos"},
+		{folder.ID, "a.txt"},
+	}
+	for _, tc := range cases {
+		_, err := svc.Rename(context.Background(), userID, tc.id, tc.name)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusConflict, status, tc.name)
+		s.Equal("an item with this name already exists", msg)
+	}
+
+	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"Photos", "a.txt", "b.txt"}, fileNames(result.Data))
+}
+
+// A name in use in another folder is free here.
+func (s *FileServiceTestSuite) TestRename_SameNameElsewhere() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.createFolder(userID, docs.ID, "Old")
+	id := s.seedFile(userID, "a.txt")
+
+	f, err := svc.Rename(context.Background(), userID, id, "Old")
+
+	s.Require().NoError(err)
+	s.Equal("Old", f.Name)
+}
+
+// Unknown ids and other users' items fail the same way, and the other user's item keeps its name.
+func (s *FileServiceTestSuite) TestRename_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	bobFile := s.seedFile(bob, "bob.txt")
+	bobFolder := s.createFolder(bob, 0, "Bob")
+
+	for _, id := range []int64{999, bobFile, bobFolder.ID} {
+		_, err := s.TC.Services.FileService.Rename(context.Background(), alice, id, "mine.txt")
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("item not found", msg)
+	}
+
+	result, err := s.TC.Services.FileService.List(context.Background(), bob, 0, 1, 10)
+	s.Require().NoError(err)
+	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)

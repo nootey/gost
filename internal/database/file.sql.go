@@ -117,6 +117,33 @@ func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (boo
 	return exists, err
 }
 
+const getFile = `-- name: GetFile :one
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id FROM files
+WHERE id = $1 AND user_id = $2
+`
+
+type GetFileParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, getFile, arg.ID, arg.UserID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+	)
+	return i, err
+}
+
 const listFilesByParentPaginated = `-- name: ListFilesByParentPaginated :many
 SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id FROM files
 WHERE user_id = $1
@@ -204,6 +231,36 @@ func (q *Queries) ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesB
 		return nil, err
 	}
 	return items, nil
+}
+
+const renameFile = `-- name: RenameFile :one
+UPDATE files
+SET name = $1, updated_at = NOW()
+WHERE id = $2 AND user_id = $3
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
+`
+
+type RenameFileParams struct {
+	Name   string `json:"name"`
+	ID     int64  `json:"id"`
+	UserID int64  `json:"user_id"`
+}
+
+func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, renameFile, arg.Name, arg.ID, arg.UserID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+	)
+	return i, err
 }
 
 const resolveFolderPath = `-- name: ResolveFolderPath :many

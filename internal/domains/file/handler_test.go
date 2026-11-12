@@ -43,6 +43,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/files", suite.handler.Upload)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
+	suite.router.Patch("/files/{id}", suite.handler.Rename)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -419,4 +420,67 @@ func (suite *FileHandlerTestSuite) TestResolveFolder_ServiceError() {
 
 	suite.Equal(http.StatusNotFound, w.Code)
 	suite.Equal("folder not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) rename(id, body string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPatch, "/files/"+id, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestRename_Success() {
+	suite.mockService.EXPECT().
+		Rename(mock.Anything, testUserID, int64(5), "report.md").
+		Return(&file.File{ID: 5, Name: "report.md"}, nil).
+		Once()
+
+	w := suite.rename("5", `{"name":"report.md"}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.RenameResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Renamed to report.md.", resp.Message)
+	suite.Require().NotNil(resp.File)
+	suite.Equal(int64(5), resp.File.ID)
+}
+
+func (suite *FileHandlerTestSuite) TestRename_InvalidID() {
+	for _, id := range []string{"abc", "0", "-4"} {
+		w := suite.rename(id, `{"name":"a.txt"}`, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, id)
+		suite.Equal("invalid id", suite.errorMessage(w), id)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestRename_InvalidBody() {
+	for _, body := range []string{`not json`, `{"name":5}`} {
+		w := suite.rename("5", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid request body", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestRename_Unauthenticated() {
+	w := suite.rename("5", `{"name":"a.txt"}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestRename_ServiceError() {
+	suite.mockService.EXPECT().
+		Rename(mock.Anything, testUserID, int64(5), "b.txt").
+		Return(nil, apperr.New(apperr.KindConflict, "an item with this name already exists")).
+		Once()
+
+	w := suite.rename("5", `{"name":"b.txt"}`, true)
+
+	suite.Equal(http.StatusConflict, w.Code)
+	suite.Equal("an item with this name already exists", suite.errorMessage(w))
 }

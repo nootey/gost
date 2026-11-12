@@ -40,6 +40,11 @@ const vueHelper = {
     formatDate(iso: string): string {
         return DATE_FORMAT.format(new Date(iso));
     },
+
+    baseNameLength(name: string, isFolder: boolean): number {
+        const dot = name.lastIndexOf(".");
+        return isFolder || dot <= 0 || dot === name.length - 1 ? name.length : dot;
+    },
 };
 
 export default vueHelper;

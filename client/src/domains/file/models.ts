@@ -20,6 +20,12 @@ export interface FolderResponse {
     folder: StoredFile;
 }
 
+export interface RenameResponse {
+    title: string;
+    message: string;
+    file: StoredFile;
+}
+
 export interface PaginatedFiles {
     data: StoredFile[];
     page: number;
@@ -31,6 +37,10 @@ export interface PaginatedFiles {
 export interface FolderForm {
     name: string;
     parent_id: number | null;
+}
+
+export interface RenameForm {
+    name: string;
 }
 
 export interface PathEntry {

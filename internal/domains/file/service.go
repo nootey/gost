@@ -22,6 +22,7 @@ const maxNameAttempts = 3
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
+	errItemNotFound   = apperr.New(apperr.KindNotFound, "item not found")
 	errNameTaken      = apperr.New(apperr.KindConflict, "an item with this name already exists")
 )
 
@@ -31,6 +32,7 @@ type FileServiceInterface interface {
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
 	List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
+	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 }
 
 var _ FileServiceInterface = (*FileService)(nil)
@@ -189,6 +191,34 @@ func (s *FileService) ResolveFolder(ctx context.Context, userID int64, names []s
 	}
 
 	return &FolderPath{Path: path}, nil
+}
+
+func (s *FileService) Rename(ctx context.Context, userID, id int64, name string) (*File, error) {
+	dbFile, err := s.queries.GetFile(ctx, database.GetFileParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errItemNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	name = strings.TrimSpace(name)
+	if err := utils.ValidateName(name, utils.NameKindOf(toFileModel(dbFile).IsFolder)); err != nil {
+		return nil, err
+	}
+
+	dbFile, err = s.queries.RenameFile(ctx, database.RenameFileParams{ID: id, UserID: userID, Name: name})
+	if utils.IsUniqueViolation(err, nameIndex) {
+		return nil, errNameTaken
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errItemNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return toFileModel(dbFile), nil
 }
 
 func (s *FileService) checkFolder(ctx context.Context, userID, folderID int64) error {

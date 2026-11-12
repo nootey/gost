@@ -5,6 +5,8 @@ import type {
     FolderPath,
     FolderResponse,
     PaginatedFiles,
+    RenameForm,
+    RenameResponse,
     UploadResponse,
 } from "../../domains/file/models.ts";
 
@@ -33,6 +35,11 @@ export const useFileStore = defineStore("file", {
 
         async createFolder(form: FolderForm): Promise<FolderResponse> {
             const response = await apiClient.post<FolderResponse>(this.folderPrefix, form);
+            return response.data;
+        },
+
+        async rename(id: number, form: RenameForm): Promise<RenameResponse> {
+            const response = await apiClient.patch<RenameResponse>(`${this.apiPrefix}/${id}`, form);
             return response.data;
         },
 

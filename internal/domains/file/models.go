@@ -47,3 +47,12 @@ type FolderResponse struct {
 	apperr.SuccessResponse
 	Folder *File `json:"folder"`
 }
+
+type RenameRequest struct {
+	Name string `json:"name"`
+}
+
+type RenameResponse struct {
+	apperr.SuccessResponse
+	File *File `json:"file"`
+}

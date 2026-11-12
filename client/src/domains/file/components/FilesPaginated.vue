@@ -5,6 +5,7 @@ import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
+import RenameDialog from "./RenameDialog.vue";
 import type { DataTablePageEvent, DataTableRowClickEvent, DataTableRowContextMenuEvent } from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
@@ -28,7 +29,7 @@ const FOLDER_VIEW: ItemView = {
 
 const MENU_ITEMS: MenuItem[] = [
     { label: "Add to favorites", icon: "pi pi-star" },
-    { label: "Rename", icon: "pi pi-pencil" },
+    { label: "Rename", icon: "pi pi-pencil", command: openRename },
     { label: "Move", icon: "pi pi-arrow-right" },
     { label: "Copy", icon: "pi pi-copy" },
     { separator: true },
@@ -51,6 +52,9 @@ const total = ref<number>(0);
 
 const menuRef = ref<{ show: (event: Event) => void } | null>(null);
 const menuTarget = ref<StoredFile | undefined>();
+
+const renameVisible = ref<boolean>(false);
+const renameTarget = ref<StoredFile | null>(null);
 
 // Only the newest request may write the table, so a slow old page cannot replace a new one.
 let latestRequest = 0;
@@ -112,6 +116,11 @@ async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<vo
 
 function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
     menuRef.value?.show(event.originalEvent);
+}
+
+function openRename(): void {
+    renameTarget.value = menuTarget.value ?? null;
+    renameVisible.value = true;
 }
 
 onMounted(getData);
@@ -219,5 +228,7 @@ defineExpose({ refresh });
                 </a>
             </template>
         </ContextMenu>
+
+        <RenameDialog v-model:visible="renameVisible" :item="renameTarget" @renamed="getData" />
     </div>
 </template>

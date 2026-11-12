@@ -20,6 +20,7 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
+	GetFile(ctx context.Context, arg GetFileParams) (File, error)
 	GetPermissionByName(ctx context.Context, name string) (Permission, error)
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
@@ -27,6 +28,7 @@ type Querier interface {
 	ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error)
+	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Walks folder names down from the root and returns each folder it finds, root first.
 	// Fewer rows than names means the path does not exist.
 	ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error)
