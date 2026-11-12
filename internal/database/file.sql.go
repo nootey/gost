@@ -16,15 +16,17 @@ const countFilesByParent = `-- name: CountFilesByParent :one
 SELECT COUNT(*) FROM files
 WHERE user_id = $1
   AND COALESCE(parent_id, 0) = $2::bigint
+  AND strpos(lower(name), lower($3::text)) > 0
 `
 
 type CountFilesByParentParams struct {
-	UserID   int64 `json:"user_id"`
-	ParentID int64 `json:"parent_id"`
+	UserID   int64  `json:"user_id"`
+	ParentID int64  `json:"parent_id"`
+	Search   string `json:"search"`
 }
 
 func (q *Queries) CountFilesByParent(ctx context.Context, arg CountFilesByParentParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countFilesByParent, arg.UserID, arg.ParentID)
+	row := q.db.QueryRowContext(ctx, countFilesByParent, arg.UserID, arg.ParentID, arg.Search)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -148,21 +150,40 @@ const listFilesByParentPaginated = `-- name: ListFilesByParentPaginated :many
 SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id FROM files
 WHERE user_id = $1
   AND COALESCE(parent_id, 0) = $2::bigint
-ORDER BY (storage_key IS NULL) DESC, created_at DESC, id DESC
-    LIMIT $4 OFFSET $3
+  AND strpos(lower(name), lower($3::text)) > 0
+ORDER BY
+    (storage_key IS NULL) DESC,
+    CASE WHEN $4::text = 'name' AND NOT $5::bool THEN lower(name) END ASC,
+    CASE WHEN $4::text = 'name' AND $5::bool THEN lower(name) END DESC,
+    CASE WHEN $4::text = 'size' AND NOT $5::bool THEN size_bytes END ASC,
+    CASE WHEN $4::text = 'size' AND $5::bool THEN size_bytes END DESC,
+    CASE WHEN $4::text = 'type' AND NOT $5::bool THEN content_type END ASC,
+    CASE WHEN $4::text = 'type' AND $5::bool THEN content_type END DESC,
+    CASE WHEN $4::text = 'date' AND NOT $5::bool THEN created_at END ASC,
+    CASE WHEN $4::text = 'date' AND $5::bool THEN created_at END DESC,
+    lower(name), name, id
+    LIMIT $7 OFFSET $6
 `
 
 type ListFilesByParentPaginatedParams struct {
-	UserID    int64 `json:"user_id"`
-	ParentID  int64 `json:"parent_id"`
-	RowOffset int32 `json:"row_offset"`
-	RowLimit  int32 `json:"row_limit"`
+	UserID    int64  `json:"user_id"`
+	ParentID  int64  `json:"parent_id"`
+	Search    string `json:"search"`
+	SortBy    string `json:"sort_by"`
+	SortDesc  bool   `json:"sort_desc"`
+	RowOffset int32  `json:"row_offset"`
+	RowLimit  int32  `json:"row_limit"`
 }
 
+// Folders always come first. This is the only place that applies that rule.
+// Each sort column has an ASC and a DESC line, and only the line that matches sort_by and sort_desc is not null.
 func (q *Queries) ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error) {
 	rows, err := q.db.QueryContext(ctx, listFilesByParentPaginated,
 		arg.UserID,
 		arg.ParentID,
+		arg.Search,
+		arg.SortBy,
+		arg.SortDesc,
 		arg.RowOffset,
 		arg.RowLimit,
 	)

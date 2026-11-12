@@ -4,6 +4,7 @@ import type {
     FolderForm,
     FolderPath,
     FolderResponse,
+    ListQuery,
     PaginatedFiles,
     RenameForm,
     RenameResponse,
@@ -17,10 +18,8 @@ export const useFileStore = defineStore("file", {
         folderPrefix: "folders",
     }),
     actions: {
-        async list(folderId: number | null, page: number, pageSize: number): Promise<PaginatedFiles> {
-            const response = await apiClient.get<PaginatedFiles>(this.apiPrefix, {
-                params: { parent_id: folderId, page, page_size: pageSize },
-            });
+        async list(query: ListQuery): Promise<PaginatedFiles> {
+            const response = await apiClient.get<PaginatedFiles>(this.apiPrefix, { params: { ...query } });
             return response.data;
         },
 

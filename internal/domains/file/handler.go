@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 const multipartOverhead = 1 << 20
@@ -43,10 +44,35 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sort, err := utils.QueryChoice(r, "sort", SortByDate, SortByName, SortBySize, SortByType, SortByDate)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	order, err := utils.QueryChoice(r, "order", "desc", "asc", "desc")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	search := r.URL.Query().Get("search")
+	if utf8.RuneCountInString(search) > utils.MaxNameLength {
+		h.resp.Error(w, r, apperr.New(apperr.KindInvalid, "invalid search"))
+		return
+	}
+
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
-	result, err := h.service.List(r.Context(), userID, parentID, page, pageSize)
+	result, err := h.service.List(r.Context(), userID, ListQuery{
+		ParentID: parentID,
+		Page:     page,
+		PageSize: pageSize,
+		Search:   search,
+		Sort:     sort,
+		Desc:     order == "desc",
+	})
 	if err != nil {
 		h.resp.Error(w, r, err)
 		return

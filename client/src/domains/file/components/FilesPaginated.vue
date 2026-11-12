@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
 import RenameDialog from "./RenameDialog.vue";
-import type { DataTablePageEvent, DataTableRowClickEvent, DataTableRowContextMenuEvent } from "primevue/datatable";
+import type {
+    DataTablePageEvent,
+    DataTableRowClickEvent,
+    DataTableRowContextMenuEvent,
+    DataTableSortEvent,
+} from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
-import type { StoredFile } from "../models.ts";
+import type { ListQuery, SortField, StoredFile } from "../models.ts";
 
 interface ItemView {
     iconBox: string;
@@ -36,6 +41,10 @@ const MENU_ITEMS: MenuItem[] = [
     { label: "Delete", icon: "pi pi-trash", danger: true },
 ];
 
+const SEARCH_DELAY_MS = 300;
+
+const ORDER_BY_SORT_ORDER: Record<number, ListQuery["order"]> = { 1: "asc", [-1]: "desc" };
+
 const props = defineProps<{ folderId: number | null; dir: string }>();
 
 const fileStore = useFileStore();
@@ -49,6 +58,10 @@ const loading = ref<boolean>(true);
 const page = ref<number>(1);
 const pageSize = ref<number>(rowOptions[0]);
 const total = ref<number>(0);
+const sortField = ref<SortField>("date");
+const sortOrder = ref<number>(-1);
+const search = ref<string>("");
+const listedSearch = ref<string>("");
 
 const menuRef = ref<{ show: (event: Event) => void } | null>(null);
 const menuTarget = ref<StoredFile | undefined>();
@@ -58,14 +71,24 @@ const renameTarget = ref<StoredFile | null>(null);
 
 // Only the newest request may write the table, so a slow old page cannot replace a new one.
 let latestRequest = 0;
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
 async function getData(): Promise<void> {
     const request = ++latestRequest;
+    const query = search.value.trim();
     loading.value = true;
     try {
-        const response = await fileStore.list(props.folderId, page.value, pageSize.value);
+        const response = await fileStore.list({
+            parent_id: props.folderId,
+            page: page.value,
+            page_size: pageSize.value,
+            sort: sortField.value,
+            order: ORDER_BY_SORT_ORDER[sortOrder.value],
+            search: query || null,
+        });
         if (request !== latestRequest) return;
         files.value = response.data;
+        listedSearch.value = query;
         total.value = response.total;
         page.value = response.page;
         pageSize.value = response.page_size;
@@ -82,10 +105,28 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
     await getData();
 }
 
-// New items are the newest in their group, so go back to the first page to show them.
+async function onSort(event: DataTableSortEvent): Promise<void> {
+    sortField.value = event.sortField as SortField;
+    sortOrder.value = event.sortOrder ?? -1;
+    await refresh();
+}
+
+function onSearchInput(): void {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refresh, SEARCH_DELAY_MS);
+}
+
+// A new sort, search, folder or item can change what each page holds, so go back to the first page.
 async function refresh(): Promise<void> {
     page.value = 1;
     await getData();
+}
+
+// The search belongs to the open folder. The sort stays.
+async function onFolderChange(): Promise<void> {
+    clearTimeout(searchTimer);
+    search.value = "";
+    await refresh();
 }
 
 function childRoute(folder: StoredFile): RouteLocationRaw {
@@ -124,8 +165,9 @@ function openRename(): void {
 }
 
 onMounted(getData);
+onBeforeUnmount(() => clearTimeout(searchTimer));
 
-watch(() => props.folderId, refresh);
+watch(() => props.folderId, onFolderChange);
 
 defineExpose({ refresh });
 </script>
@@ -142,6 +184,8 @@ defineExpose({ refresh });
             :first="(page - 1) * pageSize"
             :rows="pageSize"
             :total-records="total"
+            :sort-field="sortField"
+            :sort-order="sortOrder"
             :rows-per-page-options="rowOptions"
             :paginator-template="{
                 '640px': 'PrevPageLink CurrentPageReport NextPageLink',
@@ -152,12 +196,33 @@ defineExpose({ refresh });
             :row-class="rowClass"
             context-menu
             @page="onPage"
+            @sort="onSort"
             @row-click="onRowClick"
             @row-contextmenu="onRowContextMenu"
         >
+            <template #header>
+                <IconField>
+                    <InputIcon class="pi pi-search" />
+                    <InputText
+                        v-model="search"
+                        type="search"
+                        placeholder="Search this folder"
+                        aria-label="Search this folder"
+                        maxlength="255"
+                        size="small"
+                        class="w-full rounded-xl sm:w-72"
+                        @update:model-value="onSearchInput"
+                    />
+                </IconField>
+            </template>
+
             <template #empty>
                 <div class="flex flex-col items-center gap-1 py-8 text-center">
-                    <template v-if="folderId === null">
+                    <template v-if="listedSearch">
+                        <span class="font-medium text-fg">No matches</span>
+                        <span class="text-sm text-fg-muted">Nothing in this folder matches "{{ listedSearch }}".</span>
+                    </template>
+                    <template v-else-if="folderId === null">
                         <span class="font-medium text-fg">No files yet</span>
                         <span class="text-sm text-fg-muted">Files and folders you add show up here.</span>
                     </template>
@@ -168,7 +233,7 @@ defineExpose({ refresh });
                 </div>
             </template>
 
-            <Column header="Name">
+            <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
                     <div class="flex min-w-0 items-center gap-3">
                         <span
@@ -197,7 +262,13 @@ defineExpose({ refresh });
                 </template>
             </Column>
 
-            <Column header="Type" header-class="hidden w-44 md:table-cell" body-class="hidden md:table-cell">
+            <Column
+                header="Type"
+                sort-field="type"
+                sortable
+                header-class="hidden w-44 md:table-cell"
+                body-class="hidden md:table-cell"
+            >
                 <template #body="{ data }">
                     <span class="block truncate text-sm text-fg-muted">
                         {{ itemView(data).type }}
@@ -205,7 +276,7 @@ defineExpose({ refresh });
                 </template>
             </Column>
 
-            <Column header="Size" header-class="w-24">
+            <Column header="Size" sort-field="size" sortable header-class="w-28">
                 <template #body="{ data }">
                     <span class="text-sm tabular-nums text-fg-muted">
                         {{ itemView(data).size }}
@@ -213,7 +284,13 @@ defineExpose({ refresh });
                 </template>
             </Column>
 
-            <Column header="Added" header-class="hidden w-48 sm:table-cell" body-class="hidden sm:table-cell">
+            <Column
+                header="Added"
+                sort-field="date"
+                sortable
+                header-class="hidden w-48 sm:table-cell"
+                body-class="hidden sm:table-cell"
+            >
                 <template #body="{ data }">
                     <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.created_at) }}</span>
                 </template>

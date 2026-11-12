@@ -112,13 +112,13 @@ func (s *FileServiceTestSuite) TestList_OnlyOwnFiles() {
 	s.seedFile(alice, "alice-2.txt")
 	s.seedFile(bob, "bob-1.txt")
 
-	result, err := s.TC.Services.FileService.List(context.Background(), alice, 0, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), alice, newestFirst(0, 1, 10))
 
 	s.Require().NoError(err)
 	s.Equal(2, result.Total)
 	s.Equal([]string{"alice-2.txt", "alice-1.txt"}, fileNames(result.Data))
 
-	result, err = s.TC.Services.FileService.List(context.Background(), bob, 0, 1, 10)
+	result, err = s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0, 1, 10))
 
 	s.Require().NoError(err)
 	s.Equal(1, result.Total)
@@ -136,7 +136,7 @@ func (s *FileServiceTestSuite) TestList_NewestFirst() {
 		`UPDATE files SET created_at = NOW() + INTERVAL '1 hour' WHERE id = $1`, first)
 	s.Require().NoError(err)
 
-	result, err := s.TC.Services.FileService.List(context.Background(), userID, 0, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0, 1, 10))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"a.txt", "c.txt", "b.txt"}, fileNames(result.Data))
@@ -149,14 +149,14 @@ func (s *FileServiceTestSuite) TestList_Pagination() {
 	}
 	svc := s.TC.Services.FileService
 
-	second, err := svc.List(context.Background(), userID, 0, 2, 2)
+	second, err := svc.List(context.Background(), userID, newestFirst(0, 2, 2))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"file-3.txt", "file-2.txt"}, fileNames(second.Data))
 	s.Equal(5, second.Total)
 	s.Equal(3, second.TotalPages)
 
-	last, err := svc.List(context.Background(), userID, 0, 3, 2)
+	last, err := svc.List(context.Background(), userID, newestFirst(0, 3, 2))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"file-1.txt"}, fileNames(last.Data))
@@ -176,7 +176,7 @@ func (s *FileServiceTestSuite) TestList_ClampsPageValues() {
 		{math.MaxInt, 20, math.MaxInt32 / 20, 20},
 	}
 	for _, tc := range cases {
-		result, err := svc.List(context.Background(), userID, 0, tc.page, tc.pageSize)
+		result, err := svc.List(context.Background(), userID, newestFirst(0, tc.page, tc.pageSize))
 
 		s.Require().NoError(err)
 		s.Equal(tc.wantPage, result.Page)
@@ -198,11 +198,11 @@ func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
 	s.Require().NotNil(f.ParentID)
 	s.Equal(folder.ID, *f.ParentID)
 
-	inFolder, err := svc.List(context.Background(), userID, folder.ID, 1, 10)
+	inFolder, err := svc.List(context.Background(), userID, newestFirst(folder.ID, 1, 10))
 	s.Require().NoError(err)
 	s.Equal([]string{"notes.txt"}, fileNames(inFolder.Data))
 
-	atRoot, err := svc.List(context.Background(), userID, 0, 1, 10)
+	atRoot, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
 	s.Require().NoError(err)
 	s.Equal([]string{"Docs"}, fileNames(atRoot.Data))
 }
@@ -389,11 +389,74 @@ func (s *FileServiceTestSuite) TestList_FoldersFirst() {
 	s.seedFile(userID, "y.txt")
 	s.createFolder(userID, 0, "A")
 
-	result, err := s.TC.Services.FileService.List(context.Background(), userID, 0, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0, 1, 10))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"A", "B", "y.txt", "z.txt"}, fileNames(result.Data))
 	s.Equal(4, result.Total)
+}
+
+// Folder names and file names differ in case, so a byte-order sort would give another order.
+func (s *FileServiceTestSuite) TestList_SortByEachColumn() {
+	userID := s.seedUser()
+	s.moveCreatedAt(s.createFolder(userID, 0, "Zeta").ID, 2)
+	s.moveCreatedAt(s.createFolder(userID, 0, "alpha").ID, 1)
+	s.seedFileWith(userID, "b.txt", "text/plain", 10, 2)
+	s.seedFileWith(userID, "C.pdf", "application/pdf", 30, 3)
+	s.seedFileWith(userID, "a.png", "image/png", 20, 1)
+
+	cases := []struct {
+		sort file.SortField
+		desc bool
+		want []string
+	}{
+		{file.SortByName, false, []string{"alpha", "Zeta", "a.png", "b.txt", "C.pdf"}},
+		{file.SortByName, true, []string{"Zeta", "alpha", "C.pdf", "b.txt", "a.png"}},
+		{file.SortBySize, false, []string{"alpha", "Zeta", "b.txt", "a.png", "C.pdf"}},
+		{file.SortBySize, true, []string{"alpha", "Zeta", "C.pdf", "a.png", "b.txt"}},
+		{file.SortByType, false, []string{"alpha", "Zeta", "C.pdf", "a.png", "b.txt"}},
+		{file.SortByType, true, []string{"alpha", "Zeta", "b.txt", "a.png", "C.pdf"}},
+		{file.SortByDate, false, []string{"Zeta", "alpha", "C.pdf", "b.txt", "a.png"}},
+		{file.SortByDate, true, []string{"alpha", "Zeta", "a.png", "b.txt", "C.pdf"}},
+	}
+	for _, tc := range cases {
+		result, err := s.TC.Services.FileService.List(context.Background(), userID,
+			file.ListQuery{Page: 1, PageSize: 10, Sort: tc.sort, Desc: tc.desc})
+
+		s.Require().NoError(err)
+		s.Equal(tc.want, fileNames(result.Data), "%s desc=%t", tc.sort, tc.desc)
+	}
+}
+
+func (s *FileServiceTestSuite) TestList_Search() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	folder := s.createFolder(userID, 0, "Reports")
+	s.seedFile(userID, "q1-report.pdf")
+	s.seedFile(userID, "notes.txt")
+	s.seedFile(userID, "100%_done.txt")
+	_, err := svc.Upload(context.Background(), userID, folder.ID, "report-2.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+
+	cases := []struct {
+		search string
+		want   []string
+	}{
+		{"REPORT", []string{"Reports", "q1-report.pdf"}},
+		{"  notes  ", []string{"notes.txt"}},
+		{"%", []string{"100%_done.txt"}},
+		{"_", []string{"100%_done.txt"}},
+		{"   ", []string{"Reports", "100%_done.txt", "notes.txt", "q1-report.pdf"}},
+		{"missing", []string{}},
+	}
+	for _, tc := range cases {
+		result, err := svc.List(context.Background(), userID,
+			file.ListQuery{Page: 1, PageSize: 10, Search: tc.search, Sort: file.SortByName})
+
+		s.Require().NoError(err)
+		s.Equal(tc.want, fileNames(result.Data), tc.search)
+		s.Equal(len(tc.want), result.Total, tc.search)
+	}
 }
 
 func (s *FileServiceTestSuite) TestList_UnknownFolder() {
@@ -401,7 +464,7 @@ func (s *FileServiceTestSuite) TestList_UnknownFolder() {
 	fileID := s.seedFile(userID, "a.txt")
 
 	for _, parentID := range []int64{999, fileID} {
-		_, err := s.TC.Services.FileService.List(context.Background(), userID, parentID, 1, 10)
+		_, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(parentID, 1, 10))
 
 		status, msg := apperr.Resolve(err)
 		s.Equal(http.StatusNotFound, status, parentID)
@@ -466,7 +529,7 @@ func (s *FileServiceTestSuite) TestRename_File() {
 	s.False(f.IsFolder)
 	s.Equal("text/plain; charset=utf-8", f.ContentType)
 
-	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
 	s.Require().NoError(err)
 	s.Equal([]string{"report.md"}, fileNames(result.Data))
 }
@@ -535,7 +598,7 @@ func (s *FileServiceTestSuite) TestRename_RejectsBadNames() {
 		s.Equal(tc.message, msg)
 	}
 
-	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
 	s.Require().NoError(err)
 	s.Equal([]string{"Photos", "a.txt"}, fileNames(result.Data))
 }
@@ -564,7 +627,7 @@ func (s *FileServiceTestSuite) TestRename_NameTaken() {
 		s.Equal("an item with this name already exists", msg)
 	}
 
-	result, err := svc.List(context.Background(), userID, 0, 1, 10)
+	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
 	s.Require().NoError(err)
 	s.ElementsMatch([]string{"Photos", "a.txt", "b.txt"}, fileNames(result.Data))
 }
@@ -598,7 +661,7 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 		s.Equal("item not found", msg)
 	}
 
-	result, err := s.TC.Services.FileService.List(context.Background(), bob, 0, 1, 10)
+	result, err := s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0, 1, 10))
 	s.Require().NoError(err)
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
@@ -628,15 +691,32 @@ func (s *FileServiceTestSuite) seedUserWithEmail(email string) int64 {
 }
 
 func (s *FileServiceTestSuite) seedFile(userID int64, name string) int64 {
+	return s.seedFileWith(userID, name, "text/plain; charset=utf-8", 1, 0)
+}
+
+// seedFileWith moves created_at back by hoursAgo.
+func (s *FileServiceTestSuite) seedFileWith(userID int64, name, contentType string, size int64, hoursAgo int) int64 {
 	f, err := s.TC.Queries.CreateFile(context.Background(), database.CreateFileParams{
 		UserID:      userID,
 		Name:        name,
 		StorageKey:  sql.NullString{String: fmt.Sprintf("%d-%s", userID, name), Valid: true},
-		ContentType: "text/plain; charset=utf-8",
-		SizeBytes:   1,
+		ContentType: contentType,
+		SizeBytes:   size,
 	})
 	s.Require().NoError(err)
+
+	s.moveCreatedAt(f.ID, hoursAgo)
 	return f.ID
+}
+
+func (s *FileServiceTestSuite) moveCreatedAt(id int64, hoursAgo int) {
+	_, err := s.TC.DB.ExecContext(context.Background(),
+		`UPDATE files SET created_at = created_at - make_interval(hours => $1) WHERE id = $2`, hoursAgo, id)
+	s.Require().NoError(err)
+}
+
+func newestFirst(parentID int64, page, pageSize int) file.ListQuery {
+	return file.ListQuery{ParentID: parentID, Page: page, PageSize: pageSize, Sort: file.SortByDate, Desc: true}
 }
 
 func fileNames(files []*file.File) []string {

@@ -8,6 +8,7 @@ import (
 	"gost/internal/apperr"
 	"gost/internal/domains/file"
 	"gost/internal/middleware"
+	"gost/internal/utils"
 	"gost/mocks"
 	"io"
 	"mime/multipart"
@@ -25,6 +26,8 @@ import (
 )
 
 const testUserID int64 = 7
+
+var atNameLimit = strings.Repeat("a", utils.MaxNameLength)
 
 type FileHandlerTestSuite struct {
 	suite.Suite
@@ -208,7 +211,7 @@ func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httpt
 
 func (suite *FileHandlerTestSuite) TestList_Success() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, int64(0), 2, 5).
+		List(mock.Anything, testUserID, file.ListQuery{Page: 2, PageSize: 5, Sort: file.SortByDate, Desc: true}).
 		Return(&file.PaginatedFiles{
 			Data:       []*file.File{{ID: 3, Name: "c.txt"}, {ID: 2, Name: "b.txt"}},
 			Page:       2,
@@ -229,10 +232,10 @@ func (suite *FileHandlerTestSuite) TestList_Success() {
 	suite.Equal(7, resp.Total)
 }
 
-// Missing or bad values reach the service as zero, so the service picks the defaults.
+// Missing or bad page values reach the service as zero, so the service picks the defaults. The sort is newest first.
 func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, int64(0), 0, 0).
+		List(mock.Anything, testUserID, file.ListQuery{Sort: file.SortByDate, Desc: true}).
 		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
 		Twice()
 
@@ -242,7 +245,7 @@ func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 
 func (suite *FileHandlerTestSuite) TestList_InFolder() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, int64(12), 1, 10).
+		List(mock.Anything, testUserID, file.ListQuery{ParentID: 12, Page: 1, PageSize: 10, Sort: file.SortByDate, Desc: true}).
 		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 10}, nil).
 		Once()
 
@@ -261,6 +264,48 @@ func (suite *FileHandlerTestSuite) TestList_InvalidParentID() {
 	}
 }
 
+func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
+	cases := []struct {
+		query string
+		want  file.ListQuery
+	}{
+		{"?sort=name&order=asc", file.ListQuery{Sort: file.SortByName}},
+		{"?sort=size&order=desc", file.ListQuery{Sort: file.SortBySize, Desc: true}},
+		{"?sort=type", file.ListQuery{Sort: file.SortByType, Desc: true}},
+		{"?order=asc", file.ListQuery{Sort: file.SortByDate}},
+		{"?search=%20Report%25_", file.ListQuery{Search: " Report%_", Sort: file.SortByDate, Desc: true}},
+		{"?search=" + atNameLimit, file.ListQuery{Search: atNameLimit, Sort: file.SortByDate, Desc: true}},
+	}
+	for _, tc := range cases {
+		suite.mockService.EXPECT().
+			List(mock.Anything, testUserID, tc.want).
+			Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
+			Once()
+
+		suite.Equal(http.StatusOK, suite.list(tc.query, true).Code, tc.query)
+	}
+}
+
+// Sort values are case-sensitive.
+func (suite *FileHandlerTestSuite) TestList_InvalidSort() {
+	cases := []struct {
+		query   string
+		message string
+	}{
+		{"?sort=created_at", "invalid sort"},
+		{"?sort=Name", "invalid sort"},
+		{"?order=up", "invalid order"},
+		{"?order=DESC", "invalid order"},
+		{"?search=" + atNameLimit + "a", "invalid search"},
+	}
+	for _, tc := range cases {
+		w := suite.list(tc.query, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, tc.query)
+		suite.Equal(tc.message, suite.errorMessage(w), tc.query)
+	}
+}
+
 func (suite *FileHandlerTestSuite) TestList_Unauthenticated() {
 	w := suite.list("", false)
 
@@ -269,7 +314,7 @@ func (suite *FileHandlerTestSuite) TestList_Unauthenticated() {
 
 func (suite *FileHandlerTestSuite) TestList_ServiceError() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		List(mock.Anything, mock.Anything, mock.Anything).
 		Return(nil, assert.AnError).
 		Once()
 

@@ -3,6 +3,7 @@ package utils
 import (
 	"gost/internal/apperr"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -48,6 +49,18 @@ func QueryDir(r *http.Request, key string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// QueryChoice reads a query value that must be one of choices. A missing value is def.
+func QueryChoice[T ~string](r *http.Request, key string, def T, choices ...T) (T, error) {
+	raw := T(r.URL.Query().Get(key))
+	if raw == "" {
+		return def, nil
+	}
+	if !slices.Contains(choices, raw) {
+		return "", apperr.New(apperr.KindInvalid, "invalid "+key)
+	}
+	return raw, nil
 }
 
 func parseID(raw, key string) (int64, error) {

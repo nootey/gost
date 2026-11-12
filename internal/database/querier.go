@@ -25,6 +25,8 @@ type Querier interface {
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// Folders always come first. This is the only place that applies that rule.
+	// Each sort column has an ASC and a DESC line, and only the line that matches sort_by and sort_desc is not null.
 	ListFilesByParentPaginated(ctx context.Context, arg ListFilesByParentPaginatedParams) ([]File, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error)

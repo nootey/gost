@@ -26,6 +26,18 @@ export interface RenameResponse {
     file: StoredFile;
 }
 
+export type SortField = "name" | "size" | "type" | "date";
+
+// A null parent_id is the root. A null search matches every name.
+export interface ListQuery {
+    parent_id: number | null;
+    page: number;
+    page_size: number;
+    sort: SortField;
+    order: "asc" | "desc";
+    search: string | null;
+}
+
 export interface PaginatedFiles {
     data: StoredFile[];
     page: number;

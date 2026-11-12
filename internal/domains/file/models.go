@@ -15,6 +15,26 @@ type File struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// SortField is a column the list sorts by. The values match the list query.
+type SortField string
+
+const (
+	SortByName SortField = "name"
+	SortBySize SortField = "size"
+	SortByType SortField = "type"
+	SortByDate SortField = "date"
+)
+
+// ListQuery picks one folder's page. A ParentID of 0 means the root. An empty Search matches every name.
+type ListQuery struct {
+	ParentID int64
+	Page     int
+	PageSize int
+	Search   string
+	Sort     SortField
+	Desc     bool
+}
+
 type PaginatedFiles struct {
 	Data       []*File `json:"data"`
 	Page       int     `json:"page"`

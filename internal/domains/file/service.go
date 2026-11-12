@@ -30,7 +30,7 @@ var (
 type FileServiceInterface interface {
 	Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error)
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
-	List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error)
+	List(ctx context.Context, userID int64, q ListQuery) (*PaginatedFiles, error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 }
@@ -133,16 +133,20 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 	return toFileModel(dbFile), nil
 }
 
-func (s *FileService) List(ctx context.Context, userID, parentID int64, page, pageSize int) (*PaginatedFiles, error) {
-	if err := s.checkFolder(ctx, userID, parentID); err != nil {
+func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*PaginatedFiles, error) {
+	if err := s.checkFolder(ctx, userID, q.ParentID); err != nil {
 		return nil, err
 	}
 
-	p := utils.NewPagination(page, pageSize)
+	p := utils.NewPagination(q.Page, q.PageSize)
+	search := strings.TrimSpace(q.Search)
 
 	dbFiles, err := s.queries.ListFilesByParentPaginated(ctx, database.ListFilesByParentPaginatedParams{
 		UserID:    userID,
-		ParentID:  parentID,
+		ParentID:  q.ParentID,
+		Search:    search,
+		SortBy:    string(q.Sort),
+		SortDesc:  q.Desc,
 		RowLimit:  p.Limit,
 		RowOffset: p.Offset,
 	})
@@ -152,7 +156,8 @@ func (s *FileService) List(ctx context.Context, userID, parentID int64, page, pa
 
 	total, err := s.queries.CountFilesByParent(ctx, database.CountFilesByParentParams{
 		UserID:   userID,
-		ParentID: parentID,
+		ParentID: q.ParentID,
+		Search:   search,
 	})
 	if err != nil {
 		return nil, err

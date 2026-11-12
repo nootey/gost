@@ -129,8 +129,8 @@ func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx 
 }
 
 // List provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error) {
-	ret := _mock.Called(ctx, userID, parentID, page, pageSize)
+func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, q file.ListQuery) (*file.PaginatedFiles, error) {
+	ret := _mock.Called(ctx, userID, q)
 
 	if len(ret) == 0 {
 		panic("no return value specified for List")
@@ -138,18 +138,18 @@ func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, p
 
 	var r0 *file.PaginatedFiles
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, int, int) (*file.PaginatedFiles, error)); ok {
-		return returnFunc(ctx, userID, parentID, page, pageSize)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) (*file.PaginatedFiles, error)); ok {
+		return returnFunc(ctx, userID, q)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, int, int) *file.PaginatedFiles); ok {
-		r0 = returnFunc(ctx, userID, parentID, page, pageSize)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) *file.PaginatedFiles); ok {
+		r0 = returnFunc(ctx, userID, q)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*file.PaginatedFiles)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, int, int) error); ok {
-		r1 = returnFunc(ctx, userID, parentID, page, pageSize)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, file.ListQuery) error); ok {
+		r1 = returnFunc(ctx, userID, q)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -164,14 +164,12 @@ type MockFileServiceInterface_List_Call struct {
 // List is a helper method to define mock.On call
 //   - ctx context.Context
 //   - userID int64
-//   - parentID int64
-//   - page int
-//   - pageSize int
-func (_e *MockFileServiceInterface_Expecter) List(ctx any, userID any, parentID any, page any, pageSize any) *MockFileServiceInterface_List_Call {
-	return &MockFileServiceInterface_List_Call{Call: _e.mock.On("List", ctx, userID, parentID, page, pageSize)}
+//   - q file.ListQuery
+func (_e *MockFileServiceInterface_Expecter) List(ctx any, userID any, q any) *MockFileServiceInterface_List_Call {
+	return &MockFileServiceInterface_List_Call{Call: _e.mock.On("List", ctx, userID, q)}
 }
 
-func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, userID int64, parentID int64, page int, pageSize int)) *MockFileServiceInterface_List_Call {
+func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, userID int64, q file.ListQuery)) *MockFileServiceInterface_List_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -181,24 +179,14 @@ func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, 
 		if args[1] != nil {
 			arg1 = args[1].(int64)
 		}
-		var arg2 int64
+		var arg2 file.ListQuery
 		if args[2] != nil {
-			arg2 = args[2].(int64)
-		}
-		var arg3 int
-		if args[3] != nil {
-			arg3 = args[3].(int)
-		}
-		var arg4 int
-		if args[4] != nil {
-			arg4 = args[4].(int)
+			arg2 = args[2].(file.ListQuery)
 		}
 		run(
 			arg0,
 			arg1,
 			arg2,
-			arg3,
-			arg4,
 		)
 	})
 	return _c
@@ -209,7 +197,7 @@ func (_c *MockFileServiceInterface_List_Call) Return(paginatedFiles *file.Pagina
 	return _c
 }
 
-func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, page int, pageSize int) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
+func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.ListQuery) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
 	_c.Call.Return(run)
 	return _c
 }
