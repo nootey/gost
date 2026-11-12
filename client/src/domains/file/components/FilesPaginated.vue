@@ -34,7 +34,7 @@ const FOLDER_VIEW: ItemView = {
 
 const MENU_ITEMS: MenuItem[] = [
     { label: "Add to favorites", icon: "pi pi-star" },
-    { label: "Rename", icon: "pi pi-pencil", command: openRename },
+    { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
     { label: "Move", icon: "pi pi-arrow-right" },
     { label: "Copy", icon: "pi pi-copy" },
     { separator: true },
@@ -64,8 +64,16 @@ const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
 
+const selection = ref<StoredFile[]>([]);
+
 const menuRef = ref<{ show: (event: Event) => void } | null>(null);
 const menuTarget = ref<StoredFile | undefined>();
+const menuTargets = computed<StoredFile[]>(() => {
+    const row = menuTarget.value;
+    if (!row) return [];
+    if (selection.value.some((item) => item.id === row.id)) return selection.value;
+    return [row];
+});
 
 const renameVisible = ref<boolean>(false);
 const renameTarget = ref<StoredFile | null>(null);
@@ -93,6 +101,8 @@ async function getData(): Promise<void> {
         });
         if (request !== latestRequest) return;
         files.value = response.data;
+        const selectedIds = new Set(selection.value.map((item) => item.id));
+        selection.value = response.data.filter((item) => selectedIds.has(item.id));
         nextCursor.value = response.next_cursor;
         listedSearch.value = query;
     } catch (error) {
@@ -165,12 +175,17 @@ function rowClass(item: StoredFile): string {
 // The whole folder row opens it. A click on the name link already navigates by itself.
 async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<void> {
     if (!event.data.is_folder) return;
-    if (event.originalEvent.target instanceof Element && event.originalEvent.target.closest("a")) return;
+    const target = event.originalEvent.target;
+    if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
     await router.push(childRoute(event.data));
 }
 
 function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
     menuRef.value?.show(event.originalEvent);
+}
+
+function notOneTarget(): boolean {
+    return menuTargets.value.length !== 1;
 }
 
 function openRename(): void {
@@ -189,9 +204,11 @@ defineExpose({ refresh });
 <template>
     <div class="overflow-hidden rounded-2xl border border-edge bg-panel">
         <DataTable
+            v-model:selection="selection"
             v-model:context-menu-selection="menuTarget"
             :value="files"
             data-key="id"
+            highlight-on-select
             lazy
             paginator
             :loading="loading"
@@ -215,19 +232,32 @@ defineExpose({ refresh });
             @row-contextmenu="onRowContextMenu"
         >
             <template #header>
-                <IconField>
-                    <InputIcon class="pi pi-search" />
-                    <InputText
-                        v-model="search"
-                        type="search"
-                        placeholder="Search this folder"
-                        aria-label="Search this folder"
-                        maxlength="255"
-                        size="small"
-                        class="w-full rounded-xl sm:w-72"
-                        @update:model-value="onSearchInput"
-                    />
-                </IconField>
+                <div class="flex items-center justify-between gap-3">
+                    <IconField class="min-w-0 flex-1 sm:flex-none">
+                        <InputIcon class="pi pi-search" />
+                        <InputText
+                            v-model="search"
+                            type="search"
+                            placeholder="Search this folder"
+                            aria-label="Search this folder"
+                            maxlength="255"
+                            size="small"
+                            class="w-full rounded-xl sm:w-72"
+                            @update:model-value="onSearchInput"
+                        />
+                    </IconField>
+                    <div v-if="selection.length > 0" class="flex shrink-0 items-center gap-1">
+                        <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
+                        <Button
+                            label="Clear"
+                            icon="pi pi-times"
+                            size="small"
+                            severity="secondary"
+                            variant="text"
+                            @click="selection = []"
+                        />
+                    </div>
+                </div>
             </template>
 
             <template #empty>
@@ -246,6 +276,8 @@ defineExpose({ refresh });
                     </template>
                 </div>
             </template>
+
+            <Column selection-mode="multiple" header-class="w-14" />
 
             <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
