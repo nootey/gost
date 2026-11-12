@@ -30,7 +30,7 @@ var (
 type FileServiceInterface interface {
 	Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error)
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
-	List(ctx context.Context, userID int64, q ListQuery) (*PaginatedFiles, error)
+	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 }
@@ -39,12 +39,14 @@ var _ FileServiceInterface = (*FileService)(nil)
 
 type FileService struct {
 	queries *database.Queries
+	db      *sql.DB
 	cfg     config.UploadConfig
 }
 
-func NewFileService(queries *database.Queries, cfg config.UploadConfig) *FileService {
+func NewFileService(queries *database.Queries, db *sql.DB, cfg config.UploadConfig) *FileService {
 	return &FileService{
 		queries: queries,
+		db:      db,
 		cfg:     cfg,
 	}
 }
@@ -64,6 +66,11 @@ func toFileModel(dbFile database.File) *File {
 		SizeBytes:   dbFile.SizeBytes,
 		CreatedAt:   dbFile.CreatedAt,
 	}
+}
+
+// fileFields follows the column order of the files table, which SELECT * returns.
+func fileFields(f *database.File) []any {
+	return []any{&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes, &f.CreatedAt, &f.UpdatedAt, &f.ParentID}
 }
 
 func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error) {
@@ -133,48 +140,28 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 	return toFileModel(dbFile), nil
 }
 
-func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*PaginatedFiles, error) {
+func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error) {
 	if err := s.checkFolder(ctx, userID, q.ParentID); err != nil {
 		return nil, err
 	}
 
-	p := utils.NewPagination(q.Page, q.PageSize)
-	search := strings.TrimSpace(q.Search)
-
-	dbFiles, err := s.queries.ListFilesByParentPaginated(ctx, database.ListFilesByParentPaginatedParams{
-		UserID:    userID,
-		ParentID:  q.ParentID,
-		Search:    search,
-		SortBy:    string(q.Sort),
-		SortDesc:  q.Desc,
-		RowLimit:  p.Limit,
-		RowOffset: p.Offset,
-	})
+	page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
+		Args:     []any{userID, q.ParentID, strings.TrimSpace(q.Search)},
+		Sort:     q.Sort,
+		Desc:     q.Desc,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, fileFields)
 	if err != nil {
 		return nil, err
 	}
 
-	total, err := s.queries.CountFilesByParent(ctx, database.CountFilesByParentParams{
-		UserID:   userID,
-		ParentID: q.ParentID,
-		Search:   search,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	files := make([]*File, len(dbFiles))
-	for i, dbFile := range dbFiles {
+	files := make([]*File, len(page.Data))
+	for i, dbFile := range page.Data {
 		files[i] = toFileModel(dbFile)
 	}
 
-	return &PaginatedFiles{
-		Data:       files,
-		Page:       p.Page,
-		PageSize:   p.PageSize,
-		Total:      int(total),
-		TotalPages: p.TotalPages(total),
-	}, nil
+	return &utils.Page[*File]{Data: files, NextCursor: page.NextCursor}, nil
 }
 
 func (s *FileService) ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error) {

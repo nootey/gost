@@ -30,32 +30,6 @@ WHERE user_id = sqlc.arg(user_id)
   AND COALESCE(parent_id, 0) = sqlc.arg(parent_id)::bigint
   AND starts_with(name, sqlc.arg(prefix)::text);
 
--- name: ListFilesByParentPaginated :many
--- Folders always come first. This is the only place that applies that rule.
--- Each sort column has an ASC and a DESC line, and only the line that matches sort_by and sort_desc is not null.
-SELECT * FROM files
-WHERE user_id = sqlc.arg(user_id)
-  AND COALESCE(parent_id, 0) = sqlc.arg(parent_id)::bigint
-  AND strpos(lower(name), lower(sqlc.arg(search)::text)) > 0
-ORDER BY
-    (storage_key IS NULL) DESC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'name' AND NOT sqlc.arg(sort_desc)::bool THEN lower(name) END ASC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'name' AND sqlc.arg(sort_desc)::bool THEN lower(name) END DESC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'size' AND NOT sqlc.arg(sort_desc)::bool THEN size_bytes END ASC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'size' AND sqlc.arg(sort_desc)::bool THEN size_bytes END DESC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'type' AND NOT sqlc.arg(sort_desc)::bool THEN content_type END ASC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'type' AND sqlc.arg(sort_desc)::bool THEN content_type END DESC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'date' AND NOT sqlc.arg(sort_desc)::bool THEN created_at END ASC,
-    CASE WHEN sqlc.arg(sort_by)::text = 'date' AND sqlc.arg(sort_desc)::bool THEN created_at END DESC,
-    lower(name), name, id
-    LIMIT sqlc.arg(row_limit) OFFSET sqlc.arg(row_offset);
-
--- name: CountFilesByParent :one
-SELECT COUNT(*) FROM files
-WHERE user_id = sqlc.arg(user_id)
-  AND COALESCE(parent_id, 0) = sqlc.arg(parent_id)::bigint
-  AND strpos(lower(name), lower(sqlc.arg(search)::text)) > 0;
-
 -- name: ResolveFolderPath :many
 -- Walks folder names down from the root and returns each folder it finds, root first.
 -- Fewer rows than names means the path does not exist.

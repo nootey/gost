@@ -7,6 +7,7 @@ package mocks
 import (
 	"context"
 	"gost/internal/domains/file"
+	"gost/internal/utils"
 	"io"
 
 	mock "github.com/stretchr/testify/mock"
@@ -129,23 +130,23 @@ func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx 
 }
 
 // List provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, q file.ListQuery) (*file.PaginatedFiles, error) {
+func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, q file.ListQuery) (*utils.Page[*file.File], error) {
 	ret := _mock.Called(ctx, userID, q)
 
 	if len(ret) == 0 {
 		panic("no return value specified for List")
 	}
 
-	var r0 *file.PaginatedFiles
+	var r0 *utils.Page[*file.File]
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) (*file.PaginatedFiles, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) (*utils.Page[*file.File], error)); ok {
 		return returnFunc(ctx, userID, q)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) *file.PaginatedFiles); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ListQuery) *utils.Page[*file.File]); ok {
 		r0 = returnFunc(ctx, userID, q)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*file.PaginatedFiles)
+			r0 = ret.Get(0).(*utils.Page[*file.File])
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, file.ListQuery) error); ok {
@@ -192,12 +193,12 @@ func (_c *MockFileServiceInterface_List_Call) Run(run func(ctx context.Context, 
 	return _c
 }
 
-func (_c *MockFileServiceInterface_List_Call) Return(paginatedFiles *file.PaginatedFiles, err error) *MockFileServiceInterface_List_Call {
-	_c.Call.Return(paginatedFiles, err)
+func (_c *MockFileServiceInterface_List_Call) Return(page *utils.Page[*file.File], err error) *MockFileServiceInterface_List_Call {
+	_c.Call.Return(page, err)
 	return _c
 }
 
-func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.ListQuery) (*file.PaginatedFiles, error)) *MockFileServiceInterface_List_Call {
+func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.ListQuery) (*utils.Page[*file.File], error)) *MockFileServiceInterface_List_Call {
 	_c.Call.Return(run)
 	return _c
 }

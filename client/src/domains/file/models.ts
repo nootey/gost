@@ -28,22 +28,14 @@ export interface RenameResponse {
 
 export type SortField = "name" | "size" | "type" | "date";
 
-// A null parent_id is the root. A null search matches every name.
+// A null parent_id is the root. A null cursor is the first page. A null search matches every name.
 export interface ListQuery {
     parent_id: number | null;
-    page: number;
+    cursor: string | null;
     page_size: number;
     sort: SortField;
     order: "asc" | "desc";
     search: string | null;
-}
-
-export interface PaginatedFiles {
-    data: StoredFile[];
-    page: number;
-    page_size: number;
-    total: number;
-    total_pages: number;
 }
 
 export interface FolderForm {

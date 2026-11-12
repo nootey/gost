@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
@@ -51,13 +51,14 @@ const fileStore = useFileStore();
 const toastStore = useToastStore();
 const router = useRouter();
 
-const rowOptions = [10, 20, 50];
+const rowOptions = [25, 50, 100];
 
 const files = ref<StoredFile[]>([]);
 const loading = ref<boolean>(true);
-const page = ref<number>(1);
 const pageSize = ref<number>(rowOptions[0]);
-const total = ref<number>(0);
+// cursors[i] opens page i, and the first page has none. Prev reloads the page before from its cursor.
+const cursors = ref<(string | null)[]>([null]);
+const nextCursor = ref<string | null>(null);
 const sortField = ref<SortField>("date");
 const sortOrder = ref<number>(-1);
 const search = ref<string>("");
@@ -68,6 +69,10 @@ const menuTarget = ref<StoredFile | undefined>();
 
 const renameVisible = ref<boolean>(false);
 const renameTarget = ref<StoredFile | null>(null);
+
+const first = computed<number>(() => (cursors.value.length - 1) * pageSize.value);
+// The paginator needs a total, and the server sends none. One row past the rows so far turns on Next only when a next page exists.
+const pagerTotal = computed<number>(() => first.value + files.value.length + Number(nextCursor.value !== null));
 
 // Only the newest request may write the table, so a slow old page cannot replace a new one.
 let latestRequest = 0;
@@ -80,7 +85,7 @@ async function getData(): Promise<void> {
     try {
         const response = await fileStore.list({
             parent_id: props.folderId,
-            page: page.value,
+            cursor: cursors.value.at(-1) ?? null,
             page_size: pageSize.value,
             sort: sortField.value,
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
@@ -88,10 +93,8 @@ async function getData(): Promise<void> {
         });
         if (request !== latestRequest) return;
         files.value = response.data;
+        nextCursor.value = response.next_cursor;
         listedSearch.value = query;
-        total.value = response.total;
-        page.value = response.page;
-        pageSize.value = response.page_size;
     } catch (error) {
         if (request === latestRequest) toastStore.errorResponseToast(error);
     } finally {
@@ -99,9 +102,20 @@ async function getData(): Promise<void> {
     }
 }
 
+// The used cursor is cleared until the page loads, so a fast second click cannot open the same page twice.
 async function onPage(event: DataTablePageEvent): Promise<void> {
-    page.value = event.page + 1;
-    pageSize.value = event.rows;
+    if (event.rows !== pageSize.value) {
+        pageSize.value = event.rows;
+        await refresh();
+        return;
+    }
+
+    const page = cursors.value.length - 1;
+    if (event.page === 0) cursors.value = [null];
+    else if (event.page === page - 1) cursors.value.pop();
+    else if (event.page === page + 1 && nextCursor.value !== null) cursors.value.push(nextCursor.value);
+    else return;
+    nextCursor.value = null;
     await getData();
 }
 
@@ -118,7 +132,7 @@ function onSearchInput(): void {
 
 // A new sort, search, folder or item can change what each page holds, so go back to the first page.
 async function refresh(): Promise<void> {
-    page.value = 1;
+    cursors.value = [null];
     await getData();
 }
 
@@ -181,17 +195,17 @@ defineExpose({ refresh });
             lazy
             paginator
             :loading="loading"
-            :first="(page - 1) * pageSize"
+            :first="first"
             :rows="pageSize"
-            :total-records="total"
+            :total-records="pagerTotal"
             :sort-field="sortField"
             :sort-order="sortOrder"
             :rows-per-page-options="rowOptions"
             :paginator-template="{
                 '640px': 'PrevPageLink CurrentPageReport NextPageLink',
-                default: 'FirstPageLink PrevPageLink CurrentPageReport NextPageLink LastPageLink RowsPerPageDropdown',
+                default: 'FirstPageLink PrevPageLink CurrentPageReport NextPageLink RowsPerPageDropdown',
             }"
-            current-page-report-template="{first}–{last} of {totalRecords}"
+            current-page-report-template="{first}–{last}"
             table-class="table-fixed"
             :row-class="rowClass"
             context-menu

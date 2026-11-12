@@ -113,9 +113,9 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	captureMailer := &CaptureMailer{}
 
 	// Initialize services
-	userService := user.NewUserService(queries)
+	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
-	fileService := file.NewFileService(queries, cfg.Upload)
+	fileService := file.NewFileService(queries, db, cfg.Upload)
 
 	s.TC = &TestContainer{
 		Container: container,

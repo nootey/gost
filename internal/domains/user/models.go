@@ -1,6 +1,9 @@
 package user
 
-import "time"
+import (
+	"gost/internal/utils"
+	"time"
+)
 
 type User struct {
 	ID             int64      `json:"id"`
@@ -15,12 +18,19 @@ type User struct {
 	DeletedAt      *time.Time `json:"-"`
 }
 
-type PaginatedUsers struct {
-	Data       []*User `json:"data"`
-	Page       int     `json:"page"`
-	PageSize   int     `json:"page_size"`
-	Total      int     `json:"total"`
-	TotalPages int     `json:"total_pages"`
+type sortField string
+
+const sortByDate sortField = "date"
+
+// userList lists the users that are not deleted.
+// Select * must match userFields.
+var userList = utils.KeysetList[sortField]{
+	Select: "*",
+	From:   "users",
+	Where:  "deleted_at IS NULL",
+	Sorts: map[sortField][]string{
+		sortByDate: {"created_at", "id"},
+	},
 }
 
 type Role struct {

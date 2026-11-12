@@ -116,9 +116,9 @@ func main() {
 	healthSvc.Add(health.NewRedisChecker(rdb))
 
 	// Initialize services
-	userService := user.NewUserService(queries)
+	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, mail, cfg)
-	fileService := file.NewFileService(queries, cfg.Upload)
+	fileService := file.NewFileService(queries, db, cfg.Upload)
 	// Add more services as needed
 
 	// Initialize handlers

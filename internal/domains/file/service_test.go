@@ -6,15 +6,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"gost/internal/apperr"
 	"gost/internal/database"
 	"gost/internal/domains/file"
 	"gost/tests/integration"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -112,16 +113,14 @@ func (s *FileServiceTestSuite) TestList_OnlyOwnFiles() {
 	s.seedFile(alice, "alice-2.txt")
 	s.seedFile(bob, "bob-1.txt")
 
-	result, err := s.TC.Services.FileService.List(context.Background(), alice, newestFirst(0, 1, 10))
+	result, err := s.TC.Services.FileService.List(context.Background(), alice, newestFirst(0))
 
 	s.Require().NoError(err)
-	s.Equal(2, result.Total)
 	s.Equal([]string{"alice-2.txt", "alice-1.txt"}, fileNames(result.Data))
 
-	result, err = s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0, 1, 10))
+	result, err = s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0))
 
 	s.Require().NoError(err)
-	s.Equal(1, result.Total)
 	s.Equal([]string{"bob-1.txt"}, fileNames(result.Data))
 }
 
@@ -136,55 +135,154 @@ func (s *FileServiceTestSuite) TestList_NewestFirst() {
 		`UPDATE files SET created_at = NOW() + INTERVAL '1 hour' WHERE id = $1`, first)
 	s.Require().NoError(err)
 
-	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0, 1, 10))
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"a.txt", "c.txt", "b.txt"}, fileNames(result.Data))
 }
 
-func (s *FileServiceTestSuite) TestList_Pagination() {
+func (s *FileServiceTestSuite) TestList_Pages() {
 	userID := s.seedUser()
 	for i := 1; i <= 5; i++ {
 		s.seedFile(userID, fmt.Sprintf("file-%d.txt", i))
 	}
-	svc := s.TC.Services.FileService
 
-	second, err := svc.List(context.Background(), userID, newestFirst(0, 2, 2))
+	pages := s.walkPages(userID, file.ListQuery{PageSize: 2, Sort: file.SortByName})
 
-	s.Require().NoError(err)
-	s.Equal([]string{"file-3.txt", "file-2.txt"}, fileNames(second.Data))
-	s.Equal(5, second.Total)
-	s.Equal(3, second.TotalPages)
-
-	last, err := svc.List(context.Background(), userID, newestFirst(0, 3, 2))
-
-	s.Require().NoError(err)
-	s.Equal([]string{"file-1.txt"}, fileNames(last.Data))
+	s.Equal([][]string{{"file-1.txt", "file-2.txt"}, {"file-3.txt", "file-4.txt"}, {"file-5.txt"}}, pages)
 }
 
-func (s *FileServiceTestSuite) TestList_ClampsPageValues() {
+// Page breaks fall inside the folders, at the end of the folders and inside the files.
+// Rows tie on every sort key but id, so the cursor must keep the tie-break too.
+func (s *FileServiceTestSuite) TestList_WalkEverySort() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	for _, name := range []string{"Beta", "alpha", "Gamma"} {
+		s.createFolder(userID, 0, name)
+	}
+	s.seedFileWith(userID, "a.txt", "text/plain", 10, 0)
+	s.seedFileWith(userID, "A.txt", "text/plain", 10, 0)
+	s.seedFileWith(userID, "b.png", "image/png", 10, 0)
+	s.seedFileWith(userID, "c.pdf", "text/plain", 5, 1)
+	_, err := s.TC.DB.ExecContext(context.Background(),
+		`UPDATE files SET created_at = '2026-01-01 10:00:00' WHERE name IN ('alpha', 'Gamma', 'a.txt', 'A.txt', 'b.png')`)
+	s.Require().NoError(err)
+
+	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
+		var full [2][]string
+		for i, desc := range []bool{false, true} {
+			result, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 100, Sort: sort, Desc: desc})
+			s.Require().NoError(err)
+			s.Nil(result.NextCursor)
+			full[i] = fileNames(result.Data)
+
+			for _, pageSize := range []int{2, 3} {
+				pages := s.walkPages(userID, file.ListQuery{PageSize: pageSize, Sort: sort, Desc: desc})
+
+				s.Equal(full[i], slices.Concat(pages...), "%s desc=%t page size %d", sort, desc, pageSize)
+				for _, page := range pages[:len(pages)-1] {
+					s.Len(page, pageSize, "%s desc=%t page size %d", sort, desc, pageSize)
+				}
+			}
+		}
+
+		s.ElementsMatch([]string{"Beta", "alpha", "Gamma"}, full[0][:3], sort)
+		ascFolders, ascFiles := slices.Clone(full[0][:3]), slices.Clone(full[0][3:])
+		slices.Reverse(ascFolders)
+		slices.Reverse(ascFiles)
+		s.Equal(slices.Concat(ascFolders, ascFiles), full[1], "%s desc must reverse asc", sort)
+	}
+}
+
+func (s *FileServiceTestSuite) TestList_ClampsPageSize() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 
+	empty, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	// An empty page must encode as [], not null.
+	s.NotNil(empty.Data)
+	s.Empty(empty.Data)
+	s.Nil(empty.NextCursor)
+
+	for i := 1; i <= 30; i++ {
+		s.seedFile(userID, fmt.Sprintf("file-%d.txt", i))
+	}
 	cases := []struct {
-		page, pageSize         int
-		wantPage, wantPageSize int
+		pageSize, want int
+		more           bool
 	}{
-		{0, 0, 1, 20},
-		{-3, 101, 1, 20},
-		{1, 100, 1, 100},
-		{math.MaxInt, 20, math.MaxInt32 / 20, 20},
+		{0, 25, true},
+		{-3, 25, true},
+		{101, 25, true},
+		{100, 30, false},
+		{30, 30, false},
 	}
 	for _, tc := range cases {
-		result, err := svc.List(context.Background(), userID, newestFirst(0, tc.page, tc.pageSize))
+		q := newestFirst(0)
+		q.PageSize = tc.pageSize
+		result, err := svc.List(context.Background(), userID, q)
 
 		s.Require().NoError(err)
-		s.Equal(tc.wantPage, result.Page)
-		s.Equal(tc.wantPageSize, result.PageSize)
-		// An empty page must encode as [], not null.
-		s.NotNil(result.Data)
-		s.Empty(result.Data)
+		s.Len(result.Data, tc.want, tc.pageSize)
+		s.Equal(tc.more, result.NextCursor != nil, tc.pageSize)
 	}
+}
+
+// Tampered values reach Postgres, which rejects them by the type of their sort key.
+func (s *FileServiceTestSuite) TestList_BadCursor() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	s.createFolder(userID, 0, "Docs")
+	s.seedFile(userID, "a.txt")
+
+	first, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 1, Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Require().NotNil(first.NextCursor)
+	byName := *first.NextCursor
+
+	cases := []struct {
+		label  string
+		cursor string
+		sort   file.SortField
+		desc   bool
+	}{
+		{"not base64", "!!!", file.SortByName, false},
+		{"not json", cursorOf("nope"), file.SortByName, false},
+		{"another sort", byName, file.SortBySize, false},
+		{"another order", byName, file.SortByName, true},
+		{"too few values", cursorOf(`{"s":"name","v":["a"]}`), file.SortByName, false},
+		{"unknown part", cursorOf(`{"s":"name","p":2,"v":["a","1"]}`), file.SortByName, false},
+		{"negative part", cursorOf(`{"s":"name","p":-1,"v":["a","1"]}`), file.SortByName, false},
+		{"id not a number", cursorOf(`{"s":"name","v":["a","abc"]}`), file.SortByName, false},
+		{"size out of range", cursorOf(`{"s":"size","v":["99999999999999999999","a","1"]}`), file.SortBySize, false},
+		{"date not a time", cursorOf(`{"s":"date","p":1,"v":["not a time","1"]}`), file.SortByDate, false},
+		{"nul byte in a name", cursorOf(`{"s":"name","v":["a\u0000","1"]}`), file.SortByName, false},
+	}
+	for _, tc := range cases {
+		_, err := svc.List(context.Background(), userID, file.ListQuery{Cursor: tc.cursor, Sort: tc.sort, Desc: tc.desc})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc.label)
+		s.Equal("invalid cursor", msg, tc.label)
+	}
+}
+
+// The list scans rows by hand, so a field it misses would only show here.
+func (s *FileServiceTestSuite) TestList_ReturnsEveryField() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	folder := s.createFolder(userID, 0, "Docs")
+	uploaded, err := svc.Upload(context.Background(), userID, folder.ID, "notes.txt", strings.NewReader("hello"))
+	s.Require().NoError(err)
+
+	inFolder, err := svc.List(context.Background(), userID, newestFirst(folder.ID))
+	s.Require().NoError(err)
+	atRoot, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+
+	s.Equal([]*file.File{uploaded}, inFolder.Data)
+	s.Equal([]*file.File{folder}, atRoot.Data)
 }
 
 func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
@@ -198,11 +296,11 @@ func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
 	s.Require().NotNil(f.ParentID)
 	s.Equal(folder.ID, *f.ParentID)
 
-	inFolder, err := svc.List(context.Background(), userID, newestFirst(folder.ID, 1, 10))
+	inFolder, err := svc.List(context.Background(), userID, newestFirst(folder.ID))
 	s.Require().NoError(err)
 	s.Equal([]string{"notes.txt"}, fileNames(inFolder.Data))
 
-	atRoot, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
+	atRoot, err := svc.List(context.Background(), userID, newestFirst(0))
 	s.Require().NoError(err)
 	s.Equal([]string{"Docs"}, fileNames(atRoot.Data))
 }
@@ -389,14 +487,14 @@ func (s *FileServiceTestSuite) TestList_FoldersFirst() {
 	s.seedFile(userID, "y.txt")
 	s.createFolder(userID, 0, "A")
 
-	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0, 1, 10))
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0))
 
 	s.Require().NoError(err)
 	s.Equal([]string{"A", "B", "y.txt", "z.txt"}, fileNames(result.Data))
-	s.Equal(4, result.Total)
 }
 
 // Folder names and file names differ in case, so a byte-order sort would give another order.
+// Folders tie on size and type, and a descending sort reverses the tie too.
 func (s *FileServiceTestSuite) TestList_SortByEachColumn() {
 	userID := s.seedUser()
 	s.moveCreatedAt(s.createFolder(userID, 0, "Zeta").ID, 2)
@@ -413,15 +511,15 @@ func (s *FileServiceTestSuite) TestList_SortByEachColumn() {
 		{file.SortByName, false, []string{"alpha", "Zeta", "a.png", "b.txt", "C.pdf"}},
 		{file.SortByName, true, []string{"Zeta", "alpha", "C.pdf", "b.txt", "a.png"}},
 		{file.SortBySize, false, []string{"alpha", "Zeta", "b.txt", "a.png", "C.pdf"}},
-		{file.SortBySize, true, []string{"alpha", "Zeta", "C.pdf", "a.png", "b.txt"}},
+		{file.SortBySize, true, []string{"Zeta", "alpha", "C.pdf", "a.png", "b.txt"}},
 		{file.SortByType, false, []string{"alpha", "Zeta", "C.pdf", "a.png", "b.txt"}},
-		{file.SortByType, true, []string{"alpha", "Zeta", "b.txt", "a.png", "C.pdf"}},
+		{file.SortByType, true, []string{"Zeta", "alpha", "b.txt", "a.png", "C.pdf"}},
 		{file.SortByDate, false, []string{"Zeta", "alpha", "C.pdf", "b.txt", "a.png"}},
 		{file.SortByDate, true, []string{"alpha", "Zeta", "a.png", "b.txt", "C.pdf"}},
 	}
 	for _, tc := range cases {
 		result, err := s.TC.Services.FileService.List(context.Background(), userID,
-			file.ListQuery{Page: 1, PageSize: 10, Sort: tc.sort, Desc: tc.desc})
+			file.ListQuery{PageSize: 10, Sort: tc.sort, Desc: tc.desc})
 
 		s.Require().NoError(err)
 		s.Equal(tc.want, fileNames(result.Data), "%s desc=%t", tc.sort, tc.desc)
@@ -451,11 +549,10 @@ func (s *FileServiceTestSuite) TestList_Search() {
 	}
 	for _, tc := range cases {
 		result, err := svc.List(context.Background(), userID,
-			file.ListQuery{Page: 1, PageSize: 10, Search: tc.search, Sort: file.SortByName})
+			file.ListQuery{PageSize: 10, Search: tc.search, Sort: file.SortByName})
 
 		s.Require().NoError(err)
 		s.Equal(tc.want, fileNames(result.Data), tc.search)
-		s.Equal(len(tc.want), result.Total, tc.search)
 	}
 }
 
@@ -464,7 +561,7 @@ func (s *FileServiceTestSuite) TestList_UnknownFolder() {
 	fileID := s.seedFile(userID, "a.txt")
 
 	for _, parentID := range []int64{999, fileID} {
-		_, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(parentID, 1, 10))
+		_, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(parentID))
 
 		status, msg := apperr.Resolve(err)
 		s.Equal(http.StatusNotFound, status, parentID)
@@ -529,7 +626,7 @@ func (s *FileServiceTestSuite) TestRename_File() {
 	s.False(f.IsFolder)
 	s.Equal("text/plain; charset=utf-8", f.ContentType)
 
-	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
 	s.Require().NoError(err)
 	s.Equal([]string{"report.md"}, fileNames(result.Data))
 }
@@ -598,7 +695,7 @@ func (s *FileServiceTestSuite) TestRename_RejectsBadNames() {
 		s.Equal(tc.message, msg)
 	}
 
-	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
 	s.Require().NoError(err)
 	s.Equal([]string{"Photos", "a.txt"}, fileNames(result.Data))
 }
@@ -627,7 +724,7 @@ func (s *FileServiceTestSuite) TestRename_NameTaken() {
 		s.Equal("an item with this name already exists", msg)
 	}
 
-	result, err := svc.List(context.Background(), userID, newestFirst(0, 1, 10))
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
 	s.Require().NoError(err)
 	s.ElementsMatch([]string{"Photos", "a.txt", "b.txt"}, fileNames(result.Data))
 }
@@ -661,7 +758,7 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 		s.Equal("item not found", msg)
 	}
 
-	result, err := s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0, 1, 10))
+	result, err := s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0))
 	s.Require().NoError(err)
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
@@ -715,8 +812,28 @@ func (s *FileServiceTestSuite) moveCreatedAt(id int64, hoursAgo int) {
 	s.Require().NoError(err)
 }
 
-func newestFirst(parentID int64, page, pageSize int) file.ListQuery {
-	return file.ListQuery{ParentID: parentID, Page: page, PageSize: pageSize, Sort: file.SortByDate, Desc: true}
+func newestFirst(parentID int64) file.ListQuery {
+	return file.ListQuery{ParentID: parentID, Sort: file.SortByDate, Desc: true}
+}
+
+func (s *FileServiceTestSuite) walkPages(userID int64, q file.ListQuery) [][]string {
+	var pages [][]string
+	for range 50 {
+		result, err := s.TC.Services.FileService.List(context.Background(), userID, q)
+		s.Require().NoError(err)
+
+		pages = append(pages, fileNames(result.Data))
+		if result.NextCursor == nil {
+			return pages
+		}
+		q.Cursor = *result.NextCursor
+	}
+	s.FailNow("the pages never end")
+	return nil
+}
+
+func cursorOf(raw string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 func fileNames(files []*file.File) []string {

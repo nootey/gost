@@ -2,6 +2,7 @@ package file
 
 import (
 	"gost/internal/apperr"
+	"gost/internal/utils"
 	"time"
 )
 
@@ -25,22 +26,31 @@ const (
 	SortByDate SortField = "date"
 )
 
-// ListQuery picks one folder's page. A ParentID of 0 means the root. An empty Search matches every name.
+// fileList lists one folder. The args are the user id, the folder id (0 for the root) and the search.
+// Select * must match fileFields.
+var fileList = utils.KeysetList[SortField]{
+	Select: "*",
+	From:   "files",
+	Where:  "user_id = $1 AND COALESCE(parent_id, 0) = $2::bigint AND strpos(lower(name), lower($3::text)) > 0",
+	Sorts: map[SortField][]string{
+		SortByName: {"lower(name)", "id"},
+		SortBySize: {"size_bytes", "lower(name)", "id"},
+		SortByType: {"content_type", "lower(name)", "id"},
+		SortByDate: {"created_at", "id"},
+	},
+	// Folders first. This is the only place that applies that rule.
+	// Postgres turns "(storage_key IS NULL) = false" into "storage_key IS NOT NULL", and the index does not match that. IS FALSE stays as it is.
+	Parts: []string{"(storage_key IS NULL) IS TRUE", "(storage_key IS NULL) IS FALSE"},
+}
+
+// ListQuery picks one page of a folder. A ParentID of 0 means the root. An empty Search matches every name.
 type ListQuery struct {
 	ParentID int64
-	Page     int
+	Cursor   string
 	PageSize int
 	Search   string
 	Sort     SortField
 	Desc     bool
-}
-
-type PaginatedFiles struct {
-	Data       []*File `json:"data"`
-	Page       int     `json:"page"`
-	PageSize   int     `json:"page_size"`
-	Total      int     `json:"total"`
-	TotalPages int     `json:"total_pages"`
 }
 
 type UploadResponse struct {

@@ -62,12 +62,11 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.List(r.Context(), userID, ListQuery{
 		ParentID: parentID,
-		Page:     page,
+		Cursor:   r.URL.Query().Get("cursor"),
 		PageSize: pageSize,
 		Search:   search,
 		Sort:     sort,

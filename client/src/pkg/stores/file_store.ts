@@ -1,13 +1,14 @@
 import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
+import type { Page } from "../api/api_models.ts";
 import type {
     FolderForm,
     FolderPath,
     FolderResponse,
     ListQuery,
-    PaginatedFiles,
     RenameForm,
     RenameResponse,
+    StoredFile,
     UploadResponse,
 } from "../../domains/file/models.ts";
 
@@ -18,8 +19,8 @@ export const useFileStore = defineStore("file", {
         folderPrefix: "folders",
     }),
     actions: {
-        async list(query: ListQuery): Promise<PaginatedFiles> {
-            const response = await apiClient.get<PaginatedFiles>(this.apiPrefix, { params: { ...query } });
+        async list(query: ListQuery): Promise<Page<StoredFile>> {
+            const response = await apiClient.get<Page<StoredFile>>(this.apiPrefix, { params: { ...query } });
             return response.data;
         },
 

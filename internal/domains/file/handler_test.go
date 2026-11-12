@@ -210,46 +210,48 @@ func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httpt
 }
 
 func (suite *FileHandlerTestSuite) TestList_Success() {
+	next := "next-page"
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, file.ListQuery{Page: 2, PageSize: 5, Sort: file.SortByDate, Desc: true}).
-		Return(&file.PaginatedFiles{
+		List(mock.Anything, testUserID, file.ListQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true}).
+		Return(&utils.Page[*file.File]{
 			Data:       []*file.File{{ID: 3, Name: "c.txt"}, {ID: 2, Name: "b.txt"}},
-			Page:       2,
-			PageSize:   5,
-			Total:      7,
-			TotalPages: 2,
+			NextCursor: &next,
 		}, nil).
 		Once()
 
-	w := suite.list("?page=2&page_size=5", true)
+	w := suite.list("?cursor=this-page&page_size=5", true)
 
 	suite.Equal(http.StatusOK, w.Code)
-	var resp file.PaginatedFiles
+	var resp utils.Page[*file.File]
 	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 	suite.Require().Len(resp.Data, 2)
 	suite.Equal("c.txt", resp.Data[0].Name)
-	suite.Equal(2, resp.Page)
-	suite.Equal(7, resp.Total)
+	suite.Require().NotNil(resp.NextCursor)
+	suite.Equal(next, *resp.NextCursor)
 }
 
-// Missing or bad page values reach the service as zero, so the service picks the defaults. The sort is newest first.
+// A missing or bad page size reaches the service as zero, so the service picks the default. The sort is newest first.
+// The old page param is ignored. The last page has a null next_cursor, so the client knows to stop.
 func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 	suite.mockService.EXPECT().
 		List(mock.Anything, testUserID, file.ListQuery{Sort: file.SortByDate, Desc: true}).
-		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
+		Return(&utils.Page[*file.File]{Data: []*file.File{}}, nil).
 		Twice()
 
 	suite.Equal(http.StatusOK, suite.list("", true).Code)
-	suite.Equal(http.StatusOK, suite.list("?page=abc&page_size=-x", true).Code)
+	w := suite.list("?page=2&page_size=-x", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.JSONEq(`{"data":[],"next_cursor":null}`, w.Body.String())
 }
 
 func (suite *FileHandlerTestSuite) TestList_InFolder() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, file.ListQuery{ParentID: 12, Page: 1, PageSize: 10, Sort: file.SortByDate, Desc: true}).
-		Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 10}, nil).
+		List(mock.Anything, testUserID, file.ListQuery{ParentID: 12, PageSize: 10, Sort: file.SortByDate, Desc: true}).
+		Return(&utils.Page[*file.File]{Data: []*file.File{}}, nil).
 		Once()
 
-	w := suite.list("?parent_id=12&page=1&page_size=10", true)
+	w := suite.list("?parent_id=12&page_size=10", true)
 
 	suite.Equal(http.StatusOK, w.Code)
 }
@@ -279,7 +281,7 @@ func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
 	for _, tc := range cases {
 		suite.mockService.EXPECT().
 			List(mock.Anything, testUserID, tc.want).
-			Return(&file.PaginatedFiles{Data: []*file.File{}, Page: 1, PageSize: 20}, nil).
+			Return(&utils.Page[*file.File]{Data: []*file.File{}}, nil).
 			Once()
 
 		suite.Equal(http.StatusOK, suite.list(tc.query, true).Code, tc.query)

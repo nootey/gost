@@ -13,3 +13,9 @@ func IsUniqueViolation(err error, constraint string) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Code == pqUniqueViolation && pqErr.Constraint == constraint
 }
+
+// Class 22 holds the errors for values that do not fit their type, such as "abc" for a bigint.
+func isDataException(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code.Class() == "22"
+}
