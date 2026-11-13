@@ -226,6 +226,32 @@ func (h *FileHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	h.resp.Success(w, http.StatusOK, "Restored from the trash.")
 }
 
+func (h *FileHandler) Purge(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.Purge(r.Context(), userID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Deleted forever.")
+}
+
 func (h *FileHandler) ListTrash(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

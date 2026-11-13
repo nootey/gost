@@ -24,6 +24,10 @@ const maxNameAttempts = 3
 // trashBatchSize caps the rows one transaction of the trash job marks, so the job never holds the tree lock long.
 const trashBatchSize = 1000
 
+// purgeBatchSize caps the rows one transaction of the purge job changes. It is smaller than trashBatchSize, because
+// Postgres checks the parent_id foreign key for each deleted row: about 10 ms for 250 rows, 37 ms for 1000.
+const purgeBatchSize = 250
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -40,6 +44,7 @@ type FileServiceInterface interface {
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 	Trash(ctx context.Context, userID int64, ids []int64) error
 	Restore(ctx context.Context, userID int64, ids []int64) error
+	Purge(ctx context.Context, userID int64, ids []int64) error
 	ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error)
 }
 
@@ -82,7 +87,7 @@ func toFileModel(dbFile database.File) *File {
 func fileFields(f *database.File) []any {
 	return []any{
 		&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes,
-		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID,
+		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
 	}
 }
 
@@ -349,6 +354,56 @@ func (s *FileService) Restore(ctx context.Context, userID int64, ids []int64) er
 	return errNameTaken
 }
 
+// Purge is all or none, the same as Restore. It only marks the items, so the trash view and restore skip them at once.
+// A job deletes the rows and the bytes (PurgeGroups).
+func (s *FileService) Purge(ctx context.Context, userID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	return utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserTree(ctx, userID); err != nil {
+			return err
+		}
+		marked, err := q.RequestPurge(ctx, database.RequestPurgeParams{UserID: userID, Ids: ids})
+		if err != nil {
+			return err
+		}
+		if marked != int64(len(ids)) {
+			return errItemNotFound
+		}
+		_, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: userID, RootIDs: ids}, nil)
+		return err
+	})
+}
+
+// PurgeGroups deletes the marked groups for good, in short transactions. It finishes the trash marking first,
+// so no live row is left under a group. A run after a failure finishes the job.
+func (s *FileService) PurgeGroups(ctx context.Context, userID int64, rootIDs []int64) error {
+	rootIDs, err := s.queries.ListPurgeRoots(ctx, database.ListPurgeRootsParams{UserID: userID, Ids: rootIDs})
+	if err != nil || len(rootIDs) == 0 {
+		return err
+	}
+	if err := s.TrashSubtrees(ctx, userID, rootIDs); err != nil {
+		return err
+	}
+	if err := s.moveNestedRootsHome(ctx, userID, rootIDs); err != nil {
+		return err
+	}
+	if err := s.deleteGroupRows(ctx, userID, rootIDs); err != nil {
+		return err
+	}
+
+	// A root goes last, so a root that is still there means a row outside the groups blocks the delete.
+	left, err := s.queries.ListPurgeRoots(ctx, database.ListPurgeRootsParams{UserID: userID, Ids: rootIDs})
+	if err != nil {
+		return err
+	}
+	if len(left) > 0 {
+		return fmt.Errorf("purge left trash roots %v behind", left)
+	}
+	return nil
+}
+
 func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {
 	page, err := utils.FetchPage(ctx, s.db, trashList, utils.PageQuery[SortField]{
 		Args:     []any{userID},
@@ -388,6 +443,66 @@ func (s *FileService) trashChildren(ctx context.Context, userID int64, rootIDs, 
 			return err
 		})
 		if err != nil || marked < trashBatchSize {
+			return err
+		}
+	}
+}
+
+// moveNestedRootsHome moves the items deleted earlier out of the groups, one batch per transaction, until a batch comes back short.
+func (s *FileService) moveNestedRootsHome(ctx context.Context, userID int64, rootIDs []int64) error {
+	for {
+		var moved int64
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			var err error
+			moved, err = q.MoveNestedTrashRootsHome(ctx, database.MoveNestedTrashRootsHomeParams{
+				UserID:    userID,
+				RootIds:   rootIDs,
+				BatchSize: purgeBatchSize,
+			})
+			return err
+		})
+		if err != nil || moved < purgeBatchSize {
+			return err
+		}
+	}
+}
+
+// deleteGroupRows deletes the groups from the bottom up, one batch of rows with nothing under them at a time.
+// It removes the bytes before the rows, so a crash leaves rows the next run deletes, never bytes with no row.
+func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs []int64) error {
+	for {
+		leaves, err := s.queries.ListPurgeLeaves(ctx, database.ListPurgeLeavesParams{
+			UserID:    userID,
+			RootIds:   rootIDs,
+			BatchSize: purgeBatchSize,
+		})
+		if err != nil || len(leaves) == 0 {
+			return err
+		}
+
+		ids := make([]int64, len(leaves))
+		for i, leaf := range leaves {
+			ids[i] = leaf.ID
+			if !leaf.StorageKey.Valid {
+				continue
+			}
+			if err := utils.RemoveStoredFile(s.cfg.Dir, leaf.StorageKey.String); err != nil {
+				return fmt.Errorf("failed to remove stored file: %w", err)
+			}
+		}
+
+		err = utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			return q.DeletePurgeRows(ctx, database.DeletePurgeRowsParams{UserID: userID, Ids: ids, RootIds: rootIDs})
+		})
+		if err != nil {
 			return err
 		}
 	}

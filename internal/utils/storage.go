@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 )
 
@@ -48,6 +49,7 @@ func StoreFile(dir string, src io.Reader, maxBytes int64) (string, int64, error)
 	return key, size, nil
 }
 
+// RemoveStoredFile removes the bytes under key. A missing file counts as removed, so a job that runs again can call it twice.
 func RemoveStoredFile(dir, key string) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -55,5 +57,8 @@ func RemoveStoredFile(dir, key string) error {
 	}
 	defer func() { _ = root.Close() }()
 
-	return root.Remove(key)
+	if err := root.Remove(key); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }

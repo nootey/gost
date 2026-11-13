@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useConfirm } from "primevue/useconfirm";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
@@ -10,10 +11,15 @@ import type { DataTablePageEvent, DataTableSortEvent } from "primevue/datatable"
 import type { MenuItem } from "primevue/menuitem";
 import type { SortField, TrashedFile } from "../models.ts";
 
-const MENU_ITEMS: MenuItem[] = [{ label: "Restore", icon: "pi pi-undo", command: restoreMenuTargets }];
+const MENU_ITEMS: MenuItem[] = [
+    { label: "Restore", icon: "pi pi-undo", command: restoreMenuTargets },
+    { separator: true },
+    { label: "Delete forever", icon: "pi pi-trash", danger: true, command: purgeMenuTargets },
+];
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const confirm = useConfirm();
 
 const rowOptions = [25, 50, 100];
 
@@ -80,6 +86,31 @@ async function restoreMenuTargets(): Promise<void> {
     await restore(menuTargets.value);
 }
 
+// The ids are read before the prompt opens, because the menu clears its target when it hides.
+function purge(targets: TrashedFile[]): void {
+    const ids = targets.map((item) => item.id);
+    const what = ids.length === 1 ? `"${targets[0].name}"` : `${ids.length} items`;
+    confirm.require({
+        header: "Delete forever",
+        message: `Delete ${what} forever? You cannot undo this.`,
+        rejectProps: { label: "Cancel" },
+        acceptProps: { label: "Delete forever", severity: "danger" },
+        accept: async () => {
+            try {
+                const response = await fileStore.purge({ ids });
+                toastStore.successResponseToast(response);
+            } catch (error) {
+                toastStore.errorResponseToast(error);
+            }
+            await getData();
+        },
+    });
+}
+
+function purgeMenuTargets(): void {
+    purge(menuTargets.value);
+}
+
 onMounted(getData);
 </script>
 
@@ -113,15 +144,26 @@ onMounted(getData);
         >
             <template #header>
                 <div class="flex min-h-8 items-center justify-between gap-3">
-                    <Button
-                        label="Restore"
-                        icon="pi pi-undo"
-                        size="small"
-                        severity="secondary"
-                        variant="outlined"
-                        :disabled="selection.length === 0"
-                        @click="restore(selection)"
-                    />
+                    <div class="flex items-center gap-2">
+                        <Button
+                            label="Restore"
+                            icon="pi pi-undo"
+                            size="small"
+                            severity="secondary"
+                            variant="outlined"
+                            :disabled="selection.length === 0"
+                            @click="restore(selection)"
+                        />
+                        <Button
+                            label="Delete forever"
+                            icon="pi pi-trash"
+                            size="small"
+                            severity="danger"
+                            variant="outlined"
+                            :disabled="selection.length === 0"
+                            @click="purge(selection)"
+                        />
+                    </div>
                     <div v-if="selection.length > 0" class="flex shrink-0 items-center gap-1">
                         <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
                         <Button
@@ -201,6 +243,13 @@ onMounted(getData);
             </Column>
         </DataTable>
 
-        <ContextMenu ref="rowMenu" :model="MENU_ITEMS" @hide="menuTarget = undefined" />
+        <ContextMenu ref="rowMenu" :model="MENU_ITEMS" @hide="menuTarget = undefined">
+            <template #item="{ item, props: itemProps }">
+                <a v-bind="itemProps.action" :class="{ 'text-danger': item.danger }">
+                    <span v-bind="itemProps.icon" :class="{ 'text-danger': item.danger }" />
+                    <span v-bind="itemProps.label">{{ item.label }}</span>
+                </a>
+            </template>
+        </ContextMenu>
     </div>
 </template>

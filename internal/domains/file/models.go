@@ -46,13 +46,13 @@ var fileList = utils.KeysetList[SortField]{
 	Parts: foldersFirst,
 }
 
-// trashList lists the items the user deleted, not the rows under them. The arg is the user id.
-// Select * must match fileFields.
+// trashList lists the items the user deleted, not the rows under them. An item marked for a permanent delete is gone
+// for the user, so it is left out. The arg is the user id. Select * must match fileFields.
 var trashList = utils.KeysetList[SortField]{
 	Select: "*",
 	From:   "files",
 	// trash_root_id = id must stay as it is, so the trash index matches.
-	Where: "user_id = $1 AND trash_root_id = id",
+	Where: "user_id = $1 AND trash_root_id = id AND purge_requested_at IS NULL",
 	Sorts: map[SortField][]string{
 		SortByName: {"lower(name)", "id"},
 		SortBySize: {"size_bytes", "lower(name)", "id"},

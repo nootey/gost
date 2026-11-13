@@ -277,6 +277,69 @@ func (_c *MockFileServiceInterface_ListTrash_Call) RunAndReturn(run func(ctx con
 	return _c
 }
 
+// Purge provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) Purge(ctx context.Context, userID int64, ids []int64) error {
+	ret := _mock.Called(ctx, userID, ids)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Purge")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64) error); ok {
+		r0 = returnFunc(ctx, userID, ids)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_Purge_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Purge'
+type MockFileServiceInterface_Purge_Call struct {
+	*mock.Call
+}
+
+// Purge is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - ids []int64
+func (_e *MockFileServiceInterface_Expecter) Purge(ctx any, userID any, ids any) *MockFileServiceInterface_Purge_Call {
+	return &MockFileServiceInterface_Purge_Call{Call: _e.mock.On("Purge", ctx, userID, ids)}
+}
+
+func (_c *MockFileServiceInterface_Purge_Call) Run(run func(ctx context.Context, userID int64, ids []int64)) *MockFileServiceInterface_Purge_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []int64
+		if args[2] != nil {
+			arg2 = args[2].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_Purge_Call) Return(err error) *MockFileServiceInterface_Purge_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_Purge_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_Purge_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Rename provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) Rename(ctx context.Context, userID int64, id int64, name string) (*file.File, error) {
 	ret := _mock.Called(ctx, userID, id, name)

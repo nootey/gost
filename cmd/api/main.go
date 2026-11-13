@@ -225,6 +225,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Get("/trash", h.File.ListTrash)
 				r.Post("/trash", h.File.Trash)
 				r.Post("/trash/restore", h.File.Restore)
+				r.Post("/trash/purge", h.File.Purge)
 				// Mount more protected handlers as needed
 			})
 		})

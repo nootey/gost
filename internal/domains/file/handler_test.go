@@ -52,6 +52,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/trash", suite.handler.ListTrash)
 	suite.router.Post("/trash", suite.handler.Trash)
 	suite.router.Post("/trash/restore", suite.handler.Restore)
+	suite.router.Post("/trash/purge", suite.handler.Purge)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -658,6 +659,55 @@ func (suite *FileHandlerTestSuite) TestRestore_ServiceError() {
 		Once()
 
 	w := suite.postItems("/trash/restore", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestPurge_Success() {
+	suite.mockService.EXPECT().
+		Purge(mock.Anything, testUserID, []int64{5, 3, 5}).
+		Return(nil).
+		Once()
+
+	w := suite.postItems("/trash/purge", `{"ids":[5,3,5]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Deleted forever.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestPurge_InvalidIDs() {
+	tooMany := strings.TrimSuffix(strings.Repeat("1,", 101), ",")
+	for _, body := range []string{`{}`, `{"ids":[]}`, `{"ids":[0]}`, `{"ids":[` + tooMany + `]}`} {
+		w := suite.postItems("/trash/purge", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid ids", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestPurge_InvalidBody() {
+	w := suite.postItems("/trash/purge", `not json`, true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid request body", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestPurge_Unauthenticated() {
+	w := suite.postItems("/trash/purge", `{"ids":[5]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestPurge_ServiceError() {
+	suite.mockService.EXPECT().
+		Purge(mock.Anything, testUserID, []int64{5}).
+		Return(apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.postItems("/trash/purge", `{"ids":[5]}`, true)
 
 	suite.Equal(http.StatusNotFound, w.Code)
 	suite.Equal("item not found", suite.errorMessage(w))

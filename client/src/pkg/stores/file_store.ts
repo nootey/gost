@@ -62,6 +62,11 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
+        async purge(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.trashPrefix}/purge`, form);
+            return response.data;
+        },
+
         async resolveFolder(dir: string): Promise<FolderPath> {
             const response = await apiClient.get<FolderPath>(`${this.folderPrefix}/resolve`, { params: { dir } });
             return response.data;

@@ -97,6 +97,7 @@ WHERE user_id = sqlc.arg(user_id)
 
 -- name: ListTrashRoots :many
 -- Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+-- An item marked for a permanent delete is left out.
 SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
 FROM files f
 LEFT JOIN files p ON p.id = f.parent_id
@@ -104,6 +105,7 @@ LEFT JOIN files p ON p.id = f.parent_id
 WHERE f.user_id = sqlc.arg(user_id)
   AND f.id = ANY(sqlc.arg(ids)::bigint[])
   AND f.trash_root_id = f.id
+  AND f.purge_requested_at IS NULL
 ORDER BY f.id
 FOR UPDATE OF f;
 
@@ -132,3 +134,54 @@ SET parent_id = NULLIF((sqlc.arg(parent_ids)::bigint[])[array_position(sqlc.arg(
     trashed_at = NULL, trash_root_id = NULL, updated_at = NOW()
 WHERE user_id = sqlc.arg(user_id)
   AND id = ANY(sqlc.arg(ids)::bigint[]);
+
+-- name: RequestPurge :execrows
+-- Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
+UPDATE files
+SET purge_requested_at = NOW()
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trash_root_id = id
+  AND purge_requested_at IS NULL;
+
+-- name: ListPurgeRoots :many
+-- The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
+SELECT id FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND purge_requested_at IS NOT NULL
+ORDER BY id;
+
+-- name: MoveNestedTrashRootsHome :execrows
+-- Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
+-- Else the parent_id foreign key blocks the delete of the folder they were in.
+WITH batch AS (
+    SELECT c.id
+    FROM files c
+    JOIN files p ON p.id = c.parent_id
+    WHERE c.user_id = sqlc.arg(user_id)
+      AND c.trash_root_id = c.id
+      AND p.trash_root_id = ANY(sqlc.arg(root_ids)::bigint[])
+    LIMIT sqlc.arg(batch_size)
+)
+UPDATE files
+SET parent_id = NULL
+FROM batch
+WHERE files.id = batch.id;
+
+-- name: ListPurgeLeaves :many
+-- Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
+-- the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
+SELECT f.id, f.storage_key
+FROM files f
+WHERE f.user_id = sqlc.arg(user_id)
+  AND f.trash_root_id = ANY(sqlc.arg(root_ids)::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM files c WHERE c.parent_id = f.id)
+LIMIT sqlc.arg(batch_size);
+
+-- name: DeletePurgeRows :exec
+-- Deletes the rows in ids. A row outside the root_ids groups stays.
+DELETE FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trash_root_id = ANY(sqlc.arg(root_ids)::bigint[]);

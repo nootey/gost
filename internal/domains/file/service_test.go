@@ -8,12 +8,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gost/internal/apperr"
 	"gost/internal/database"
 	"gost/internal/domains/file"
 	"gost/internal/jobs"
 	"gost/tests/integration"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1327,6 +1329,196 @@ func (s *FileServiceTestSuite) TestRestore_ParallelWithTrashOfItsFolder() {
 	s.Zero(s.liveRowsInTrash(userID))
 }
 
+// Purge hides the groups at once and adds one job. The job deletes every row of the groups and their bytes.
+func (s *FileServiceTestSuite) TestPurge_DeletesRowsAndBytes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	a, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	b, err := svc.Upload(context.Background(), userID, sub.ID, "b.txt", strings.NewReader("b"))
+	s.Require().NoError(err)
+	gone, err := svc.Upload(context.Background(), userID, 0, "gone.txt", strings.NewReader("g"))
+	s.Require().NoError(err)
+	keep, err := svc.Upload(context.Background(), userID, 0, "keep.txt", strings.NewReader("k"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID, gone.ID}))
+	s.workTrashJobs()
+	purgedKeys := []string{s.storageKey(a.ID), s.storageKey(b.ID), s.storageKey(gone.ID)}
+
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{gone.ID, docs.ID, gone.ID}))
+
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Empty(trash.Data)
+	s.Equal([]jobs.PurgeGroupsArgs{{UserID: userID, RootIDs: []int64{docs.ID, gone.ID}}}, s.purgeJobs())
+
+	s.workPurgeJobs()
+
+	s.Equal(1, s.fileRows())
+	for _, key := range purgedKeys {
+		s.False(s.storedFileExists(key), key)
+	}
+	s.True(s.storedFileExists(s.storageKey(keep.ID)))
+}
+
+// One bad id undoes the rest. A live item, a row under a deleted folder and an item already marked are bad ids too.
+func (s *FileServiceTestSuite) TestPurge_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.seedFile(alice, "a.txt")
+	live := s.seedFile(alice, "live.txt")
+	marked := s.seedFile(alice, "marked.txt")
+	docs := s.createFolder(alice, 0, "Docs")
+	under, err := svc.Upload(context.Background(), alice, docs.ID, "under.txt", strings.NewReader("u"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a, marked, docs.ID}))
+	s.workTrashJobs()
+	s.Require().NoError(svc.Purge(context.Background(), alice, []int64{marked}))
+	bobFile := s.seedFile(bob, "bob.txt")
+	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{bobFile}))
+
+	for _, bad := range []int64{999, live, under.ID, marked, bobFile} {
+		err := svc.Purge(context.Background(), alice, []int64{a, bad})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+
+	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Equal([]string{"Docs", "a.txt"}, trashNames(trash.Data))
+	s.Equal([]jobs.PurgeGroupsArgs{{UserID: alice, RootIDs: []int64{marked}}}, s.purgeJobs())
+}
+
+// A group marked for a permanent delete cannot come back, even before the job runs.
+func (s *FileServiceTestSuite) TestPurge_BlocksRestore() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a}))
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{a}))
+
+	err := svc.Restore(context.Background(), userID, []int64{a})
+
+	s.Equal("item not found", s.errorMessage(err))
+	s.Equal(a, s.trashRoot(a))
+}
+
+// old.txt was deleted before Docs. The purge of Docs moves it to Home, and it stays in the trash with its bytes.
+func (s *FileServiceTestSuite) TestPurgeGroups_MovesItemDeletedEarlierHome() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+	s.workPurgeJobs()
+
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Require().Len(trash.Data, 1)
+	s.Equal("old.txt", trash.Data[0].Name)
+	s.Nil(trash.Data[0].ParentID)
+	s.True(s.storedFileExists(s.storageKey(old.ID)))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID}))
+
+	s.Equal(map[int64]string{old.ID: "old.txt"}, s.namesByID(userID))
+}
+
+// The trash job has not run, so the rows under Docs are still live. The purge job marks them first, then deletes them.
+func (s *FileServiceTestSuite) TestPurgeGroups_BeforeTrashJobEnds() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	x, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	key := s.storageKey(x.ID)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+
+	s.workPurgeJobs()
+
+	s.Zero(s.fileRows())
+	s.False(s.storedFileExists(key))
+	s.workTrashJobs()
+}
+
+// Big holds 1500 files and 1001 folders with a file each, and Sub 1 holds one more level. So the leaves take
+// several batches, and each folder level comes after the level under it. The seeded rows have no bytes on disk,
+// which a missing file must not stop.
+func (s *FileServiceTestSuite) TestPurgeGroups_ManyBatchesAndLevels() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	big := s.createFolder(userID, 0, "Big")
+	for _, insert := range []string{
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'f' || i || '.txt', 'big-' || i, 'text/plain', 1 FROM generate_series(1, 1500) i`,
+		`INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+		SELECT $1, $2, 'Sub ' || i, '', 0 FROM generate_series(1, 1001) i`,
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT user_id, id, 'in.txt', 'sub-' || id, 'text/plain', 1 FROM files
+		WHERE user_id = $1 AND parent_id = $2 AND storage_key IS NULL`,
+	} {
+		_, err := s.TC.DB.ExecContext(context.Background(), insert, userID, big.ID)
+		s.Require().NoError(err)
+	}
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Big", "Sub 1"})
+	s.Require().NoError(err)
+	deep := s.createFolder(userID, path.Path[1].ID, "Deep")
+	inDeep, err := svc.Upload(context.Background(), userID, deep.ID, "deep.txt", strings.NewReader("d"))
+	s.Require().NoError(err)
+	key := s.storageKey(inDeep.ID)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{big.ID}))
+	s.workTrashJobs()
+
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{big.ID}))
+	s.workPurgeJobs()
+
+	s.Zero(s.fileRows())
+	s.False(s.storedFileExists(key))
+}
+
+// The first run removed the bytes of x.txt and stopped before the delete. The next run finishes.
+func (s *FileServiceTestSuite) TestPurgeGroups_RunAfterBytesGoneFinishes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	x, err := svc.Upload(context.Background(), userID, docs.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+	s.Require().NoError(os.Remove(filepath.Join(s.TC.UploadDir, s.storageKey(x.ID))))
+
+	s.workPurgeJobs()
+
+	s.Zero(s.fileRows())
+}
+
+// A job for a group the user did not purge deletes nothing.
+func (s *FileServiceTestSuite) TestPurgeGroups_SkipsGroupsNotMarked() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a.ID}))
+
+	s.Require().NoError(svc.PurgeGroups(context.Background(), userID, []int64{a.ID}))
+
+	s.Equal(a.ID, s.trashRoot(a.ID))
+	s.True(s.storedFileExists(s.storageKey(a.ID)))
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)
@@ -1481,18 +1673,19 @@ func (s *FileServiceTestSuite) liveRowsInTrash(userID int64) int {
 	return n
 }
 
-// trashJobs reads the trash jobs that wait in the queue.
-func (s *FileServiceTestSuite) trashJobs() []jobs.TrashSubtreesArgs {
+// queuedJobs reads the jobs of one kind that wait in the queue.
+func queuedJobs[T river.JobArgs](s *FileServiceTestSuite) []T {
+	var kind T
 	rows, err := s.TC.DB.QueryContext(context.Background(),
-		`SELECT args FROM river_job WHERE kind = $1 ORDER BY id`, jobs.TrashSubtreesArgs{}.Kind())
+		`SELECT args FROM river_job WHERE kind = $1 ORDER BY id`, kind.Kind())
 	s.Require().NoError(err)
 	defer func() { _ = rows.Close() }()
 
-	var all []jobs.TrashSubtreesArgs
+	var all []T
 	for rows.Next() {
 		var raw []byte
 		s.Require().NoError(rows.Scan(&raw))
-		var args jobs.TrashSubtreesArgs
+		var args T
 		s.Require().NoError(json.Unmarshal(raw, &args))
 		all = append(all, args)
 	}
@@ -1500,14 +1693,46 @@ func (s *FileServiceTestSuite) trashJobs() []jobs.TrashSubtreesArgs {
 	return all
 }
 
-// workTrashJobs runs the waiting trash jobs through the worker, the way River does, then removes them.
-func (s *FileServiceTestSuite) workTrashJobs() {
-	worker := jobs.NewTrashSubtreesWorker(s.TC.Services.FileService)
-	for _, args := range s.trashJobs() {
-		s.Require().NoError(worker.Work(context.Background(), &river.Job[jobs.TrashSubtreesArgs]{Args: args}))
+// workJobs runs the waiting jobs of one kind through the worker, the way River does, then removes them.
+func workJobs[T river.JobArgs](s *FileServiceTestSuite, worker river.Worker[T]) {
+	var kind T
+	for _, args := range queuedJobs[T](s) {
+		s.Require().NoError(worker.Work(context.Background(), &river.Job[T]{Args: args}))
 	}
-	_, err := s.TC.DB.ExecContext(context.Background(), `DELETE FROM river_job WHERE kind = $1`, jobs.TrashSubtreesArgs{}.Kind())
+	_, err := s.TC.DB.ExecContext(context.Background(), `DELETE FROM river_job WHERE kind = $1`, kind.Kind())
 	s.Require().NoError(err)
+}
+
+func (s *FileServiceTestSuite) trashJobs() []jobs.TrashSubtreesArgs {
+	return queuedJobs[jobs.TrashSubtreesArgs](s)
+}
+
+func (s *FileServiceTestSuite) purgeJobs() []jobs.PurgeGroupsArgs {
+	return queuedJobs[jobs.PurgeGroupsArgs](s)
+}
+
+func (s *FileServiceTestSuite) workTrashJobs() {
+	workJobs[jobs.TrashSubtreesArgs](s, jobs.NewTrashSubtreesWorker(s.TC.Services.FileService))
+}
+
+func (s *FileServiceTestSuite) workPurgeJobs() {
+	workJobs[jobs.PurgeGroupsArgs](s, jobs.NewPurgeGroupsWorker(s.TC.Services.FileService))
+}
+
+func (s *FileServiceTestSuite) storageKey(id int64) string {
+	var key string
+	err := s.TC.DB.QueryRowContext(context.Background(), `SELECT storage_key FROM files WHERE id = $1`, id).Scan(&key)
+	s.Require().NoError(err)
+	return key
+}
+
+func (s *FileServiceTestSuite) storedFileExists(key string) bool {
+	_, err := os.Stat(filepath.Join(s.TC.UploadDir, key))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	s.Require().NoError(err)
+	return true
 }
 
 // markInGroup marks a row the way a batch of the trash job does. It stands for a job that stopped part way.

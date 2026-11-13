@@ -61,17 +61,18 @@ func (ns NullRiverJobState) Value() (driver.Value, error) {
 }
 
 type File struct {
-	ID          int64          `json:"id"`
-	UserID      int64          `json:"user_id"`
-	Name        string         `json:"name"`
-	StorageKey  sql.NullString `json:"storage_key"`
-	ContentType string         `json:"content_type"`
-	SizeBytes   int64          `json:"size_bytes"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	ParentID    sql.NullInt64  `json:"parent_id"`
-	TrashedAt   sql.NullTime   `json:"trashed_at"`
-	TrashRootID sql.NullInt64  `json:"trash_root_id"`
+	ID               int64          `json:"id"`
+	UserID           int64          `json:"user_id"`
+	Name             string         `json:"name"`
+	StorageKey       sql.NullString `json:"storage_key"`
+	ContentType      string         `json:"content_type"`
+	SizeBytes        int64          `json:"size_bytes"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	ParentID         sql.NullInt64  `json:"parent_id"`
+	TrashedAt        sql.NullTime   `json:"trashed_at"`
+	TrashRootID      sql.NullInt64  `json:"trash_root_id"`
+	PurgeRequestedAt sql.NullTime   `json:"purge_requested_at"`
 }
 
 type Permission struct {

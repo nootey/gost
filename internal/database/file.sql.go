@@ -15,7 +15,7 @@ import (
 const createFile = `-- name: CreateFile :one
 INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
 VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at
 `
 
 type CreateFileParams struct {
@@ -49,6 +49,7 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.ParentID,
 		&i.TrashedAt,
 		&i.TrashRootID,
+		&i.PurgeRequestedAt,
 	)
 	return i, err
 }
@@ -56,7 +57,7 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 const createFolder = `-- name: CreateFolder :one
 INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
 VALUES ($1, $2, $3, '', 0)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at
 `
 
 type CreateFolderParams struct {
@@ -80,8 +81,28 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 		&i.ParentID,
 		&i.TrashedAt,
 		&i.TrashRootID,
+		&i.PurgeRequestedAt,
 	)
 	return i, err
+}
+
+const deletePurgeRows = `-- name: DeletePurgeRows :exec
+DELETE FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trash_root_id = ANY($3::bigint[])
+`
+
+type DeletePurgeRowsParams struct {
+	UserID  int64   `json:"user_id"`
+	Ids     []int64 `json:"ids"`
+	RootIds []int64 `json:"root_ids"`
+}
+
+// Deletes the rows in ids. A row outside the root_ids groups stays.
+func (q *Queries) DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) error {
+	_, err := q.db.ExecContext(ctx, deletePurgeRows, arg.UserID, pq.Array(arg.Ids), pq.Array(arg.RootIds))
+	return err
 }
 
 const folderExists = `-- name: FolderExists :one
@@ -104,7 +125,7 @@ func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (boo
 }
 
 const getFile = `-- name: GetFile :one
-SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id FROM files
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at FROM files
 WHERE id = $1 AND user_id = $2 AND trashed_at IS NULL
 `
 
@@ -128,6 +149,7 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) 
 		&i.ParentID,
 		&i.TrashedAt,
 		&i.TrashRootID,
+		&i.PurgeRequestedAt,
 	)
 	return i, err
 }
@@ -253,6 +275,88 @@ func (q *Queries) ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNam
 	return items, nil
 }
 
+const listPurgeLeaves = `-- name: ListPurgeLeaves :many
+SELECT f.id, f.storage_key
+FROM files f
+WHERE f.user_id = $1
+  AND f.trash_root_id = ANY($2::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM files c WHERE c.parent_id = f.id)
+LIMIT $3
+`
+
+type ListPurgeLeavesParams struct {
+	UserID    int64   `json:"user_id"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+type ListPurgeLeavesRow struct {
+	ID         int64          `json:"id"`
+	StorageKey sql.NullString `json:"storage_key"`
+}
+
+// Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
+// the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
+func (q *Queries) ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPurgeLeaves, arg.UserID, pq.Array(arg.RootIds), arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPurgeLeavesRow
+	for rows.Next() {
+		var i ListPurgeLeavesRow
+		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPurgeRoots = `-- name: ListPurgeRoots :many
+SELECT id FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND purge_requested_at IS NOT NULL
+ORDER BY id
+`
+
+type ListPurgeRootsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
+func (q *Queries) ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listPurgeRoots, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTrashRoots = `-- name: ListTrashRoots :many
 SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
 FROM files f
@@ -261,6 +365,7 @@ LEFT JOIN files p ON p.id = f.parent_id
 WHERE f.user_id = $2
   AND f.id = ANY($1::bigint[])
   AND f.trash_root_id = f.id
+  AND f.purge_requested_at IS NULL
 ORDER BY f.id
 FOR UPDATE OF f
 `
@@ -278,6 +383,7 @@ type ListTrashRootsRow struct {
 }
 
 // Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+// An item marked for a permanent delete is left out.
 func (q *Queries) ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listTrashRoots, pq.Array(arg.Ids), arg.UserID)
 	if err != nil {
@@ -316,11 +422,43 @@ func (q *Queries) LockUserTree(ctx context.Context, userID int64) error {
 	return err
 }
 
+const moveNestedTrashRootsHome = `-- name: MoveNestedTrashRootsHome :execrows
+WITH batch AS (
+    SELECT c.id
+    FROM files c
+    JOIN files p ON p.id = c.parent_id
+    WHERE c.user_id = $1
+      AND c.trash_root_id = c.id
+      AND p.trash_root_id = ANY($2::bigint[])
+    LIMIT $3
+)
+UPDATE files
+SET parent_id = NULL
+FROM batch
+WHERE files.id = batch.id
+`
+
+type MoveNestedTrashRootsHomeParams struct {
+	UserID    int64   `json:"user_id"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
+// Else the parent_id foreign key blocks the delete of the folder they were in.
+func (q *Queries) MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, moveNestedTrashRootsHome, arg.UserID, pq.Array(arg.RootIds), arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const renameFile = `-- name: RenameFile :one
 UPDATE files
 SET name = $1, updated_at = NOW()
 WHERE id = $2 AND user_id = $3 AND trashed_at IS NULL
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at
 `
 
 type RenameFileParams struct {
@@ -344,8 +482,32 @@ func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, e
 		&i.ParentID,
 		&i.TrashedAt,
 		&i.TrashRootID,
+		&i.PurgeRequestedAt,
 	)
 	return i, err
+}
+
+const requestPurge = `-- name: RequestPurge :execrows
+UPDATE files
+SET purge_requested_at = NOW()
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trash_root_id = id
+  AND purge_requested_at IS NULL
+`
+
+type RequestPurgeParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
+func (q *Queries) RequestPurge(ctx context.Context, arg RequestPurgeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requestPurge, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const resolveFolderPath = `-- name: ResolveFolderPath :many

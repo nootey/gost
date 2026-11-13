@@ -16,6 +16,8 @@ type Querier interface {
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// Deletes the rows in ids. A row outside the root_ids groups stays.
+	DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) error
 	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
 	GetFile(ctx context.Context, arg GetFileParams) (File, error)
@@ -29,11 +31,22 @@ type Querier interface {
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
 	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
+	// Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
+	// the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
+	ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error)
+	// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
+	ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error)
 	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+	// An item marked for a permanent delete is left out.
 	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
+	// Else the parent_id foreign key blocks the delete of the folder they were in.
+	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
+	// Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
+	RequestPurge(ctx context.Context, arg RequestPurgeParams) (int64, error)
 	// Walks folder names down from the root and returns each folder it finds, root first.
 	// Fewer rows than names means the path does not exist.
 	ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error)
