@@ -1519,6 +1519,105 @@ func (s *FileServiceTestSuite) TestPurgeGroups_SkipsGroupsNotMarked() {
 	s.True(s.storedFileExists(s.storageKey(a.ID)))
 }
 
+// a.txt and Docs are in the trash longer than 30 days, b.txt is not. The sweep hides a.txt and Docs at once,
+// and their purge job deletes them. Bob's old item gets a job of its own.
+func (s *FileServiceTestSuite) TestSweepTrash_PurgesExpiredItems() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a, err := svc.Upload(context.Background(), alice, 0, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	b, err := svc.Upload(context.Background(), alice, 0, "b.txt", strings.NewReader("b"))
+	s.Require().NoError(err)
+	docs := s.createFolder(alice, 0, "Docs")
+	in, err := svc.Upload(context.Background(), alice, docs.ID, "in.txt", strings.NewReader("i"))
+	s.Require().NoError(err)
+	old := s.seedFile(bob, "old.txt")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a.ID, b.ID, docs.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{old}))
+	s.workTrashJobs()
+	for _, id := range []int64{a.ID, docs.ID, old} {
+		s.moveTrashedAt(id, 31*24)
+	}
+	s.moveTrashedAt(b.ID, 29*24)
+	purgedKeys := []string{s.storageKey(a.ID), s.storageKey(in.ID)}
+
+	s.Require().NoError(svc.SweepTrash(context.Background()))
+
+	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Equal([]string{"b.txt"}, trashNames(trash.Data))
+	s.Equal([]jobs.PurgeGroupsArgs{
+		{UserID: alice, RootIDs: []int64{a.ID, docs.ID}},
+		{UserID: bob, RootIDs: []int64{old}},
+	}, s.purgeJobs())
+
+	s.workPurgeJobs()
+
+	s.Equal(1, s.fileRows())
+	for _, key := range purgedKeys {
+		s.False(s.storedFileExists(key), key)
+	}
+	s.True(s.storedFileExists(s.storageKey(b.ID)))
+}
+
+// 300 items are in the trash longer than 30 days, so the sweep marks them in two batches, with a job each.
+func (s *FileServiceTestSuite) TestSweepTrash_ManyBatches() {
+	userID := s.seedUser()
+	for _, stmt := range []string{
+		`INSERT INTO files (user_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, 'f' || i || '.txt', 'old-' || i, 'text/plain', 1 FROM generate_series(1, 300) i`,
+		`UPDATE files SET trashed_at = NOW() - INTERVAL '31 days', trash_root_id = id WHERE user_id = $1`,
+	} {
+		_, err := s.TC.DB.ExecContext(context.Background(), stmt, userID)
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.TC.Services.FileService.SweepTrash(context.Background()))
+
+	batches := s.purgeJobs()
+	s.Require().Len(batches, 2)
+	s.Len(batches[0].RootIDs, 250)
+	s.Len(batches[1].RootIDs, 50)
+
+	s.workPurgeJobs()
+
+	s.Zero(s.fileRows())
+}
+
+// a.txt and b.txt were marked a day ago, and their job is still alive, so the sweep adds no copy. Once River gives
+// up on that job, the sweep adds it again. c.txt was marked just now, so the sweep leaves it to its own job.
+func (s *FileServiceTestSuite) TestSweepTrash_AddsPurgeJobAgainAfterRiverGivesUp() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	b := s.seedFile(userID, "b.txt")
+	c := s.seedFile(userID, "c.txt")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, b, c}))
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{a, b}))
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{c}))
+	_, err := s.TC.DB.ExecContext(context.Background(),
+		`UPDATE files SET purge_requested_at = purge_requested_at - INTERVAL '25 hours' WHERE id IN ($1, $2)`, a, b)
+	s.Require().NoError(err)
+	stuck := jobs.PurgeGroupsArgs{UserID: userID, RootIDs: []int64{a, b}}
+	fresh := jobs.PurgeGroupsArgs{UserID: userID, RootIDs: []int64{c}}
+
+	s.Require().NoError(svc.SweepTrash(context.Background()))
+	s.Equal([]jobs.PurgeGroupsArgs{stuck, fresh}, s.purgeJobs())
+
+	_, err = s.TC.DB.ExecContext(context.Background(), `
+		UPDATE river_job SET state = 'discarded', finalized_at = NOW()
+		WHERE id = (SELECT MIN(id) FROM river_job WHERE kind = 'purge_groups')`)
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.SweepTrash(context.Background()))
+	s.Equal([]jobs.PurgeGroupsArgs{stuck, fresh, stuck}, s.purgeJobs())
+
+	s.workPurgeJobs()
+
+	s.Zero(s.fileRows())
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)

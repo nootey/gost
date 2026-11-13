@@ -36,15 +36,21 @@ type Querier interface {
 	ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error)
 	// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
 	ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error)
+	// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
+	ListStalePurges(ctx context.Context, retryHours int32) ([]ListStalePurgesRow, error)
 	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
 	// An item marked for a permanent delete is left out.
 	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
+	// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
+	ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error)
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
 	// Else the parent_id foreign key blocks the delete of the folder they were in.
 	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
+	// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
+	RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error)
 	// Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
 	RequestPurge(ctx context.Context, arg RequestPurgeParams) (int64, error)
 	// Walks folder names down from the root and returns each folder it finds, root first.

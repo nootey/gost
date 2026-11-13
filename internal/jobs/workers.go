@@ -22,6 +22,22 @@ type PurgeGroupsArgs struct {
 
 func (PurgeGroupsArgs) Kind() string { return "purge_groups" }
 
+// InsertOpts makes River skip a job while one with the same args waits or runs. The trash sweep adds a purge job
+// again for groups marked long ago, and the first job can still be alive.
+func (PurgeGroupsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}}
+}
+
+// SweepTrashArgs starts the trash sweep. It runs on a schedule, see NewClient.
+type SweepTrashArgs struct{}
+
+func (SweepTrashArgs) Kind() string { return "sweep_trash" }
+
+// InsertOpts runs a sweep once. The next run on the schedule is the retry.
+func (SweepTrashArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1}
+}
+
 type subtreeTrasher interface {
 	TrashSubtrees(ctx context.Context, userID int64, rootIDs []int64) error
 }
@@ -30,10 +46,15 @@ type groupPurger interface {
 	PurgeGroups(ctx context.Context, userID int64, rootIDs []int64) error
 }
 
+type trashSweeper interface {
+	SweepTrash(ctx context.Context) error
+}
+
 // fileJobs is what the file workers need from the file service.
 type fileJobs interface {
 	subtreeTrasher
 	groupPurger
+	trashSweeper
 }
 
 type TrashSubtreesWorker struct {
@@ -62,9 +83,25 @@ func (w *PurgeGroupsWorker) Work(ctx context.Context, job *river.Job[PurgeGroups
 	return w.files.PurgeGroups(ctx, job.Args.UserID, job.Args.RootIDs)
 }
 
+type SweepTrashWorker struct {
+	river.WorkerDefaults[SweepTrashArgs]
+	files trashSweeper
+}
+
+func NewSweepTrashWorker(files trashSweeper) *SweepTrashWorker {
+	return &SweepTrashWorker{files: files}
+}
+
+func (w *SweepTrashWorker) Work(ctx context.Context, _ *river.Job[SweepTrashArgs]) error {
+	return w.files.SweepTrash(ctx)
+}
+
 func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewTrashSubtreesWorker(files)); err != nil {
 		return err
 	}
-	return river.AddWorkerSafely(workers, NewPurgeGroupsWorker(files))
+	if err := river.AddWorkerSafely(workers, NewPurgeGroupsWorker(files)); err != nil {
+		return err
+	}
+	return river.AddWorkerSafely(workers, NewSweepTrashWorker(files))
 }

@@ -28,6 +28,12 @@ const trashBatchSize = 1000
 // Postgres checks the parent_id foreign key for each deleted row: about 10 ms for 250 rows, 37 ms for 1000.
 const purgeBatchSize = 250
 
+// trashRetentionDays is how long an item stays in the trash before the sweep deletes it for good.
+const trashRetentionDays = 30
+
+// purgeRetryHours is how long a marked group waits for its purge job before the sweep adds the job again.
+const purgeRetryHours = 24
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -404,6 +410,37 @@ func (s *FileService) PurgeGroups(ctx context.Context, userID int64, rootIDs []i
 	return nil
 }
 
+// SweepTrash marks the items in the trash longer than trashRetentionDays for a permanent delete and adds their purge jobs.
+// It also adds the purge job again for groups marked long ago, so a job River gave up on does not hide them forever.
+func (s *FileService) SweepTrash(ctx context.Context) error {
+	users, err := s.queries.ListUsersWithExpiredTrash(ctx, trashRetentionDays)
+	if err != nil {
+		return err
+	}
+	for _, userID := range users {
+		if err := s.requestExpiredPurges(ctx, userID); err != nil {
+			return err
+		}
+	}
+
+	stale, err := s.queries.ListStalePurges(ctx, purgeRetryHours)
+	if err != nil {
+		return err
+	}
+	for _, group := range stale {
+		for rootIDs := range slices.Chunk(group.RootIds, purgeBatchSize) {
+			err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+				_, err := s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: group.UserID, RootIDs: rootIDs}, nil)
+				return err
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {
 	page, err := utils.FetchPage(ctx, s.db, trashList, utils.PageQuery[SortField]{
 		Args:     []any{userID},
@@ -466,6 +503,33 @@ func (s *FileService) moveNestedRootsHome(ctx context.Context, userID int64, roo
 			return err
 		})
 		if err != nil || moved < purgeBatchSize {
+			return err
+		}
+	}
+}
+
+// requestExpiredPurges marks the user's expired items and adds one purge job per batch, until a batch comes back short.
+func (s *FileService) requestExpiredPurges(ctx context.Context, userID int64) error {
+	for {
+		var marked []int64
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			var err error
+			marked, err = q.RequestExpiredPurge(ctx, database.RequestExpiredPurgeParams{
+				UserID:        userID,
+				RetentionDays: trashRetentionDays,
+				BatchSize:     purgeBatchSize,
+			})
+			if err != nil || len(marked) == 0 {
+				return err
+			}
+			_, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: userID, RootIDs: marked}, nil)
+			return err
+		})
+		if err != nil || len(marked) < purgeBatchSize {
 			return err
 		}
 	}

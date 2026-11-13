@@ -357,6 +357,43 @@ func (q *Queries) ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) 
 	return items, nil
 }
 
+const listStalePurges = `-- name: ListStalePurges :many
+SELECT user_id, array_agg(id ORDER BY id)::bigint[] AS root_ids
+FROM files
+WHERE purge_requested_at < NOW() - make_interval(hours => $1::int)
+GROUP BY user_id
+ORDER BY user_id
+`
+
+type ListStalePurgesRow struct {
+	UserID  int64   `json:"user_id"`
+	RootIds []int64 `json:"root_ids"`
+}
+
+// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
+func (q *Queries) ListStalePurges(ctx context.Context, retryHours int32) ([]ListStalePurgesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listStalePurges, retryHours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStalePurgesRow
+	for rows.Next() {
+		var i ListStalePurgesRow
+		if err := rows.Scan(&i.UserID, pq.Array(&i.RootIds)); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTrashRoots = `-- name: ListTrashRoots :many
 SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
 FROM files f
@@ -402,6 +439,38 @@ func (q *Queries) ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) 
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersWithExpiredTrash = `-- name: ListUsersWithExpiredTrash :many
+SELECT DISTINCT user_id FROM files
+WHERE trash_root_id = id
+  AND purge_requested_at IS NULL
+  AND trashed_at < NOW() - make_interval(days => $1::int)
+ORDER BY user_id
+`
+
+// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
+func (q *Queries) ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listUsersWithExpiredTrash, retentionDays)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var user_id int64
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -485,6 +554,52 @@ func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, e
 		&i.PurgeRequestedAt,
 	)
 	return i, err
+}
+
+const requestExpiredPurge = `-- name: RequestExpiredPurge :many
+WITH batch AS (
+    SELECT f.id FROM files f
+    WHERE f.user_id = $1
+      AND f.trash_root_id = f.id
+      AND f.purge_requested_at IS NULL
+      AND f.trashed_at < NOW() - make_interval(days => $2::int)
+    LIMIT $3
+)
+UPDATE files
+SET purge_requested_at = NOW()
+FROM batch
+WHERE files.id = batch.id
+RETURNING files.id
+`
+
+type RequestExpiredPurgeParams struct {
+	UserID        int64 `json:"user_id"`
+	RetentionDays int32 `json:"retention_days"`
+	BatchSize     int32 `json:"batch_size"`
+}
+
+// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
+func (q *Queries) RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, requestExpiredPurge, arg.UserID, arg.RetentionDays, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const requestPurge = `-- name: RequestPurge :execrows

@@ -17,6 +17,8 @@ const (
 	// Must stay under stopTimeout.
 	softStopTimeout = 5 * time.Second
 	stopTimeout     = 10 * time.Second
+
+	sweepTrashInterval = time.Hour
 )
 
 // InserterInterface adds a job inside the caller's transaction, so a rollback drops the job too.
@@ -26,12 +28,17 @@ type InserterInterface interface {
 }
 
 // NewClient builds a River client on the app's database/sql pool. This driver has no LISTEN/NOTIFY,
-// so River polls for new jobs, once a second by default.
+// so River polls for new jobs, once a second by default. The trash sweep runs at start, then every sweepTrashInterval.
 func NewClient(db *sql.DB, workers *river.Workers) (*river.Client[*sql.Tx], error) {
 	return river.NewClient(riverdatabasesql.New(db), &river.Config{
 		Workers:         workers,
 		Queues:          map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: maxWorkers}},
 		SoftStopTimeout: softStopTimeout,
+		PeriodicJobs: []*river.PeriodicJob{
+			river.NewPeriodicJob(river.PeriodicInterval(sweepTrashInterval), func() (river.JobArgs, *river.InsertOpts) {
+				return SweepTrashArgs{}, nil
+			}, &river.PeriodicJobOpts{RunOnStart: true}),
+		},
 	})
 }
 

@@ -185,3 +185,35 @@ DELETE FROM files
 WHERE user_id = sqlc.arg(user_id)
   AND id = ANY(sqlc.arg(ids)::bigint[])
   AND trash_root_id = ANY(sqlc.arg(root_ids)::bigint[]);
+
+-- name: ListUsersWithExpiredTrash :many
+-- The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
+SELECT DISTINCT user_id FROM files
+WHERE trash_root_id = id
+  AND purge_requested_at IS NULL
+  AND trashed_at < NOW() - make_interval(days => sqlc.arg(retention_days)::int)
+ORDER BY user_id;
+
+-- name: RequestExpiredPurge :many
+-- Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
+WITH batch AS (
+    SELECT f.id FROM files f
+    WHERE f.user_id = sqlc.arg(user_id)
+      AND f.trash_root_id = f.id
+      AND f.purge_requested_at IS NULL
+      AND f.trashed_at < NOW() - make_interval(days => sqlc.arg(retention_days)::int)
+    LIMIT sqlc.arg(batch_size)
+)
+UPDATE files
+SET purge_requested_at = NOW()
+FROM batch
+WHERE files.id = batch.id
+RETURNING files.id;
+
+-- name: ListStalePurges :many
+-- The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
+SELECT user_id, array_agg(id ORDER BY id)::bigint[] AS root_ids
+FROM files
+WHERE purge_requested_at < NOW() - make_interval(hours => sqlc.arg(retry_hours)::int)
+GROUP BY user_id
+ORDER BY user_id;
