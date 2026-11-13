@@ -28,6 +28,8 @@ type Querier interface {
 	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
 	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
 	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
+	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
+	LockUserTree(ctx context.Context, userID int64) error
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Walks folder names down from the root and returns each folder it finds, root first.
 	// Fewer rows than names means the path does not exist.

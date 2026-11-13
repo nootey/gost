@@ -225,7 +225,11 @@ func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) erro
 	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
 
 	return utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
-		trashed, err := s.queries.WithTx(tx).TrashItems(ctx, database.TrashItemsParams{UserID: userID, Ids: ids})
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserTree(ctx, userID); err != nil {
+			return err
+		}
+		trashed, err := q.TrashItems(ctx, database.TrashItemsParams{UserID: userID, Ids: ids})
 		if err != nil {
 			return err
 		}
@@ -244,6 +248,9 @@ func (s *FileService) Restore(ctx context.Context, userID int64, ids []int64) er
 	for range maxNameAttempts {
 		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
 			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
 			roots, err := q.ListTrashRoots(ctx, database.ListTrashRootsParams{UserID: userID, Ids: ids})
 			if err != nil {
 				return err

@@ -1147,6 +1147,36 @@ func (s *FileServiceTestSuite) TestRestore_AllOrNone() {
 	s.Equal(bobFile, s.trashRoot(bobFile))
 }
 
+// A delete of a folder and a restore into it run at once. Either order is fine, but the item must never stay live inside the trash.
+func (s *FileServiceTestSuite) TestRestore_ParallelWithTrashOfItsFolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	const n = 20
+	folders := make([]int64, n)
+	items := make([]int64, n)
+	for i := range n {
+		folder := s.createFolder(userID, 0, fmt.Sprintf("Docs %d", i))
+		item, err := svc.Upload(context.Background(), userID, folder.ID, "old.txt", strings.NewReader("o"))
+		s.Require().NoError(err)
+		s.Require().NoError(svc.Trash(context.Background(), userID, []int64{item.ID}))
+		folders[i], items[i] = folder.ID, item.ID
+	}
+
+	errs := make([]error, 2*n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() { errs[2*i] = svc.Trash(context.Background(), userID, []int64{folders[i]}) })
+		wg.Go(func() { errs[2*i+1] = svc.Restore(context.Background(), userID, []int64{items[i]}) })
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		s.Require().NoError(err)
+	}
+	s.Zero(s.liveRowsInTrash(userID))
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)
@@ -1289,6 +1319,16 @@ func trashNames(items []*file.TrashedFile) []string {
 		names[i] = item.Name
 	}
 	return names
+}
+
+// liveRowsInTrash counts live rows whose folder is in the trash. Nobody can reach such a row.
+func (s *FileServiceTestSuite) liveRowsInTrash(userID int64) int {
+	var n int
+	err := s.TC.DB.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM files c JOIN files p ON p.id = c.parent_id
+		WHERE c.user_id = $1 AND c.trashed_at IS NULL AND p.trashed_at IS NOT NULL`, userID).Scan(&n)
+	s.Require().NoError(err)
+	return n
 }
 
 func (s *FileServiceTestSuite) changedSince(id int64, since time.Time) bool {

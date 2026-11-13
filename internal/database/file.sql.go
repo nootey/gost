@@ -266,6 +266,16 @@ func (q *Queries) ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) 
 	return items, nil
 }
 
+const lockUserTree = `-- name: LockUserTree :exec
+SELECT pg_advisory_xact_lock($1::bigint)
+`
+
+// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
+func (q *Queries) LockUserTree(ctx context.Context, userID int64) error {
+	_, err := q.db.ExecContext(ctx, lockUserTree, userID)
+	return err
+}
+
 const renameFile = `-- name: RenameFile :one
 UPDATE files
 SET name = $1, updated_at = NOW()

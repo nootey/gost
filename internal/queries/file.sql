@@ -54,6 +54,10 @@ WITH RECURSIVE path AS (
 SELECT id, name FROM path
 ORDER BY depth;
 
+-- name: LockUserTree :exec
+-- Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
+SELECT pg_advisory_xact_lock(sqlc.arg(user_id)::bigint);
+
 -- name: TrashItems :one
 -- Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
 -- Returns how many of the items it marked.
