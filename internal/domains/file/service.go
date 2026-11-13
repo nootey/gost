@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/riverqueue/river/rivertype"
 	"go.uber.org/zap"
@@ -36,6 +37,13 @@ const trashRetentionDays = 30
 
 // purgeRetryHours is how long a marked group waits for its purge job before the sweep adds the job again.
 const purgeRetryHours = 24
+
+// orphanGraceHours is how long a file with no row stays before the orphan sweep removes it. Upload gives the bytes
+// their key before the row commits, so a newer file can still get its row.
+const orphanGraceHours = 24
+
+// orphanBatchSize caps the file names the orphan sweep checks in one query.
+const orphanBatchSize = 1000
 
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
@@ -463,6 +471,41 @@ func (s *FileService) SweepTrash(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SweepOrphans removes the files in the upload dir that no row points to, such as the bytes of an upload that never got its row.
+// If no row has bytes, it removes nothing, because the app can point at a new, empty database by mistake.
+func (s *FileService) SweepOrphans(ctx context.Context) error {
+	hasFiles, err := s.queries.HasStoredFiles(ctx)
+	if err != nil {
+		return err
+	}
+	if !hasFiles {
+		s.logger.Info("skipped the orphan sweep: no row has a stored file")
+		return nil
+	}
+
+	cutoff := time.Now().Add(-orphanGraceHours * time.Hour)
+	return utils.ListStoredFiles(s.cfg.Dir, cutoff, orphanBatchSize, func(files []utils.StoredFile) error {
+		byName := make(map[string]utils.StoredFile, len(files))
+		names := make([]string, len(files))
+		for i, f := range files {
+			byName[f.Name] = f
+			names[i] = f.Name
+		}
+		orphans, err := s.queries.ListOrphanKeys(ctx, names)
+		if err != nil {
+			return err
+		}
+		for _, name := range orphans {
+			if err := utils.RemoveStoredFile(s.cfg.Dir, name); err != nil {
+				return fmt.Errorf("failed to remove orphan file: %w", err)
+			}
+			s.logger.Info("removed an orphan file", zap.String("name", name),
+				zap.Int64("size_bytes", byName[name].Size), zap.Time("modified_at", byName[name].ModTime))
+		}
+		return nil
+	})
 }
 
 func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {

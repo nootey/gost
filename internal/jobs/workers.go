@@ -38,6 +38,16 @@ func (SweepTrashArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1}
 }
 
+// SweepOrphansArgs starts the orphan sweep. It runs on a schedule, see NewClient.
+type SweepOrphansArgs struct{}
+
+func (SweepOrphansArgs) Kind() string { return "sweep_orphans" }
+
+// InsertOpts runs a sweep once. The next run on the schedule is the retry.
+func (SweepOrphansArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1}
+}
+
 type subtreeTrasher interface {
 	TrashSubtrees(ctx context.Context, userID int64, rootIDs []int64) error
 }
@@ -50,11 +60,16 @@ type trashSweeper interface {
 	SweepTrash(ctx context.Context) error
 }
 
+type orphanSweeper interface {
+	SweepOrphans(ctx context.Context) error
+}
+
 // fileJobs is what the file workers need from the file service.
 type fileJobs interface {
 	subtreeTrasher
 	groupPurger
 	trashSweeper
+	orphanSweeper
 }
 
 type TrashSubtreesWorker struct {
@@ -96,6 +111,19 @@ func (w *SweepTrashWorker) Work(ctx context.Context, _ *river.Job[SweepTrashArgs
 	return w.files.SweepTrash(ctx)
 }
 
+type SweepOrphansWorker struct {
+	river.WorkerDefaults[SweepOrphansArgs]
+	files orphanSweeper
+}
+
+func NewSweepOrphansWorker(files orphanSweeper) *SweepOrphansWorker {
+	return &SweepOrphansWorker{files: files}
+}
+
+func (w *SweepOrphansWorker) Work(ctx context.Context, _ *river.Job[SweepOrphansArgs]) error {
+	return w.files.SweepOrphans(ctx)
+}
+
 func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewTrashSubtreesWorker(files)); err != nil {
 		return err
@@ -103,5 +131,8 @@ func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewPurgeGroupsWorker(files)); err != nil {
 		return err
 	}
-	return river.AddWorkerSafely(workers, NewSweepTrashWorker(files))
+	if err := river.AddWorkerSafely(workers, NewSweepTrashWorker(files)); err != nil {
+		return err
+	}
+	return river.AddWorkerSafely(workers, NewSweepOrphansWorker(files))
 }

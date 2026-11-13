@@ -1633,6 +1633,80 @@ func (s *FileServiceTestSuite) TestSweepTrash_AddsPurgeJobAgainAfterRiverGivesUp
 	s.Zero(s.fileRows())
 }
 
+// Only files older than a day that no row points to go: an orphan, and the temp file of an upload that never ended.
+// A newer orphan can still get its row. A trashed file still has its row. A name not in key form, or a dir, is not ours.
+func (s *FileServiceTestSuite) TestSweepOrphans_RemovesOldFilesWithNoRow() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	live, err := svc.Upload(context.Background(), userID, 0, "live.txt", strings.NewReader("l"))
+	s.Require().NoError(err)
+	trashed, err := svc.Upload(context.Background(), userID, 0, "trashed.txt", strings.NewReader("t"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{trashed.ID}))
+	kept := []string{s.storageKey(live.ID), s.storageKey(trashed.ID)}
+	for _, key := range kept {
+		s.ageStoredFile(key, 25)
+	}
+	orphan := s.writeStoredFile(fmt.Sprintf("%032x", 1), 25)
+	temp := s.writeStoredFile(fmt.Sprintf(".upload-%032x", 2), 25)
+	kept = append(kept,
+		s.writeStoredFile(fmt.Sprintf("%032x", 3), 23),
+		s.writeStoredFile(fmt.Sprintf(".upload-%032x", 4), 23),
+		s.writeStoredFile("notes.txt", 25),
+		s.writeStoredFile(strings.Repeat("A", 32), 25),
+	)
+	dir := fmt.Sprintf("%032x", 5)
+	s.Require().NoError(os.Mkdir(filepath.Join(s.TC.UploadDir, dir), 0o750))
+	s.ageStoredFile(dir, 25)
+	kept = append(kept, dir)
+
+	s.Require().NoError(svc.SweepOrphans(context.Background()))
+
+	s.False(s.storedFileExists(orphan))
+	s.False(s.storedFileExists(temp))
+	for _, name := range kept {
+		s.True(s.storedFileExists(name), name)
+	}
+	removed := map[string]any{}
+	for _, fields := range s.logs("removed an orphan file") {
+		removed[fields["name"].(string)] = fields["size_bytes"]
+	}
+	s.Equal(map[string]any{orphan: int64(len("orphan")), temp: int64(len("orphan"))}, removed)
+}
+
+// No row has bytes, so the app may point at a new database by mistake. The sweep keeps every file.
+func (s *FileServiceTestSuite) TestSweepOrphans_SkipsWhenNoRowHasBytes() {
+	userID := s.seedUser()
+	s.createFolder(userID, 0, "Docs")
+	orphan := s.writeStoredFile(fmt.Sprintf("%032x", 6), 25)
+
+	s.Require().NoError(s.TC.Services.FileService.SweepOrphans(context.Background()))
+
+	s.True(s.storedFileExists(orphan))
+	s.Len(s.logs("skipped the orphan sweep: no row has a stored file"), 1)
+}
+
+// 1500 orphans take 2 batches. The file with a row stays.
+func (s *FileServiceTestSuite) TestSweepOrphans_ManyBatches() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	live, err := svc.Upload(context.Background(), userID, 0, "live.txt", strings.NewReader("l"))
+	s.Require().NoError(err)
+	s.ageStoredFile(s.storageKey(live.ID), 25)
+	var orphans []string
+	for i := range 1500 {
+		orphans = append(orphans, s.writeStoredFile(fmt.Sprintf("%032x", 1000+i), 25))
+	}
+
+	s.Require().NoError(svc.SweepOrphans(context.Background()))
+
+	for _, name := range orphans {
+		s.False(s.storedFileExists(name), name)
+	}
+	s.True(s.storedFileExists(s.storageKey(live.ID)))
+	s.Len(s.logs("removed an orphan file"), 1500)
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)
@@ -1840,6 +1914,22 @@ func (s *FileServiceTestSuite) workTrashJobs() {
 
 func (s *FileServiceTestSuite) workPurgeJobs() {
 	workJobs[jobs.PurgeGroupsArgs](s, jobs.NewPurgeGroupsWorker(s.TC.Services.FileService))
+}
+
+// writeStoredFile writes a file into the upload dir and moves its modified time back by hoursAgo.
+func (s *FileServiceTestSuite) writeStoredFile(name string, hoursAgo int) string {
+	s.Require().NoError(os.WriteFile(filepath.Join(s.TC.UploadDir, name), []byte("orphan"), 0o640))
+	s.ageStoredFile(name, hoursAgo)
+	return name
+}
+
+// ageStoredFile moves the modified time of a file in the upload dir back by hoursAgo. The file goes when the test
+// ends, so a later sweep test does not see it as an old orphan.
+func (s *FileServiceTestSuite) ageStoredFile(name string, hoursAgo int) {
+	path := filepath.Join(s.TC.UploadDir, name)
+	past := time.Now().Add(-time.Duration(hoursAgo) * time.Hour)
+	s.Require().NoError(os.Chtimes(path, past, past))
+	s.T().Cleanup(func() { _ = os.Remove(path) })
 }
 
 func (s *FileServiceTestSuite) storageKey(id int64) string {

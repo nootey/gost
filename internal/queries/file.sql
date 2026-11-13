@@ -217,3 +217,12 @@ FROM files
 WHERE purge_requested_at < NOW() - make_interval(hours => sqlc.arg(retry_hours)::int)
 GROUP BY user_id
 ORDER BY user_id;
+
+-- name: HasStoredFiles :one
+-- Reports whether any row points to bytes on disk.
+SELECT EXISTS (SELECT 1 FROM files WHERE storage_key IS NOT NULL);
+
+-- name: ListOrphanKeys :many
+-- The names in keys that no row has as its storage key.
+SELECT k.key::text FROM unnest(sqlc.arg(keys)::text[]) AS k(key)
+WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.storage_key = k.key);

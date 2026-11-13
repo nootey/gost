@@ -157,6 +157,18 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) 
 	return i, err
 }
 
+const hasStoredFiles = `-- name: HasStoredFiles :one
+SELECT EXISTS (SELECT 1 FROM files WHERE storage_key IS NOT NULL)
+`
+
+// Reports whether any row points to bytes on disk.
+func (q *Queries) HasStoredFiles(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasStoredFiles)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listGroupFolders = `-- name: ListGroupFolders :many
 SELECT id FROM files
 WHERE user_id = $1
@@ -268,6 +280,35 @@ func (q *Queries) ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNam
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrphanKeys = `-- name: ListOrphanKeys :many
+SELECT k.key::text FROM unnest($1::text[]) AS k(key)
+WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.storage_key = k.key)
+`
+
+// The names in keys that no row has as its storage key.
+func (q *Queries) ListOrphanKeys(ctx context.Context, keys []string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listOrphanKeys, pq.Array(keys))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var k_key string
+		if err := rows.Scan(&k_key); err != nil {
+			return nil, err
+		}
+		items = append(items, k_key)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

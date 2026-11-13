@@ -25,12 +25,16 @@ type Querier interface {
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// Reports whether any row points to bytes on disk.
+	HasStoredFiles(ctx context.Context) (bool, error)
 	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
 	// It skips the group roots, because the job starts from them.
 	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
 	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
+	// The names in keys that no row has as its storage key.
+	ListOrphanKeys(ctx context.Context, keys []string) ([]string, error)
 	// Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
 	// the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
 	ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error)
