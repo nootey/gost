@@ -808,6 +808,258 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
 
+// A folder takes the rows under it along. Only the moved items get a new updated_at.
+func (s *FileServiceTestSuite) TestMove_FilesAndFolders() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	cars := s.createFolder(userID, photos.ID, "Cars")
+	archive := s.createFolder(userID, 0, "Archive")
+	fileID := s.seedFile(userID, "a.txt")
+	_, err := s.TC.DB.ExecContext(context.Background(), `UPDATE files SET updated_at = $1 WHERE user_id = $2`, oldUpdatedAt, userID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Move(context.Background(), userID, archive.ID, []int64{photos.ID, fileID, photos.ID}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"Archive"}, fileNames(result.Data))
+
+	result, err = svc.List(context.Background(), userID, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"Photos", "a.txt"}, fileNames(result.Data))
+
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Archive", "Photos", "Cars"})
+	s.Require().NoError(err)
+	s.Len(path.Path, 3)
+
+	s.True(s.changedSince(photos.ID, oldUpdatedAt))
+	s.True(s.changedSince(fileID, oldUpdatedAt))
+	s.False(s.changedSince(cars.ID, oldUpdatedAt))
+	s.False(s.changedSince(archive.ID, oldUpdatedAt))
+}
+
+func (s *FileServiceTestSuite) TestMove_ToRoot() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	_, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Move(context.Background(), userID, 0, []int64{sub.ID}))
+
+	s.Zero(s.parentOf(sub.ID))
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"Docs", "Sub"}, fileNames(result.Data))
+
+	result, err = svc.List(context.Background(), userID, newestFirst(sub.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"x.txt"}, fileNames(result.Data))
+}
+
+// Folders and files share one set of names. A move does not auto-rename: the message names the item, and nothing moves.
+func (s *FileServiceTestSuite) TestMove_NameTaken() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(userID, 0, "Archive")
+	_, err := svc.Upload(context.Background(), userID, archive.ID, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	s.createFolder(userID, archive.ID, "Photos")
+	fileA := s.seedFile(userID, "a.txt")
+	fileB := s.seedFile(userID, "b.txt")
+	photos := s.createFolder(userID, 0, "Photos")
+
+	cases := []struct {
+		ids     []int64
+		message string
+	}{
+		{[]int64{fileA}, "a.txt already exists in this folder"},
+		{[]int64{photos.ID}, "Photos already exists in this folder"},
+		{[]int64{fileB, fileA}, "a.txt already exists in this folder"},
+	}
+	for _, tc := range cases {
+		err := svc.Move(context.Background(), userID, archive.ID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusConflict, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+
+	result, err := svc.List(context.Background(), userID, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"Photos", "a.txt"}, fileNames(result.Data))
+	s.Zero(s.parentOf(fileB))
+}
+
+// Two items with one name from two folders cannot both go into one folder.
+func (s *FileServiceTestSuite) TestMove_TwoItemsWithOneName() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	notes := s.createFolder(userID, 0, "Notes")
+	archive := s.createFolder(userID, 0, "Archive")
+	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	inNotes, err := svc.Upload(context.Background(), userID, notes.ID, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+
+	err = svc.Move(context.Background(), userID, archive.ID, []int64{inDocs.ID, inNotes.ID})
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("an item with this name already exists", msg)
+	s.Equal(docs.ID, s.parentOf(inDocs.ID))
+	s.Equal(notes.ID, s.parentOf(inNotes.ID))
+}
+
+// A move into the folder an item is in already is refused, even with other items in the request. Nothing moves.
+func (s *FileServiceTestSuite) TestMove_SameFolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	s.Require().NoError(err)
+	atRoot := s.seedFile(userID, "b.txt")
+
+	cases := []struct {
+		parentID int64
+		ids      []int64
+	}{
+		{docs.ID, []int64{inDocs.ID}},
+		{0, []int64{atRoot}},
+		{docs.ID, []int64{atRoot, inDocs.ID}},
+	}
+	for _, tc := range cases {
+		err := svc.Move(context.Background(), userID, tc.parentID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc.ids)
+		s.Equal("the items are already in this folder", msg)
+	}
+
+	s.Zero(s.parentOf(atRoot))
+	s.Equal(docs.ID, s.parentOf(inDocs.ID))
+}
+
+// A folder cannot go into itself or into a folder under it. The folders would form a loop that no path from the root reaches.
+func (s *FileServiceTestSuite) TestMove_IntoItselfOrSubfolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.createFolder(userID, 0, "A")
+	b := s.createFolder(userID, a.ID, "B")
+	c := s.createFolder(userID, b.ID, "C")
+	fileID := s.seedFile(userID, "x.txt")
+
+	cases := []struct {
+		parentID int64
+		ids      []int64
+	}{
+		{a.ID, []int64{a.ID}},
+		{b.ID, []int64{a.ID}},
+		{c.ID, []int64{a.ID}},
+		{c.ID, []int64{fileID, a.ID}},
+		{c.ID, []int64{b.ID}},
+	}
+	for _, tc := range cases {
+		err := svc.Move(context.Background(), userID, tc.parentID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc)
+		s.Equal("a folder cannot move into itself or its own subfolder", msg)
+	}
+
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"A", "B", "C"})
+	s.Require().NoError(err)
+	s.Len(path.Path, 3)
+	s.Zero(s.parentOf(fileID))
+}
+
+// Unknown ids, other users' items and items in the trash fail the same way. Nothing moves.
+func (s *FileServiceTestSuite) TestMove_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(alice, 0, "Archive")
+	mine := s.seedFile(alice, "mine.txt")
+	gone := s.seedFile(alice, "gone.txt")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{gone}))
+	bobFile := s.seedFile(bob, "bob.txt")
+
+	for _, ids := range [][]int64{{999}, {mine, 999}, {mine, bobFile}, {mine, gone}} {
+		err := svc.Move(context.Background(), alice, archive.ID, ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, ids)
+		s.Equal("item not found", msg)
+	}
+
+	result, err := svc.List(context.Background(), alice, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	s.Empty(result.Data)
+	s.Zero(s.parentOf(bobFile))
+}
+
+// The target must be a live folder of the user.
+func (s *FileServiceTestSuite) TestMove_UnknownFolder() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	mine := s.seedFile(alice, "a.txt")
+	fileTarget := s.seedFile(alice, "b.txt")
+	old := s.createFolder(alice, 0, "Old")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{old.ID}))
+	bobFolder := s.createFolder(bob, 0, "Bob")
+
+	for _, target := range []int64{999, fileTarget, old.ID, bobFolder.ID} {
+		err := svc.Move(context.Background(), alice, target, []int64{mine})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, target)
+		s.Equal("folder not found", msg)
+	}
+
+	s.Zero(s.parentOf(mine))
+}
+
+// Two moves at once: A into Y (under B) and B into X (under A). Each sees no loop alone, and they lock different rows,
+// so no row lock stops them. The tree lock runs them one at a time, so the second sees the first and fails.
+func (s *FileServiceTestSuite) TestMove_ParallelMovesMakeNoLoop() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	const n = 20
+	as, xs, bs, ys := make([]int64, n), make([]int64, n), make([]int64, n), make([]int64, n)
+	for i := range n {
+		as[i] = s.createFolder(userID, 0, fmt.Sprintf("A %d", i)).ID
+		xs[i] = s.createFolder(userID, as[i], "X").ID
+		bs[i] = s.createFolder(userID, 0, fmt.Sprintf("B %d", i)).ID
+		ys[i] = s.createFolder(userID, bs[i], "Y").ID
+	}
+
+	errs := make([]error, 2*n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() { errs[2*i] = svc.Move(context.Background(), userID, ys[i], []int64{as[i]}) })
+		wg.Go(func() { errs[2*i+1] = svc.Move(context.Background(), userID, xs[i], []int64{bs[i]}) })
+	}
+	wg.Wait()
+
+	for i := range n {
+		aMoved, bMoved := errs[2*i] == nil, errs[2*i+1] == nil
+		s.Require().NotEqual(aMoved, bMoved, "pair %d", i)
+
+		moved, into, stayed, failed := as[i], ys[i], bs[i], errs[2*i+1]
+		if bMoved {
+			moved, into, stayed, failed = bs[i], xs[i], as[i], errs[2*i]
+		}
+		s.Equal("a folder cannot move into itself or its own subfolder", s.errorMessage(failed))
+		s.Equal(into, s.parentOf(moved))
+		s.Zero(s.parentOf(stayed))
+	}
+}
+
 // Every row under the folder goes to the trash with it, so no path, list, upload or rename can reach them.
 func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
 	userID := s.seedUser()
@@ -1962,6 +2214,14 @@ func (s *FileServiceTestSuite) rowsInGroup(rootID int64) int {
 		`SELECT COUNT(*) FROM files WHERE trash_root_id = $1`, rootID).Scan(&n)
 	s.Require().NoError(err)
 	return n
+}
+
+// parentOf reads parent_id. The root is 0.
+func (s *FileServiceTestSuite) parentOf(id int64) int64 {
+	var parent sql.NullInt64
+	err := s.TC.DB.QueryRowContext(context.Background(), `SELECT parent_id FROM files WHERE id = $1`, id).Scan(&parent)
+	s.Require().NoError(err)
+	return parent.Int64
 }
 
 func (s *FileServiceTestSuite) changedSince(id int64, since time.Time) bool {

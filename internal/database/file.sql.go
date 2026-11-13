@@ -169,6 +169,52 @@ func (q *Queries) HasStoredFiles(ctx context.Context) (bool, error) {
 	return exists, err
 }
 
+const listFolderPathIDs = `-- name: ListFolderPathIDs :many
+WITH RECURSIVE up AS (
+    SELECT files.id, files.parent_id
+    FROM files
+    WHERE files.id = $1
+      AND files.user_id = $2
+      AND files.storage_key IS NULL
+      AND files.trashed_at IS NULL
+    UNION
+    SELECT f.id, f.parent_id
+    FROM files f
+    JOIN up ON f.id = up.parent_id
+)
+SELECT id FROM up
+`
+
+type ListFolderPathIDsParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user.
+// UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
+func (q *Queries) ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listFolderPathIDs, arg.ID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listGroupFolders = `-- name: ListGroupFolders :many
 SELECT id FROM files
 WHERE user_id = $1
@@ -438,6 +484,45 @@ func (q *Queries) ListStalePurges(ctx context.Context, retryHours int32) ([]List
 	return items, nil
 }
 
+const listTakenNames = `-- name: ListTakenNames :many
+SELECT name FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
+  AND name = ANY($3::text[])
+  AND trashed_at IS NULL
+ORDER BY name
+`
+
+type ListTakenNamesParams struct {
+	UserID   int64    `json:"user_id"`
+	ParentID int64    `json:"parent_id"`
+	Names    []string `json:"names"`
+}
+
+// The names in names that a live item in the folder already has.
+func (q *Queries) ListTakenNames(ctx context.Context, arg ListTakenNamesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listTakenNames, arg.UserID, arg.ParentID, pq.Array(arg.Names))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTrashRoots = `-- name: ListTrashRoots :many
 SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
 FROM files f
@@ -525,6 +610,51 @@ func (q *Queries) ListUsersWithExpiredTrash(ctx context.Context, retentionDays i
 	return items, nil
 }
 
+const lockLiveItems = `-- name: LockLiveItems :many
+SELECT id, COALESCE(parent_id, 0)::bigint AS parent_id, name
+FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trashed_at IS NULL
+ORDER BY id
+FOR UPDATE
+`
+
+type LockLiveItemsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type LockLiveItemsRow struct {
+	ID       int64  `json:"id"`
+	ParentID int64  `json:"parent_id"`
+	Name     string `json:"name"`
+}
+
+// Locks the live items in ids, so a rename cannot change a name before a move checks it.
+func (q *Queries) LockLiveItems(ctx context.Context, arg LockLiveItemsParams) ([]LockLiveItemsRow, error) {
+	rows, err := q.db.QueryContext(ctx, lockLiveItems, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockLiveItemsRow
+	for rows.Next() {
+		var i LockLiveItemsRow
+		if err := rows.Scan(&i.ID, &i.ParentID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockUserTree = `-- name: LockUserTree :exec
 SELECT pg_advisory_xact_lock($1::bigint)
 `
@@ -532,6 +662,26 @@ SELECT pg_advisory_xact_lock($1::bigint)
 // Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 func (q *Queries) LockUserTree(ctx context.Context, userID int64) error {
 	_, err := q.db.ExecContext(ctx, lockUserTree, userID)
+	return err
+}
+
+const moveItems = `-- name: MoveItems :exec
+UPDATE files
+SET parent_id = NULLIF($1::bigint, 0), updated_at = NOW()
+WHERE user_id = $2
+  AND id = ANY($3::bigint[])
+  AND trashed_at IS NULL
+`
+
+type MoveItemsParams struct {
+	ParentID int64   `json:"parent_id"`
+	UserID   int64   `json:"user_id"`
+	Ids      []int64 `json:"ids"`
+}
+
+// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
+func (q *Queries) MoveItems(ctx context.Context, arg MoveItemsParams) error {
+	_, err := q.db.ExecContext(ctx, moveItems, arg.ParentID, arg.UserID, pq.Array(arg.Ids))
 	return err
 }
 

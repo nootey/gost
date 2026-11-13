@@ -64,6 +64,11 @@ export interface ItemsForm {
     ids: number[];
 }
 
+export interface MoveForm {
+    ids: number[];
+    parent_id: number | null;
+}
+
 export interface PathEntry {
     id: number;
     name: string;

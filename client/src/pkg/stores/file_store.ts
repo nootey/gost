@@ -7,6 +7,7 @@ import type {
     FolderResponse,
     ItemsForm,
     ListQuery,
+    MoveForm,
     RenameForm,
     RenameResponse,
     StoredFile,
@@ -44,6 +45,11 @@ export const useFileStore = defineStore("file", {
 
         async rename(id: number, form: RenameForm): Promise<RenameResponse> {
             const response = await apiClient.patch<RenameResponse>(`${this.apiPrefix}/${id}`, form);
+            return response.data;
+        },
+
+        async move(form: MoveForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/move`, form);
             return response.data;
         },
 

@@ -226,3 +226,47 @@ SELECT EXISTS (SELECT 1 FROM files WHERE storage_key IS NOT NULL);
 -- The names in keys that no row has as its storage key.
 SELECT k.key::text FROM unnest(sqlc.arg(keys)::text[]) AS k(key)
 WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.storage_key = k.key);
+
+-- name: LockLiveItems :many
+-- Locks the live items in ids, so a rename cannot change a name before a move checks it.
+SELECT id, COALESCE(parent_id, 0)::bigint AS parent_id, name
+FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trashed_at IS NULL
+ORDER BY id
+FOR UPDATE;
+
+-- name: ListFolderPathIDs :many
+-- The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user.
+-- UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
+WITH RECURSIVE up AS (
+    SELECT files.id, files.parent_id
+    FROM files
+    WHERE files.id = sqlc.arg(id)
+      AND files.user_id = sqlc.arg(user_id)
+      AND files.storage_key IS NULL
+      AND files.trashed_at IS NULL
+    UNION
+    SELECT f.id, f.parent_id
+    FROM files f
+    JOIN up ON f.id = up.parent_id
+)
+SELECT id FROM up;
+
+-- name: ListTakenNames :many
+-- The names in names that a live item in the folder already has.
+SELECT name FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND COALESCE(parent_id, 0) = sqlc.arg(parent_id)::bigint
+  AND name = ANY(sqlc.arg(names)::text[])
+  AND trashed_at IS NULL
+ORDER BY name;
+
+-- name: MoveItems :exec
+-- A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
+UPDATE files
+SET parent_id = NULLIF(sqlc.arg(parent_id)::bigint, 0), updated_at = NOW()
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trashed_at IS NULL;

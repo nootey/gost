@@ -123,3 +123,9 @@ type RenameResponse struct {
 type ItemsRequest struct {
 	IDs []int64 `json:"ids"`
 }
+
+// MoveRequest moves the items into one folder. A missing or null ParentID means the root.
+type MoveRequest struct {
+	IDs      []int64 `json:"ids"`
+	ParentID *int64  `json:"parent_id"`
+}

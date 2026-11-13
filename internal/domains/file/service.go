@@ -50,6 +50,8 @@ var (
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
 	errItemNotFound   = apperr.New(apperr.KindNotFound, "item not found")
 	errNameTaken      = apperr.New(apperr.KindConflict, "an item with this name already exists")
+	errMoveIntoItself = apperr.New(apperr.KindValidation, "a folder cannot move into itself or its own subfolder")
+	errSameFolder     = apperr.New(apperr.KindValidation, "the items are already in this folder")
 )
 
 // A parentID of 0 means the root folder.
@@ -59,6 +61,7 @@ type FileServiceInterface interface {
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
+	Move(ctx context.Context, userID, parentID int64, ids []int64) error
 	Trash(ctx context.Context, userID int64, ids []int64) error
 	Restore(ctx context.Context, userID int64, ids []int64) error
 	Purge(ctx context.Context, userID int64, ids []int64) error
@@ -245,6 +248,61 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 	}
 
 	return toFileModel(dbFile), nil
+}
+
+// Move is all or none, the same as Trash. A name in use in the target fails the move: it does not auto-rename.
+// The tree lock makes moves run one at a time. Two moves at once (A into Y under B, B into X under A) would each
+// see no loop and lock different rows, so both would commit.
+func (s *FileService) Move(ctx context.Context, userID, parentID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserTree(ctx, userID); err != nil {
+			return err
+		}
+		items, err := q.LockLiveItems(ctx, database.LockLiveItemsParams{UserID: userID, Ids: ids})
+		if err != nil {
+			return err
+		}
+		if len(items) != len(ids) {
+			return errItemNotFound
+		}
+
+		if parentID != 0 {
+			path, err := q.ListFolderPathIDs(ctx, database.ListFolderPathIDsParams{ID: parentID, UserID: userID})
+			if err != nil {
+				return err
+			}
+			if len(path) == 0 {
+				return errFolderNotFound
+			}
+			if slices.ContainsFunc(path, func(id int64) bool { return slices.Contains(ids, id) }) {
+				return errMoveIntoItself
+			}
+		}
+
+		names := make([]string, len(items))
+		for i, item := range items {
+			if item.ParentID == parentID {
+				return errSameFolder
+			}
+			names[i] = item.Name
+		}
+		taken, err := q.ListTakenNames(ctx, database.ListTakenNamesParams{UserID: userID, ParentID: parentID, Names: names})
+		if err != nil {
+			return err
+		}
+		if len(taken) > 0 {
+			return apperr.New(apperr.KindConflict, taken[0]+" already exists in this folder")
+		}
+
+		return q.MoveItems(ctx, database.MoveItemsParams{ParentID: parentID, UserID: userID, Ids: ids})
+	})
+	if utils.IsUniqueViolation(err, nameIndex) {
+		return errNameTaken
+	}
+	return err
 }
 
 // Trash is all or none: an id that is unknown, someone else's or already in the trash undoes the rest.

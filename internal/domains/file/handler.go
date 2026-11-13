@@ -174,6 +174,38 @@ func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req MoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	parentID, err := utils.OptionalBodyID(req.ParentID, "parent_id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.Move(r.Context(), userID, parentID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Moved.")
+}
+
 func (h *FileHandler) Trash(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

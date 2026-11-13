@@ -27,6 +27,9 @@ type Querier interface {
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	// Reports whether any row points to bytes on disk.
 	HasStoredFiles(ctx context.Context) (bool, error)
+	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user.
+	// UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
+	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
 	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
 	// It skips the group roots, because the job starts from them.
 	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)
@@ -42,13 +45,19 @@ type Querier interface {
 	ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error)
 	// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
 	ListStalePurges(ctx context.Context, retryHours int32) ([]ListStalePurgesRow, error)
+	// The names in names that a live item in the folder already has.
+	ListTakenNames(ctx context.Context, arg ListTakenNamesParams) ([]string, error)
 	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
 	// An item marked for a permanent delete is left out.
 	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
 	// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
 	ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error)
+	// Locks the live items in ids, so a rename cannot change a name before a move checks it.
+	LockLiveItems(ctx context.Context, arg LockLiveItemsParams) ([]LockLiveItemsRow, error)
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
+	MoveItems(ctx context.Context, arg MoveItemsParams) error
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
 	// Else the parent_id foreign key blocks the delete of the folder they were in.
 	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)

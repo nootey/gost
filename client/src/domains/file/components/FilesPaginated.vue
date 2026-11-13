@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { useClipboardStore } from "../../../pkg/stores/clipboard_store.ts";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
 import { itemView } from "../../../pkg/utils/item_view.ts";
+import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import RenameDialog from "./RenameDialog.vue";
@@ -17,7 +19,7 @@ import type { SortField, StoredFile } from "../models.ts";
 const MENU_ITEMS: MenuItem[] = [
     { label: "Add to favorites", icon: "pi pi-star" },
     { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
-    { label: "Move", icon: "pi pi-arrow-right" },
+    { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
     { label: "Copy", icon: "pi pi-copy" },
     { separator: true },
     { label: "Delete", icon: "pi pi-trash", danger: true, command: moveToTrash },
@@ -28,6 +30,7 @@ const SEARCH_DELAY_MS = 300;
 const props = defineProps<{ folderId: number | null; dir: string }>();
 
 const fileStore = useFileStore();
+const clipboardStore = useClipboardStore();
 const toastStore = useToastStore();
 const router = useRouter();
 
@@ -43,6 +46,13 @@ const listedSearch = ref<string>("");
 
 const selection = ref<StoredFile[]>([]);
 const { menuTarget, menuTargets, showMenu } = useRowMenu(selection, "rowMenu");
+
+const pasting = ref<boolean>(false);
+const canPaste = computed<boolean>(() => clipboardStore.canPasteInto(props.folderId));
+const clipboardLabel = computed<string>(() => {
+    const count = clipboardStore.count;
+    return `${count} ${count === 1 ? "item" : "items"} cut`;
+});
 
 const renameVisible = ref<boolean>(false);
 const renameTarget = ref<StoredFile | null>(null);
@@ -112,7 +122,8 @@ function childRoute(folder: StoredFile): RouteLocationRaw {
 }
 
 function rowClass(item: StoredFile): string {
-    return itemView(item).row;
+    const row = itemView(item).row;
+    return clipboardStore.isCut(item.id) ? `${row} opacity-50` : row;
 }
 
 // The whole folder row opens it. A click on the name link already navigates by itself.
@@ -137,12 +148,45 @@ async function moveToTrash(): Promise<void> {
     const ids = menuTargets.value.map((item) => item.id);
     try {
         const response = await fileStore.trash({ ids });
+        clipboardStore.drop(ids);
         toastStore.successResponseToast(response);
     } catch (error) {
         toastStore.errorResponseToast(error);
     }
     await getData();
 }
+
+function cutItems(items: StoredFile[]): void {
+    if (items.length === 0) return;
+    clipboardStore.cut(
+        props.folderId,
+        items.map((item) => item.id),
+    );
+}
+
+function cutMenuTargets(): void {
+    cutItems(menuTargets.value);
+}
+
+// A paste that fails keeps the clipboard, so the user can fix the cause and paste again.
+async function paste(): Promise<void> {
+    const content = clipboardStore.content;
+    if (!content || pasting.value || !canPaste.value) return;
+    pasting.value = true;
+    try {
+        const response = await fileStore.move({ ids: content.ids, parent_id: props.folderId });
+        // A cut made during the request is a new clipboard, so it stays.
+        if (clipboardStore.content === content) clipboardStore.clear();
+        toastStore.successResponseToast(response);
+    } catch (error) {
+        toastStore.errorResponseToast(error);
+    } finally {
+        pasting.value = false;
+    }
+    await getData();
+}
+
+useClipboardKeys({ cut: () => cutItems(selection.value), paste });
 
 onMounted(getData);
 onBeforeUnmount(() => clearTimeout(searchTimer));
@@ -183,30 +227,62 @@ defineExpose({ refresh });
             @row-contextmenu="showMenu"
         >
             <template #header>
-                <div class="flex items-center justify-between gap-3">
-                    <IconField class="min-w-0 flex-1 sm:flex-none">
-                        <InputIcon class="pi pi-search" />
-                        <InputText
-                            v-model="search"
-                            type="search"
-                            placeholder="Search this folder"
-                            aria-label="Search this folder"
-                            maxlength="255"
-                            size="small"
-                            class="w-full rounded-xl sm:w-72"
-                            @update:model-value="onSearchInput"
-                        />
-                    </IconField>
-                    <div v-if="selection.length > 0" class="flex shrink-0 items-center gap-1">
-                        <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
-                        <Button
-                            label="Clear"
-                            icon="pi pi-times"
-                            size="small"
-                            severity="secondary"
-                            variant="text"
-                            @click="selection = []"
-                        />
+                <div class="flex flex-col gap-3">
+                    <div class="flex items-center justify-between gap-3">
+                        <IconField class="min-w-0 flex-1 sm:flex-none">
+                            <InputIcon class="pi pi-search" />
+                            <InputText
+                                v-model="search"
+                                type="search"
+                                placeholder="Search this folder"
+                                aria-label="Search this folder"
+                                maxlength="255"
+                                size="small"
+                                class="w-full rounded-xl sm:w-72"
+                                @update:model-value="onSearchInput"
+                            />
+                        </IconField>
+                        <div v-if="selection.length > 0" class="flex shrink-0 items-center gap-1">
+                            <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
+                            <Button
+                                label="Clear"
+                                icon="pi pi-times"
+                                size="small"
+                                severity="secondary"
+                                variant="text"
+                                @click="selection = []"
+                            />
+                        </div>
+                    </div>
+                    <div
+                        v-if="clipboardStore.count > 0"
+                        class="flex items-center justify-between gap-3 rounded-xl bg-inset py-1.5 pr-1.5 pl-3"
+                    >
+                        <div class="flex min-w-0 items-center gap-2 text-sm">
+                            <i class="pi pi-file-export text-fg-muted" />
+                            <span class="shrink-0 font-medium text-fg">{{ clipboardLabel }}</span>
+                            <span v-if="!canPaste" class="hidden truncate text-fg-muted sm:inline">
+                                Open another folder to paste.
+                            </span>
+                        </div>
+                        <div class="flex shrink-0 items-center gap-1">
+                            <Button
+                                label="Paste here"
+                                icon="pi pi-clipboard"
+                                size="small"
+                                :disabled="!canPaste"
+                                :loading="pasting"
+                                @click="paste"
+                            />
+                            <Button
+                                label="Cancel"
+                                icon="pi pi-times"
+                                size="small"
+                                severity="secondary"
+                                variant="text"
+                                @click="clipboardStore.clear()"
+                            />
+                        </div>
                     </div>
                 </div>
             </template>
@@ -299,6 +375,7 @@ defineExpose({ refresh });
                 <a v-bind="itemProps.action" :class="{ 'text-danger': item.danger }">
                     <span v-bind="itemProps.icon" :class="{ 'text-danger': item.danger }" />
                     <span v-bind="itemProps.label">{{ item.label }}</span>
+                    <span v-if="item.shortcut" class="ml-auto pl-6 text-xs text-fg-subtle">{{ item.shortcut }}</span>
                 </a>
             </template>
         </ContextMenu>

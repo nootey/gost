@@ -49,6 +49,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/folders", suite.handler.CreateFolder)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
+	suite.router.Post("/files/move", suite.handler.Move)
 	suite.router.Get("/trash", suite.handler.ListTrash)
 	suite.router.Post("/trash", suite.handler.Trash)
 	suite.router.Post("/trash/restore", suite.handler.Restore)
@@ -547,6 +548,81 @@ func (suite *FileHandlerTestSuite) postItems(path, body string, authenticated bo
 	w := httptest.NewRecorder()
 	suite.router.ServeHTTP(w, req)
 	return w
+}
+
+func (suite *FileHandlerTestSuite) TestMove_Success() {
+	suite.mockService.EXPECT().
+		Move(mock.Anything, testUserID, int64(9), []int64{5, 3}).
+		Return(nil).
+		Once()
+
+	w := suite.postItems("/files/move", `{"ids":[5,3],"parent_id":9}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Moved.", resp.Message)
+}
+
+// A missing or null parent_id is the root.
+func (suite *FileHandlerTestSuite) TestMove_ToRoot() {
+	suite.mockService.EXPECT().
+		Move(mock.Anything, testUserID, int64(0), []int64{5}).
+		Return(nil).
+		Twice()
+
+	for _, body := range []string{`{"ids":[5]}`, `{"ids":[5],"parent_id":null}`} {
+		w := suite.postItems("/files/move", body, true)
+
+		suite.Equal(http.StatusOK, w.Code, body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestMove_InvalidIDs() {
+	tooMany := strings.TrimSuffix(strings.Repeat("1,", 101), ",")
+	for _, ids := range []string{`[]`, `null`, `[0]`, `[4,-1]`, `[` + tooMany + `]`} {
+		body := `{"ids":` + ids + `,"parent_id":9}`
+		w := suite.postItems("/files/move", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid ids", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestMove_InvalidParentID() {
+	for _, body := range []string{`{"ids":[5],"parent_id":0}`, `{"ids":[5],"parent_id":-1}`} {
+		w := suite.postItems("/files/move", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid parent_id", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestMove_InvalidBody() {
+	for _, body := range []string{`not json`, `{"ids":"5"}`, `{"ids":[5],"parent_id":"9"}`} {
+		w := suite.postItems("/files/move", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid request body", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestMove_Unauthenticated() {
+	w := suite.postItems("/files/move", `{"ids":[5]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestMove_ServiceError() {
+	suite.mockService.EXPECT().
+		Move(mock.Anything, testUserID, int64(9), []int64{5}).
+		Return(apperr.New(apperr.KindConflict, "a.txt already exists in this folder")).
+		Once()
+
+	w := suite.postItems("/files/move", `{"ids":[5],"parent_id":9}`, true)
+
+	suite.Equal(http.StatusConflict, w.Code)
+	suite.Equal("a.txt already exists in this folder", suite.errorMessage(w))
 }
 
 func (suite *FileHandlerTestSuite) TestTrash_Success() {
