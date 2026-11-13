@@ -85,7 +85,7 @@ func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name s
 		return nil, err
 	}
 	// Check the folder before writing bytes, so a bad folder leaves nothing on disk.
-	if err := s.checkFolder(ctx, userID, parentID); err != nil {
+	if err := s.checkFolder(ctx, s.queries, userID, parentID); err != nil {
 		return nil, err
 	}
 
@@ -106,8 +106,8 @@ func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name s
 		return nil, err
 	}
 
-	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, func(freeName string) (database.File, error) {
-		return s.queries.CreateFile(ctx, database.CreateFileParams{
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, func(q *database.Queries, freeName string) (database.File, error) {
+		return q.CreateFile(ctx, database.CreateFileParams{
 			UserID:      userID,
 			ParentID:    sql.NullInt64{Int64: parentID, Valid: parentID != 0},
 			Name:        freeName,
@@ -129,12 +129,9 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 	if err := utils.ValidateName(name, utils.FolderName); err != nil {
 		return nil, err
 	}
-	if err := s.checkFolder(ctx, userID, parentID); err != nil {
-		return nil, err
-	}
 
-	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FolderName, func(freeName string) (database.File, error) {
-		return s.queries.CreateFolder(ctx, database.CreateFolderParams{
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FolderName, func(q *database.Queries, freeName string) (database.File, error) {
+		return q.CreateFolder(ctx, database.CreateFolderParams{
 			UserID:   userID,
 			ParentID: sql.NullInt64{Int64: parentID, Valid: parentID != 0},
 			Name:     freeName,
@@ -148,7 +145,7 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 }
 
 func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error) {
-	if err := s.checkFolder(ctx, userID, q.ParentID); err != nil {
+	if err := s.checkFolder(ctx, s.queries, userID, q.ParentID); err != nil {
 		return nil, err
 	}
 
@@ -329,12 +326,12 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
 }
 
-func (s *FileService) checkFolder(ctx context.Context, userID, folderID int64) error {
+func (s *FileService) checkFolder(ctx context.Context, q *database.Queries, userID, folderID int64) error {
 	if folderID == 0 {
 		return nil
 	}
 
-	exists, err := s.queries.FolderExists(ctx, database.FolderExistsParams{ID: folderID, UserID: userID})
+	exists, err := q.FolderExists(ctx, database.FolderExistsParams{ID: folderID, UserID: userID})
 	if err != nil {
 		return err
 	}
@@ -349,26 +346,38 @@ func (s *FileService) insertWithFreeName(
 	userID, parentID int64,
 	name string,
 	kind utils.NameKind,
-	insert func(freeName string) (database.File, error),
+	insert func(q *database.Queries, freeName string) (database.File, error),
 ) (database.File, error) {
 	base, _ := utils.SplitName(name, kind)
 
 	for range maxNameAttempts {
-		taken, err := s.queries.ListNamesByParentAndPrefix(ctx, database.ListNamesByParentAndPrefixParams{
-			UserID:   userID,
-			ParentID: parentID,
-			Prefix:   base,
+		var dbFile database.File
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			if err := s.checkFolder(ctx, q, userID, parentID); err != nil {
+				return err
+			}
+
+			taken, err := q.ListNamesByParentAndPrefix(ctx, database.ListNamesByParentAndPrefixParams{
+				UserID:   userID,
+				ParentID: parentID,
+				Prefix:   base,
+			})
+			if err != nil {
+				return err
+			}
+
+			freeName, err := utils.FreeName(name, kind, taken)
+			if err != nil {
+				return err
+			}
+
+			dbFile, err = insert(q, freeName)
+			return err
 		})
-		if err != nil {
-			return database.File{}, err
-		}
-
-		freeName, err := utils.FreeName(name, kind, taken)
-		if err != nil {
-			return database.File{}, err
-		}
-
-		dbFile, err := insert(freeName)
 		if utils.IsUniqueViolation(err, nameIndex) {
 			continue
 		}

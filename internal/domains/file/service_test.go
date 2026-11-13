@@ -484,6 +484,41 @@ func (s *FileServiceTestSuite) TestCreateFolder_ParallelClash() {
 	s.ElementsMatch([]string{"Shared", "Shared (1)", "Shared (2)"}, names)
 }
 
+// A delete of a folder and creates into it run at once. A create may fail, but it must never leave a live row inside the trash.
+func (s *FileServiceTestSuite) TestUploadAndCreateFolder_ParallelWithTrashOfParent() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	const n = 20
+	folders := make([]int64, n)
+	for i := range n {
+		folders[i] = s.createFolder(userID, 0, fmt.Sprintf("Docs %d", i)).ID
+	}
+
+	trashErrs := make([]error, n)
+	createErrs := make([]error, 2*n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() { trashErrs[i] = svc.Trash(context.Background(), userID, []int64{folders[i]}) })
+		wg.Go(func() {
+			_, createErrs[2*i] = svc.Upload(context.Background(), userID, folders[i], "new.txt", strings.NewReader("n"))
+		})
+		wg.Go(func() { _, createErrs[2*i+1] = svc.CreateFolder(context.Background(), userID, folders[i], "New") })
+	}
+	wg.Wait()
+
+	for _, err := range trashErrs {
+		s.Require().NoError(err)
+	}
+	for _, err := range createErrs {
+		if err != nil {
+			_, msg := apperr.Resolve(err)
+			s.Equal("folder not found", msg)
+		}
+	}
+	s.Zero(s.liveRowsInTrash(userID))
+}
+
 func (s *FileServiceTestSuite) TestList_FoldersFirst() {
 	userID := s.seedUser()
 	s.seedFile(userID, "z.txt")
