@@ -19,9 +19,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 )
+
+// oldUpdatedAt is a fixed past time. A test sets updated_at to it, then checks which rows an action changed.
+var oldUpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 type FileServiceTestSuite struct {
 	integration.ServiceIntegrationSuite
@@ -763,6 +767,386 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
 
+// Every row under the folder goes to the trash with it, so no path, list, upload or rename can reach them.
+func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	cars := s.createFolder(userID, photos.ID, "Cars")
+	inCars, err := svc.Upload(context.Background(), userID, cars.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	inPhotos, err := svc.Upload(context.Background(), userID, photos.ID, "y.txt", strings.NewReader("y"))
+	s.Require().NoError(err)
+	s.seedFile(userID, "a.txt")
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"a.txt"}, fileNames(result.Data))
+
+	for _, names := range [][]string{{"Photos"}, {"Photos", "Cars"}} {
+		_, err := svc.ResolveFolder(context.Background(), userID, names)
+		status, _ := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, names)
+	}
+
+	for _, folderID := range []int64{photos.ID, cars.ID} {
+		_, err := svc.List(context.Background(), userID, newestFirst(folderID))
+		s.Equal("folder not found", s.errorMessage(err))
+
+		_, err = svc.Upload(context.Background(), userID, folderID, "new.txt", strings.NewReader("n"))
+		s.Equal("folder not found", s.errorMessage(err))
+
+		_, err = svc.CreateFolder(context.Background(), userID, folderID, "New")
+		s.Equal("folder not found", s.errorMessage(err))
+	}
+
+	for _, id := range []int64{photos.ID, cars.ID, inCars.ID, inPhotos.ID} {
+		_, err := svc.Rename(context.Background(), userID, id, "renamed")
+		s.Equal("item not found", s.errorMessage(err))
+		s.Equal(photos.ID, s.trashRoot(id))
+	}
+}
+
+func (s *FileServiceTestSuite) TestTrash_Many() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	b := s.seedFile(userID, "b.txt")
+	s.seedFile(userID, "c.txt")
+	docs := s.createFolder(userID, 0, "Docs")
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, docs.ID, b, a}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"c.txt"}, fileNames(result.Data))
+	for _, id := range []int64{a, b, docs.ID} {
+		s.Equal(id, s.trashRoot(id))
+	}
+}
+
+// Names in the trash are free, for upload, new folder, auto-rename and rename.
+func (s *FileServiceTestSuite) TestTrash_FreesNames() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	a1 := s.seedFile(userID, "a (1).txt")
+	photos := s.createFolder(userID, 0, "Photos")
+	b := s.seedFile(userID, "b.txt")
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, a1, photos.ID}))
+
+	for _, want := range []string{"a.txt", "a (1).txt"} {
+		f, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+		s.Require().NoError(err)
+		s.Equal(want, f.Name)
+	}
+
+	folder, err := svc.CreateFolder(context.Background(), userID, 0, "Photos")
+	s.Require().NoError(err)
+	s.Equal("Photos", folder.Name)
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{folder.ID}))
+	renamed, err := svc.Rename(context.Background(), userID, b, "Photos")
+	s.Require().NoError(err)
+	s.Equal("Photos", renamed.Name)
+}
+
+// One bad id undoes the rest, so nothing goes to the trash.
+func (s *FileServiceTestSuite) TestTrash_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.seedFile(alice, "a.txt")
+	trashed := s.seedFile(alice, "old.txt")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed}))
+	bobFile := s.seedFile(bob, "bob.txt")
+
+	for _, bad := range []int64{999, bobFile, trashed} {
+		err := svc.Trash(context.Background(), alice, []int64{a, bad})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+
+	result, err := svc.List(context.Background(), alice, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"a.txt"}, fileNames(result.Data))
+
+	result, err = svc.List(context.Background(), bob, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"bob.txt"}, fileNames(result.Data))
+}
+
+// An item deleted on its own keeps its group when its folder follows, and so does an item listed next to its folder.
+func (s *FileServiceTestSuite) TestTrash_EachItemKeepsItsGroup() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	s.Require().NoError(err)
+	listed, err := svc.Upload(context.Background(), userID, docs.ID, "listed.txt", strings.NewReader("l"))
+	s.Require().NoError(err)
+	rest, err := svc.Upload(context.Background(), userID, docs.ID, "rest.txt", strings.NewReader("r"))
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{listed.ID, docs.ID}))
+
+	s.Equal(old.ID, s.trashRoot(old.ID))
+	s.Equal(listed.ID, s.trashRoot(listed.ID))
+	s.Equal(docs.ID, s.trashRoot(docs.ID))
+	s.Equal(docs.ID, s.trashRoot(rest.ID))
+}
+
+// The trash lists the items the user deleted, folders first, newest delete first. The rows under them and other users' items stay out.
+func (s *FileServiceTestSuite) TestListTrash_OnlyDeletedItems() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(alice, 0, "Photos")
+	_, err := svc.Upload(context.Background(), alice, photos.ID, "in-photos.txt", strings.NewReader("p"))
+	s.Require().NoError(err)
+	a := s.seedFile(alice, "a.txt")
+	b := s.seedFile(alice, "b.txt")
+	s.seedFile(alice, "live.txt")
+	bobFile := s.seedFile(bob, "bob.txt")
+	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{bobFile}))
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{b, photos.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a}))
+	s.moveTrashedAt(b, 2)
+	s.moveTrashedAt(photos.ID, 2)
+
+	result, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByDate, Desc: true})
+
+	s.Require().NoError(err)
+	s.Nil(result.NextCursor)
+	s.Require().Len(result.Data, 3)
+	s.Equal([]string{"Photos", "a.txt", "b.txt"}, []string{result.Data[0].Name, result.Data[1].Name, result.Data[2].Name})
+	s.True(result.Data[0].IsFolder)
+	s.True(result.Data[1].TrashedAt.After(result.Data[2].TrashedAt))
+	s.False(result.Data[1].TrashedAt.IsZero())
+
+	empty, err := svc.ListTrash(context.Background(), s.seedUserWithEmail("carol@example.com"), file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.NotNil(empty.Data)
+	s.Empty(empty.Data)
+}
+
+// The same walk as the file list: every page joins up to the full list, and desc reverses asc inside each part.
+func (s *FileServiceTestSuite) TestListTrash_WalkEverySort() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	var ids []int64
+	for _, name := range []string{"Beta", "alpha", "Gamma"} {
+		ids = append(ids, s.createFolder(userID, 0, name).ID)
+	}
+	ids = append(ids,
+		s.seedFileWith(userID, "a.txt", "text/plain", 10, 0),
+		s.seedFileWith(userID, "b.png", "image/png", 10, 0),
+		s.seedFileWith(userID, "c.pdf", "text/plain", 5, 0),
+	)
+	s.Require().NoError(svc.Trash(context.Background(), userID, ids))
+	s.moveTrashedAt(ids[1], 1)
+	s.moveTrashedAt(ids[5], 3)
+
+	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
+		var full [2][]string
+		for i, desc := range []bool{false, true} {
+			result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 100, Sort: sort, Desc: desc})
+			s.Require().NoError(err)
+			full[i] = trashNames(result.Data)
+
+			pages := s.walkTrash(userID, file.TrashQuery{PageSize: 2, Sort: sort, Desc: desc})
+			s.Equal(full[i], slices.Concat(pages...), "%s desc=%t", sort, desc)
+		}
+
+		s.ElementsMatch([]string{"Beta", "alpha", "Gamma"}, full[0][:3], sort)
+		ascFolders, ascFiles := slices.Clone(full[0][:3]), slices.Clone(full[0][3:])
+		slices.Reverse(ascFolders)
+		slices.Reverse(ascFiles)
+		s.Equal(slices.Concat(ascFolders, ascFiles), full[1], "%s desc must reverse asc", sort)
+	}
+}
+
+func (s *FileServiceTestSuite) TestListTrash_BadCursor() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	b := s.seedFile(userID, "b.txt")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, b}))
+
+	first, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 1, Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Require().NotNil(first.NextCursor)
+
+	for _, q := range []file.TrashQuery{
+		{Cursor: *first.NextCursor, Sort: file.SortByDate},
+		{Cursor: *first.NextCursor, Sort: file.SortByName, Desc: true},
+		{Cursor: cursorOf(`{"s":"date","p":1,"v":["not a time","1"]}`), Sort: file.SortByDate},
+	} {
+		_, err := svc.ListTrash(context.Background(), userID, q)
+
+		s.Equal("invalid cursor", s.errorMessage(err))
+	}
+}
+
+// The folder and every row under it come back. Only the item the user deleted counts as changed.
+func (s *FileServiceTestSuite) TestRestore_BringsBackFolderAndEverythingUnder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	cars := s.createFolder(userID, photos.ID, "Cars")
+	_, err := svc.Upload(context.Background(), userID, cars.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
+	_, err = s.TC.DB.ExecContext(context.Background(), `UPDATE files SET updated_at = $1 WHERE user_id = $2`, oldUpdatedAt, userID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{photos.ID, photos.ID}))
+
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Photos", "Cars"})
+	s.Require().NoError(err)
+	s.Equal(cars.ID, path.Path[1].ID)
+	result, err := svc.List(context.Background(), userID, newestFirst(cars.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"x.txt"}, fileNames(result.Data))
+	s.True(s.changedSince(photos.ID, oldUpdatedAt))
+	s.False(s.changedSince(cars.ID, oldUpdatedAt))
+
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Empty(trash.Data)
+}
+
+// A name taken since the delete gets a number, the same as an upload.
+func (s *FileServiceTestSuite) TestRestore_RenamesOnClash() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	docs := s.createFolder(userID, 0, "Docs")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, docs.ID}))
+	_, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+	s.Require().NoError(err)
+	s.createFolder(userID, 0, "Docs")
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{a, docs.ID}))
+
+	names := s.namesByID(userID)
+	s.Len(names, 4)
+	s.Equal("a (1).txt", names[a])
+	s.Equal("Docs (1)", names[docs.ID])
+}
+
+// Two deleted items with one name come back together. The older row keeps the name.
+func (s *FileServiceTestSuite) TestRestore_TwoItemsWithOneName() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	first := s.seedFile(userID, "a.txt")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{first}))
+	second, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{second.ID}))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{second.ID, first}))
+
+	names := s.namesByID(userID)
+	s.Len(names, 2)
+	s.Equal("a.txt", names[first])
+	s.Equal("a (1).txt", names[second.ID])
+}
+
+// An item deleted before its folder stays in the trash when the folder comes back. Its own restore puts it back in the folder.
+func (s *FileServiceTestSuite) TestRestore_LeavesItemDeletedEarlier() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{docs.ID}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(docs.ID))
+	s.Require().NoError(err)
+	s.Empty(result.Data)
+	s.Equal(old.ID, s.trashRoot(old.ID))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID}))
+
+	result, err = svc.List(context.Background(), userID, newestFirst(docs.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"old.txt"}, fileNames(result.Data))
+}
+
+func (s *FileServiceTestSuite) TestRestore_FolderInTrashSendsItemHome() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Require().Len(result.Data, 1)
+	s.Equal("old.txt", result.Data[0].Name)
+	s.Nil(result.Data[0].ParentID)
+	s.Equal(docs.ID, s.trashRoot(docs.ID))
+}
+
+// An item deleted earlier goes back to its old folder when that folder comes back in the same restore.
+func (s *FileServiceTestSuite) TestRestore_WithItsFolderGoesBackIn() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	old, err := svc.Upload(context.Background(), userID, sub.ID, "old.txt", strings.NewReader("o"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID, docs.ID}))
+
+	result, err := svc.List(context.Background(), userID, newestFirst(sub.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"old.txt"}, fileNames(result.Data))
+}
+
+// One bad id undoes the rest. A live item and a row under a deleted folder are bad ids too.
+func (s *FileServiceTestSuite) TestRestore_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.seedFile(alice, "a.txt")
+	live := s.seedFile(alice, "live.txt")
+	docs := s.createFolder(alice, 0, "Docs")
+	under, err := svc.Upload(context.Background(), alice, docs.ID, "under.txt", strings.NewReader("u"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a, docs.ID}))
+	bobFile := s.seedFile(bob, "bob.txt")
+	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{bobFile}))
+
+	for _, bad := range []int64{999, live, under.ID, bobFile} {
+		err := svc.Restore(context.Background(), alice, []int64{a, bad})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+
+	s.Equal(a, s.trashRoot(a))
+	s.Equal(docs.ID, s.trashRoot(under.ID))
+	s.Equal(bobFile, s.trashRoot(bobFile))
+}
+
 func (s *FileServiceTestSuite) createFolder(userID, parentID int64, name string) *file.File {
 	f, err := s.TC.Services.FileService.CreateFolder(context.Background(), userID, parentID, name)
 	s.Require().NoError(err)
@@ -858,4 +1242,70 @@ func (s *FileServiceTestSuite) fileRows() int {
 	var n int
 	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM files`).Scan(&n))
 	return n
+}
+
+// trashRoot reads trash_root_id, and fails if the row is not in the trash.
+func (s *FileServiceTestSuite) trashRoot(id int64) int64 {
+	var root sql.NullInt64
+	var trashed bool
+	err := s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT trash_root_id, trashed_at IS NOT NULL FROM files WHERE id = $1`, id).Scan(&root, &trashed)
+	s.Require().NoError(err)
+	s.Require().True(root.Valid && trashed, "row %d is not in the trash", id)
+	return root.Int64
+}
+
+func (s *FileServiceTestSuite) errorMessage(err error) string {
+	s.Require().Error(err)
+	_, msg := apperr.Resolve(err)
+	return msg
+}
+
+func (s *FileServiceTestSuite) moveTrashedAt(rootID int64, hoursAgo int) {
+	_, err := s.TC.DB.ExecContext(context.Background(),
+		`UPDATE files SET trashed_at = trashed_at - make_interval(hours => $1) WHERE trash_root_id = $2`, hoursAgo, rootID)
+	s.Require().NoError(err)
+}
+
+func (s *FileServiceTestSuite) walkTrash(userID int64, q file.TrashQuery) [][]string {
+	var pages [][]string
+	for range 50 {
+		result, err := s.TC.Services.FileService.ListTrash(context.Background(), userID, q)
+		s.Require().NoError(err)
+
+		pages = append(pages, trashNames(result.Data))
+		if result.NextCursor == nil {
+			return pages
+		}
+		q.Cursor = *result.NextCursor
+	}
+	s.FailNow("the pages never end")
+	return nil
+}
+
+func trashNames(items []*file.TrashedFile) []string {
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = item.Name
+	}
+	return names
+}
+
+func (s *FileServiceTestSuite) changedSince(id int64, since time.Time) bool {
+	var changed bool
+	err := s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT updated_at > $1 FROM files WHERE id = $2`, since, id).Scan(&changed)
+	s.Require().NoError(err)
+	return changed
+}
+
+// namesByID reads the items in Home.
+func (s *FileServiceTestSuite) namesByID(userID int64) map[int64]string {
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	names := make(map[int64]string, len(result.Data))
+	for _, f := range result.Data {
+		names[f.ID] = f.Name
+	}
+	return names
 }

@@ -15,7 +15,7 @@ import (
 const createFile = `-- name: CreateFile :one
 INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
 VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
 `
 
 type CreateFileParams struct {
@@ -47,6 +47,8 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
 	)
 	return i, err
 }
@@ -54,7 +56,7 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 const createFolder = `-- name: CreateFolder :one
 INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
 VALUES ($1, $2, $3, '', 0)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
 `
 
 type CreateFolderParams struct {
@@ -76,6 +78,8 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
 	)
 	return i, err
 }
@@ -83,7 +87,7 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 const folderExists = `-- name: FolderExists :one
 SELECT EXISTS (
     SELECT 1 FROM files
-    WHERE id = $1 AND user_id = $2 AND storage_key IS NULL
+    WHERE id = $1 AND user_id = $2 AND storage_key IS NULL AND trashed_at IS NULL
 )
 `
 
@@ -100,8 +104,8 @@ func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (boo
 }
 
 const getFile = `-- name: GetFile :one
-SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id FROM files
-WHERE id = $1 AND user_id = $2
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id FROM files
+WHERE id = $1 AND user_id = $2 AND trashed_at IS NULL
 `
 
 type GetFileParams struct {
@@ -122,6 +126,8 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
 	)
 	return i, err
 }
@@ -131,6 +137,7 @@ SELECT name FROM files
 WHERE user_id = $1
   AND COALESCE(parent_id, 0) = $2::bigint
   AND starts_with(name, $3::text)
+  AND trashed_at IS NULL
 `
 
 type ListNamesByParentAndPrefixParams struct {
@@ -162,11 +169,108 @@ func (q *Queries) ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesB
 	return items, nil
 }
 
+const listNamesByParentsAndPrefixes = `-- name: ListNamesByParentsAndPrefixes :many
+SELECT COALESCE(parent_id, 0)::bigint AS parent_id, name
+FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = ANY($2::bigint[])
+  AND name ^@ ANY($3::text[])
+  AND trashed_at IS NULL
+`
+
+type ListNamesByParentsAndPrefixesParams struct {
+	UserID    int64    `json:"user_id"`
+	ParentIds []int64  `json:"parent_ids"`
+	Prefixes  []string `json:"prefixes"`
+}
+
+type ListNamesByParentsAndPrefixesRow struct {
+	ParentID int64  `json:"parent_id"`
+	Name     string `json:"name"`
+}
+
+// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
+func (q *Queries) ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNamesByParentsAndPrefixes, arg.UserID, pq.Array(arg.ParentIds), pq.Array(arg.Prefixes))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNamesByParentsAndPrefixesRow
+	for rows.Next() {
+		var i ListNamesByParentsAndPrefixesRow
+		if err := rows.Scan(&i.ParentID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTrashRoots = `-- name: ListTrashRoots :many
+SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
+FROM files f
+LEFT JOIN files p ON p.id = f.parent_id
+    AND (p.trashed_at IS NULL OR p.trash_root_id = ANY($1::bigint[]))
+WHERE f.user_id = $2
+  AND f.id = ANY($1::bigint[])
+  AND f.trash_root_id = f.id
+ORDER BY f.id
+FOR UPDATE OF f
+`
+
+type ListTrashRootsParams struct {
+	Ids    []int64 `json:"ids"`
+	UserID int64   `json:"user_id"`
+}
+
+type ListTrashRootsRow struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	IsFolder    bool   `json:"is_folder"`
+	NewParentID int64  `json:"new_parent_id"`
+}
+
+// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+func (q *Queries) ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTrashRoots, pq.Array(arg.Ids), arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTrashRootsRow
+	for rows.Next() {
+		var i ListTrashRootsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IsFolder,
+			&i.NewParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const renameFile = `-- name: RenameFile :one
 UPDATE files
 SET name = $1, updated_at = NOW()
-WHERE id = $2 AND user_id = $3
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id
+WHERE id = $2 AND user_id = $3 AND trashed_at IS NULL
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id
 `
 
 type RenameFileParams struct {
@@ -188,6 +292,8 @@ func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
 	)
 	return i, err
 }
@@ -200,6 +306,7 @@ WITH RECURSIVE path AS (
       AND COALESCE(files.parent_id, 0) = 0
       AND files.name = ($2::text[])[1]
       AND files.storage_key IS NULL
+      AND files.trashed_at IS NULL
     UNION ALL
     SELECT f.id, f.name, path.depth + 1
     FROM files f
@@ -207,6 +314,7 @@ WITH RECURSIVE path AS (
     WHERE f.user_id = $1
       AND f.name = ($2::text[])[path.depth + 1]
       AND f.storage_key IS NULL
+      AND f.trashed_at IS NULL
 )
 SELECT id, name FROM path
 ORDER BY depth
@@ -245,4 +353,90 @@ func (q *Queries) ResolveFolderPath(ctx context.Context, arg ResolveFolderPathPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const restoreTrashGroups = `-- name: RestoreTrashGroups :exec
+UPDATE files
+SET trashed_at = NULL, trash_root_id = NULL
+WHERE user_id = $1
+  AND trash_root_id = ANY($2::bigint[])
+  AND trash_root_id <> id
+`
+
+type RestoreTrashGroupsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Brings back the rows under each deleted item. They keep their names, because nothing new can go into a folder in the trash.
+func (q *Queries) RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error {
+	_, err := q.db.ExecContext(ctx, restoreTrashGroups, arg.UserID, pq.Array(arg.Ids))
+	return err
+}
+
+const restoreTrashRoots = `-- name: RestoreTrashRoots :exec
+UPDATE files
+SET parent_id = NULLIF(($1::bigint[])[array_position($2::bigint[], id)], 0),
+    name = ($3::text[])[array_position($2::bigint[], id)],
+    trashed_at = NULL, trash_root_id = NULL, updated_at = NOW()
+WHERE user_id = $4
+  AND id = ANY($2::bigint[])
+`
+
+type RestoreTrashRootsParams struct {
+	ParentIds []int64  `json:"parent_ids"`
+	Ids       []int64  `json:"ids"`
+	Names     []string `json:"names"`
+	UserID    int64    `json:"user_id"`
+}
+
+// parent_ids[i] and names[i] belong to ids[i].
+func (q *Queries) RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error {
+	_, err := q.db.ExecContext(ctx, restoreTrashRoots,
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.Ids),
+		pq.Array(arg.Names),
+		arg.UserID,
+	)
+	return err
+}
+
+const trashItems = `-- name: TrashItems :one
+WITH RECURSIVE tree AS (
+    SELECT files.id, files.id AS root_id
+    FROM files
+    WHERE files.user_id = $1
+      AND files.id = ANY($2::bigint[])
+      AND files.trashed_at IS NULL
+    UNION ALL
+    SELECT f.id, tree.root_id
+    FROM files f
+    JOIN tree ON COALESCE(f.parent_id, 0) = tree.id
+    WHERE f.user_id = $1
+      AND f.trashed_at IS NULL
+      AND f.id <> ALL($2::bigint[])
+),
+trashed AS (
+    UPDATE files
+    SET trashed_at = NOW(), trash_root_id = tree.root_id
+    FROM tree
+    WHERE files.id = tree.id
+    RETURNING files.id, files.trash_root_id
+)
+SELECT COUNT(*) FROM trashed
+WHERE id = trash_root_id
+`
+
+type TrashItemsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
+// Returns how many of the items it marked.
+func (q *Queries) TrashItems(ctx context.Context, arg TrashItemsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, trashItems, arg.UserID, pq.Array(arg.Ids))
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }

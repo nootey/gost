@@ -174,6 +174,93 @@ func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *FileHandler) Trash(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.Trash(r.Context(), userID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Moved to the trash.")
+}
+
+func (h *FileHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.Restore(r.Context(), userID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Restored from the trash.")
+}
+
+func (h *FileHandler) ListTrash(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	sort, err := utils.QueryChoice(r, "sort", SortByDate, SortByName, SortBySize, SortByType, SortByDate)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	order, err := utils.QueryChoice(r, "order", "desc", "asc", "desc")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.ListTrash(r.Context(), userID, TrashQuery{
+		Cursor:   r.URL.Query().Get("cursor"),
+		PageSize: pageSize,
+		Sort:     sort,
+		Desc:     order == "desc",
+	})
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
+}
+
 func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

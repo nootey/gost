@@ -19,6 +19,8 @@ type File struct {
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 	ParentID    sql.NullInt64  `json:"parent_id"`
+	TrashedAt   sql.NullTime   `json:"trashed_at"`
+	TrashRootID sql.NullInt64  `json:"trash_root_id"`
 }
 
 type Permission struct {

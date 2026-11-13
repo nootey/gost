@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/lib/pq"
@@ -18,4 +20,18 @@ func IsUniqueViolation(err error, constraint string) bool {
 func isDataException(err error) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Code.Class() == "22"
+}
+
+// InTx runs fn in a transaction. It commits when fn returns nil, else it rolls back.
+func InTx(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

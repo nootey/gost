@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -47,6 +49,9 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/folders", suite.handler.CreateFolder)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
+	suite.router.Get("/trash", suite.handler.ListTrash)
+	suite.router.Post("/trash", suite.handler.Trash)
+	suite.router.Post("/trash/restore", suite.handler.Restore)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -530,4 +535,228 @@ func (suite *FileHandlerTestSuite) TestRename_ServiceError() {
 
 	suite.Equal(http.StatusConflict, w.Code)
 	suite.Equal("an item with this name already exists", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) postItems(path, body string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_Success() {
+	suite.mockService.EXPECT().
+		Trash(mock.Anything, testUserID, []int64{5, 3, 5}).
+		Return(nil).
+		Once()
+
+	w := suite.postItems("/trash", `{"ids":[5,3,5]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Moved to the trash.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_AtLimit() {
+	ids := make([]string, 100)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	suite.mockService.EXPECT().
+		Trash(mock.Anything, testUserID, mock.MatchedBy(func(got []int64) bool { return len(got) == 100 })).
+		Return(nil).
+		Once()
+
+	w := suite.postItems("/trash", `{"ids":[`+strings.Join(ids, ",")+`]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_InvalidIDs() {
+	tooMany := strings.TrimSuffix(strings.Repeat("1,", 101), ",")
+	for _, body := range []string{`{}`, `{"ids":[]}`, `{"ids":null}`, `{"ids":[0]}`, `{"ids":[4,-1]}`, `{"ids":[` + tooMany + `]}`} {
+		w := suite.postItems("/trash", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid ids", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_InvalidBody() {
+	for _, body := range []string{`not json`, `{"ids":"5"}`, `{"ids":["a"]}`} {
+		w := suite.postItems("/trash", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid request body", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_Unauthenticated() {
+	w := suite.postItems("/trash", `{"ids":[5]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestTrash_ServiceError() {
+	suite.mockService.EXPECT().
+		Trash(mock.Anything, testUserID, []int64{5}).
+		Return(apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.postItems("/trash", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestRestore_Success() {
+	suite.mockService.EXPECT().
+		Restore(mock.Anything, testUserID, []int64{5, 3, 5}).
+		Return(nil).
+		Once()
+
+	w := suite.postItems("/trash/restore", `{"ids":[5,3,5]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Restored from the trash.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestRestore_InvalidIDs() {
+	tooMany := strings.TrimSuffix(strings.Repeat("1,", 101), ",")
+	for _, body := range []string{`{}`, `{"ids":[]}`, `{"ids":[0]}`, `{"ids":[` + tooMany + `]}`} {
+		w := suite.postItems("/trash/restore", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid ids", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestRestore_InvalidBody() {
+	w := suite.postItems("/trash/restore", `not json`, true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid request body", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestRestore_Unauthenticated() {
+	w := suite.postItems("/trash/restore", `{"ids":[5]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestRestore_ServiceError() {
+	suite.mockService.EXPECT().
+		Restore(mock.Anything, testUserID, []int64{5}).
+		Return(apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.postItems("/trash/restore", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) listTrash(query string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/trash"+query, nil)
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestListTrash_Success() {
+	next := "next-page"
+	trashedAt := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	suite.mockService.EXPECT().
+		ListTrash(mock.Anything, testUserID, file.TrashQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true}).
+		Return(&utils.Page[*file.TrashedFile]{
+			Data:       []*file.TrashedFile{{File: file.File{ID: 3, Name: "c.txt"}, TrashedAt: trashedAt}},
+			NextCursor: &next,
+		}, nil).
+		Once()
+
+	w := suite.listTrash("?cursor=this-page&page_size=5", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp struct {
+		Data []struct {
+			ID        int64     `json:"id"`
+			Name      string    `json:"name"`
+			TrashedAt time.Time `json:"trashed_at"`
+		} `json:"data"`
+		NextCursor *string `json:"next_cursor"`
+	}
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Data, 1)
+	suite.Equal("c.txt", resp.Data[0].Name)
+	suite.True(trashedAt.Equal(resp.Data[0].TrashedAt))
+	suite.Require().NotNil(resp.NextCursor)
+	suite.Equal(next, *resp.NextCursor)
+}
+
+func (suite *FileHandlerTestSuite) TestListTrash_Sort() {
+	cases := []struct {
+		query string
+		want  file.TrashQuery
+	}{
+		{"", file.TrashQuery{Sort: file.SortByDate, Desc: true}},
+		{"?page_size=-x", file.TrashQuery{Sort: file.SortByDate, Desc: true}},
+		{"?sort=name&order=asc", file.TrashQuery{Sort: file.SortByName}},
+		{"?sort=size", file.TrashQuery{Sort: file.SortBySize, Desc: true}},
+		{"?sort=type&order=desc", file.TrashQuery{Sort: file.SortByType, Desc: true}},
+	}
+	for _, tc := range cases {
+		suite.mockService.EXPECT().
+			ListTrash(mock.Anything, testUserID, tc.want).
+			Return(&utils.Page[*file.TrashedFile]{Data: []*file.TrashedFile{}}, nil).
+			Once()
+
+		w := suite.listTrash(tc.query, true)
+
+		suite.Equal(http.StatusOK, w.Code, tc.query)
+		suite.JSONEq(`{"data":[],"next_cursor":null}`, w.Body.String(), tc.query)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestListTrash_InvalidSort() {
+	cases := []struct {
+		query   string
+		message string
+	}{
+		{"?sort=trashed_at", "invalid sort"},
+		{"?order=DESC", "invalid order"},
+	}
+	for _, tc := range cases {
+		w := suite.listTrash(tc.query, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, tc.query)
+		suite.Equal(tc.message, suite.errorMessage(w), tc.query)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestListTrash_Unauthenticated() {
+	w := suite.listTrash("", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestListTrash_ServiceError() {
+	suite.mockService.EXPECT().
+		ListTrash(mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, apperr.New(apperr.KindInvalid, "invalid cursor")).
+		Once()
+
+	w := suite.listTrash("?cursor=bad", true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid cursor", suite.errorMessage(w))
 }

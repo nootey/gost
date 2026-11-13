@@ -38,6 +38,19 @@ export interface ListQuery {
     search: string | null;
 }
 
+// An item the user deleted. parent_id is the folder it was in.
+export interface TrashedFile extends StoredFile {
+    trashed_at: string;
+}
+
+// A null cursor is the first page. The date sort is the time of the delete.
+export interface TrashQuery {
+    cursor: string | null;
+    page_size: number;
+    sort: SortField;
+    order: "asc" | "desc";
+}
+
 export interface FolderForm {
     name: string;
     parent_id: number | null;
@@ -45,6 +58,10 @@ export interface FolderForm {
 
 export interface RenameForm {
     name: string;
+}
+
+export interface ItemsForm {
+    ids: number[];
 }
 
 export interface PathEntry {

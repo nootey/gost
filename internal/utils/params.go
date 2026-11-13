@@ -63,6 +63,14 @@ func QueryChoice[T ~string](r *http.Request, key string, def T, choices ...T) (T
 	return raw, nil
 }
 
+// ValidateIDs checks a list of ids from a JSON body. A selection is one page, so it holds at most maxPageSize ids.
+func ValidateIDs(ids []int64, key string) error {
+	if len(ids) == 0 || len(ids) > maxPageSize || slices.ContainsFunc(ids, func(id int64) bool { return id < 1 }) {
+		return apperr.New(apperr.KindInvalid, "invalid "+key)
+	}
+	return nil
+}
+
 func parseID(raw, key string) (int64, error) {
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id < 1 {

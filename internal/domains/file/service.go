@@ -12,6 +12,7 @@ import (
 	"gost/internal/utils"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -33,6 +34,9 @@ type FileServiceInterface interface {
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
+	Trash(ctx context.Context, userID int64, ids []int64) error
+	Restore(ctx context.Context, userID int64, ids []int64) error
+	ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error)
 }
 
 var _ FileServiceInterface = (*FileService)(nil)
@@ -70,7 +74,10 @@ func toFileModel(dbFile database.File) *File {
 
 // fileFields follows the column order of the files table, which SELECT * returns.
 func fileFields(f *database.File) []any {
-	return []any{&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes, &f.CreatedAt, &f.UpdatedAt, &f.ParentID}
+	return []any{
+		&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes,
+		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID,
+	}
 }
 
 func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error) {
@@ -211,6 +218,108 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 	}
 
 	return toFileModel(dbFile), nil
+}
+
+// Trash is all or none: an id that is unknown, someone else's or already in the trash undoes the rest.
+func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	return utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		trashed, err := s.queries.WithTx(tx).TrashItems(ctx, database.TrashItemsParams{UserID: userID, Ids: ids})
+		if err != nil {
+			return err
+		}
+		if trashed != int64(len(ids)) {
+			return errItemNotFound
+		}
+		return nil
+	})
+}
+
+// Restore is all or none, the same as Trash. Each id must be an item the user deleted, not a row under one.
+// Another request can take a free name before the commit. Then the whole restore runs again.
+func (s *FileService) Restore(ctx context.Context, userID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	for range maxNameAttempts {
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			roots, err := q.ListTrashRoots(ctx, database.ListTrashRootsParams{UserID: userID, Ids: ids})
+			if err != nil {
+				return err
+			}
+			if len(roots) != len(ids) {
+				return errItemNotFound
+			}
+
+			if err := q.RestoreTrashGroups(ctx, database.RestoreTrashGroupsParams{UserID: userID, Ids: ids}); err != nil {
+				return err
+			}
+
+			restored := database.RestoreTrashRootsParams{
+				UserID:    userID,
+				Ids:       make([]int64, len(roots)),
+				ParentIds: make([]int64, len(roots)),
+				Names:     make([]string, len(roots)),
+			}
+			prefixes := make([]string, len(roots))
+			for i, root := range roots {
+				restored.Ids[i], restored.ParentIds[i] = root.ID, root.NewParentID
+				prefixes[i], _ = utils.SplitName(root.Name, utils.NameKindOf(root.IsFolder))
+			}
+
+			rows, err := q.ListNamesByParentsAndPrefixes(ctx, database.ListNamesByParentsAndPrefixesParams{
+				UserID:    userID,
+				ParentIds: restored.ParentIds,
+				Prefixes:  prefixes,
+			})
+			if err != nil {
+				return err
+			}
+			taken := make(map[int64][]string)
+			for _, row := range rows {
+				taken[row.ParentID] = append(taken[row.ParentID], row.Name)
+			}
+
+			// The roots come in id order, and each name a root takes is taken for the roots after it.
+			for i, root := range roots {
+				name, err := utils.FreeName(root.Name, utils.NameKindOf(root.IsFolder), taken[root.NewParentID])
+				if err != nil {
+					return err
+				}
+				taken[root.NewParentID] = append(taken[root.NewParentID], name)
+				restored.Names[i] = name
+			}
+
+			return q.RestoreTrashRoots(ctx, restored)
+		})
+		if utils.IsUniqueViolation(err, nameIndex) {
+			continue
+		}
+		return err
+	}
+
+	return errNameTaken
+}
+
+func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {
+	page, err := utils.FetchPage(ctx, s.db, trashList, utils.PageQuery[SortField]{
+		Args:     []any{userID},
+		Sort:     q.Sort,
+		Desc:     q.Desc,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, fileFields)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]*TrashedFile, len(page.Data))
+	for i, dbFile := range page.Data {
+		items[i] = &TrashedFile{File: *toFileModel(dbFile), TrashedAt: dbFile.TrashedAt.Time}
+	}
+
+	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
 }
 
 func (s *FileService) checkFolder(ctx context.Context, userID, folderID int64) error {

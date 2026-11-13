@@ -1,14 +1,17 @@
 import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
-import type { Page } from "../api/api_models.ts";
+import type { Page, SuccessResponse } from "../api/api_models.ts";
 import type {
     FolderForm,
     FolderPath,
     FolderResponse,
+    ItemsForm,
     ListQuery,
     RenameForm,
     RenameResponse,
     StoredFile,
+    TrashedFile,
+    TrashQuery,
     UploadResponse,
 } from "../../domains/file/models.ts";
 
@@ -17,6 +20,7 @@ export const useFileStore = defineStore("file", {
     state: () => ({
         apiPrefix: "files",
         folderPrefix: "folders",
+        trashPrefix: "trash",
     }),
     actions: {
         async list(query: ListQuery): Promise<Page<StoredFile>> {
@@ -40,6 +44,21 @@ export const useFileStore = defineStore("file", {
 
         async rename(id: number, form: RenameForm): Promise<RenameResponse> {
             const response = await apiClient.patch<RenameResponse>(`${this.apiPrefix}/${id}`, form);
+            return response.data;
+        },
+
+        async listTrash(query: TrashQuery): Promise<Page<TrashedFile>> {
+            const response = await apiClient.get<Page<TrashedFile>>(this.trashPrefix, { params: { ...query } });
+            return response.data;
+        },
+
+        async trash(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(this.trashPrefix, form);
+            return response.data;
+        },
+
+        async restore(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.trashPrefix}/restore`, form);
             return response.data;
         },
 

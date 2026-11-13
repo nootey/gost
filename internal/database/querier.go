@@ -24,10 +24,21 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
+	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
+	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
+	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Walks folder names down from the root and returns each folder it finds, root first.
 	// Fewer rows than names means the path does not exist.
 	ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error)
+	// Brings back the rows under each deleted item. They keep their names, because nothing new can go into a folder in the trash.
+	RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error
+	// parent_ids[i] and names[i] belong to ids[i].
+	RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error
+	// Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
+	// Returns how many of the items it marked.
+	TrashItems(ctx context.Context, arg TrashItemsParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 }
 

@@ -5,32 +5,14 @@ import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
+import { itemView } from "../../../pkg/utils/item_view.ts";
+import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
+import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import RenameDialog from "./RenameDialog.vue";
-import type {
-    DataTablePageEvent,
-    DataTableRowClickEvent,
-    DataTableRowContextMenuEvent,
-    DataTableSortEvent,
-} from "primevue/datatable";
+import type { DataTablePageEvent, DataTableRowClickEvent, DataTableSortEvent } from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
-import type { ListQuery, SortField, StoredFile } from "../models.ts";
-
-interface ItemView {
-    iconBox: string;
-    icon: string;
-    type: string;
-    size: string;
-    row: string;
-}
-
-const FOLDER_VIEW: ItemView = {
-    iconBox: "bg-accent-soft text-accent",
-    icon: "pi pi-folder",
-    type: "Folder",
-    size: "—",
-    row: "cursor-pointer",
-};
+import type { SortField, StoredFile } from "../models.ts";
 
 const MENU_ITEMS: MenuItem[] = [
     { label: "Add to favorites", icon: "pi pi-star" },
@@ -38,12 +20,10 @@ const MENU_ITEMS: MenuItem[] = [
     { label: "Move", icon: "pi pi-arrow-right" },
     { label: "Copy", icon: "pi pi-copy" },
     { separator: true },
-    { label: "Delete", icon: "pi pi-trash", danger: true },
+    { label: "Delete", icon: "pi pi-trash", danger: true, command: moveToTrash },
 ];
 
 const SEARCH_DELAY_MS = 300;
-
-const ORDER_BY_SORT_ORDER: Record<number, ListQuery["order"]> = { 1: "asc", [-1]: "desc" };
 
 const props = defineProps<{ folderId: number | null; dir: string }>();
 
@@ -55,32 +35,19 @@ const rowOptions = [25, 50, 100];
 
 const files = ref<StoredFile[]>([]);
 const loading = ref<boolean>(true);
-const pageSize = ref<number>(rowOptions[0]);
-// cursors[i] opens page i, and the first page has none. Prev reloads the page before from its cursor.
-const cursors = ref<(string | null)[]>([null]);
-const nextCursor = ref<string | null>(null);
+const { pageSize, nextCursor, cursor, first, total, turn, reset } = useCursorPager(rowOptions[0]);
 const sortField = ref<SortField>("date");
 const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
 
 const selection = ref<StoredFile[]>([]);
-
-const menuRef = ref<{ show: (event: Event) => void } | null>(null);
-const menuTarget = ref<StoredFile | undefined>();
-const menuTargets = computed<StoredFile[]>(() => {
-    const row = menuTarget.value;
-    if (!row) return [];
-    if (selection.value.some((item) => item.id === row.id)) return selection.value;
-    return [row];
-});
+const { menuTarget, menuTargets, showMenu } = useRowMenu(selection, "rowMenu");
 
 const renameVisible = ref<boolean>(false);
 const renameTarget = ref<StoredFile | null>(null);
 
-const first = computed<number>(() => (cursors.value.length - 1) * pageSize.value);
-// The paginator needs a total, and the server sends none. One row past the rows so far turns on Next only when a next page exists.
-const pagerTotal = computed<number>(() => first.value + files.value.length + Number(nextCursor.value !== null));
+const pagerTotal = computed<number>(() => total(files.value.length));
 
 // Only the newest request may write the table, so a slow old page cannot replace a new one.
 let latestRequest = 0;
@@ -93,7 +60,7 @@ async function getData(): Promise<void> {
     try {
         const response = await fileStore.list({
             parent_id: props.folderId,
-            cursor: cursors.value.at(-1) ?? null,
+            cursor: cursor.value,
             page_size: pageSize.value,
             sort: sortField.value,
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
@@ -112,21 +79,8 @@ async function getData(): Promise<void> {
     }
 }
 
-// The used cursor is cleared until the page loads, so a fast second click cannot open the same page twice.
 async function onPage(event: DataTablePageEvent): Promise<void> {
-    if (event.rows !== pageSize.value) {
-        pageSize.value = event.rows;
-        await refresh();
-        return;
-    }
-
-    const page = cursors.value.length - 1;
-    if (event.page === 0) cursors.value = [null];
-    else if (event.page === page - 1) cursors.value.pop();
-    else if (event.page === page + 1 && nextCursor.value !== null) cursors.value.push(nextCursor.value);
-    else return;
-    nextCursor.value = null;
-    await getData();
+    if (turn(event)) await getData();
 }
 
 async function onSort(event: DataTableSortEvent): Promise<void> {
@@ -142,7 +96,7 @@ function onSearchInput(): void {
 
 // A new sort, search, folder or item can change what each page holds, so go back to the first page.
 async function refresh(): Promise<void> {
-    cursors.value = [null];
+    reset();
     await getData();
 }
 
@@ -157,17 +111,6 @@ function childRoute(folder: StoredFile): RouteLocationRaw {
     return folderRoute(joinDir(props.dir, folder.name));
 }
 
-function itemView(item: StoredFile): ItemView {
-    if (item.is_folder) return FOLDER_VIEW;
-    return {
-        iconBox: "bg-inset text-fg-muted",
-        icon: vueHelper.fileIcon(item.content_type),
-        type: vueHelper.mimeType(item.content_type),
-        size: vueHelper.formatBytes(item.size_bytes),
-        row: "",
-    };
-}
-
 function rowClass(item: StoredFile): string {
     return itemView(item).row;
 }
@@ -180,10 +123,6 @@ async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<vo
     await router.push(childRoute(event.data));
 }
 
-function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
-    menuRef.value?.show(event.originalEvent);
-}
-
 function notOneTarget(): boolean {
     return menuTargets.value.length !== 1;
 }
@@ -191,6 +130,18 @@ function notOneTarget(): boolean {
 function openRename(): void {
     renameTarget.value = menuTarget.value ?? null;
     renameVisible.value = true;
+}
+
+// The ids are read before the first await, because the menu clears its target when it hides.
+async function moveToTrash(): Promise<void> {
+    const ids = menuTargets.value.map((item) => item.id);
+    try {
+        const response = await fileStore.trash({ ids });
+        toastStore.successResponseToast(response);
+    } catch (error) {
+        toastStore.errorResponseToast(error);
+    }
+    await getData();
 }
 
 onMounted(getData);
@@ -229,7 +180,7 @@ defineExpose({ refresh });
             @page="onPage"
             @sort="onSort"
             @row-click="onRowClick"
-            @row-contextmenu="onRowContextMenu"
+            @row-contextmenu="showMenu"
         >
             <template #header>
                 <div class="flex items-center justify-between gap-3">
@@ -343,7 +294,7 @@ defineExpose({ refresh });
             </Column>
         </DataTable>
 
-        <ContextMenu ref="menuRef" :model="MENU_ITEMS" @hide="menuTarget = undefined">
+        <ContextMenu ref="rowMenu" :model="MENU_ITEMS" @hide="menuTarget = undefined">
             <template #item="{ item, props: itemProps }">
                 <a v-bind="itemProps.action" :class="{ 'text-danger': item.danger }">
                     <span v-bind="itemProps.icon" :class="{ 'text-danger': item.danger }" />
