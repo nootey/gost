@@ -86,7 +86,7 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 	return i, err
 }
 
-const deletePurgeRows = `-- name: DeletePurgeRows :exec
+const deletePurgeRows = `-- name: DeletePurgeRows :execrows
 DELETE FROM files
 WHERE user_id = $1
   AND id = ANY($2::bigint[])
@@ -100,9 +100,12 @@ type DeletePurgeRowsParams struct {
 }
 
 // Deletes the rows in ids. A row outside the root_ids groups stays.
-func (q *Queries) DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) error {
-	_, err := q.db.ExecContext(ctx, deletePurgeRows, arg.UserID, pq.Array(arg.Ids), pq.Array(arg.RootIds))
-	return err
+func (q *Queries) DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deletePurgeRows, arg.UserID, pq.Array(arg.Ids), pq.Array(arg.RootIds))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const folderExists = `-- name: FolderExists :one

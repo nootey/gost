@@ -17,7 +17,7 @@ type Querier interface {
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// Deletes the rows in ids. A row outside the root_ids groups stays.
-	DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) error
+	DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) (int64, error)
 	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
 	GetFile(ctx context.Context, arg GetFileParams) (File, error)

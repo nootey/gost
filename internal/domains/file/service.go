@@ -15,6 +15,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/riverqueue/river/rivertype"
+	"go.uber.org/zap"
 )
 
 const nameIndex = "idx_files_user_parent_name"
@@ -61,14 +64,16 @@ type FileService struct {
 	db      *sql.DB
 	queue   jobs.InserterInterface
 	cfg     config.UploadConfig
+	logger  *zap.Logger
 }
 
-func NewFileService(queries *database.Queries, db *sql.DB, queue jobs.InserterInterface, cfg config.UploadConfig) *FileService {
+func NewFileService(queries *database.Queries, db *sql.DB, queue jobs.InserterInterface, cfg config.UploadConfig, logger *zap.Logger) *FileService {
 	return &FileService{
 		queries: queries,
 		db:      db,
 		queue:   queue,
 		cfg:     cfg,
+		logger:  logger,
 	}
 }
 
@@ -269,13 +274,16 @@ func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) erro
 // TrashSubtrees marks the live rows under the trash roots, one level at a time.
 // Each level walks the folders of the groups, marked now or by an earlier run, so a run after a failure finishes the job.
 func (s *FileService) TrashSubtrees(ctx context.Context, userID int64, rootIDs []int64) error {
+	var rows int64
 	parents := rootIDs
 	for len(parents) > 0 {
 		var next []int64
 		for chunk := range slices.Chunk(parents, trashBatchSize) {
-			if err := s.trashChildren(ctx, userID, rootIDs, chunk); err != nil {
+			marked, err := s.trashChildren(ctx, userID, rootIDs, chunk)
+			if err != nil {
 				return err
 			}
+			rows += marked
 			folders, err := s.queries.ListGroupFolders(ctx, database.ListGroupFoldersParams{
 				UserID:    userID,
 				ParentIds: chunk,
@@ -287,6 +295,11 @@ func (s *FileService) TrashSubtrees(ctx context.Context, userID int64, rootIDs [
 			next = append(next, folders...)
 		}
 		parents = next
+	}
+
+	if rows > 0 {
+		s.logger.Info("trashed the rows under folders",
+			zap.Int64("user_id", userID), zap.Int64s("root_ids", rootIDs), zap.Int64("rows", rows))
 	}
 	return nil
 }
@@ -392,12 +405,17 @@ func (s *FileService) PurgeGroups(ctx context.Context, userID int64, rootIDs []i
 	if err := s.TrashSubtrees(ctx, userID, rootIDs); err != nil {
 		return err
 	}
-	if err := s.moveNestedRootsHome(ctx, userID, rootIDs); err != nil {
+	movedHome, err := s.moveNestedRootsHome(ctx, userID, rootIDs)
+	if err != nil {
 		return err
 	}
-	if err := s.deleteGroupRows(ctx, userID, rootIDs); err != nil {
+	rows, files, err := s.deleteGroupRows(ctx, userID, rootIDs)
+	if err != nil {
 		return err
 	}
+	s.logger.Info("purged trash groups",
+		zap.Int64("user_id", userID), zap.Int64s("root_ids", rootIDs),
+		zap.Int64("rows", rows), zap.Int64("files", files), zap.Int64("moved_home", movedHome))
 
 	// A root goes last, so a root that is still there means a row outside the groups blocks the delete.
 	left, err := s.queries.ListPurgeRoots(ctx, database.ListPurgeRootsParams{UserID: userID, Ids: rootIDs})
@@ -429,12 +447,18 @@ func (s *FileService) SweepTrash(ctx context.Context) error {
 	}
 	for _, group := range stale {
 		for rootIDs := range slices.Chunk(group.RootIds, purgeBatchSize) {
+			var res *rivertype.JobInsertResult
 			err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
-				_, err := s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: group.UserID, RootIDs: rootIDs}, nil)
+				var err error
+				res, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: group.UserID, RootIDs: rootIDs}, nil)
 				return err
 			})
 			if err != nil {
 				return err
+			}
+			if !res.UniqueSkippedAsDuplicate {
+				s.logger.Info("added the purge job again",
+					zap.Int64("user_id", group.UserID), zap.Int64s("root_ids", rootIDs))
 			}
 		}
 	}
@@ -462,7 +486,9 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 }
 
 // trashChildren marks the live rows right under parents, one batch per transaction, until a batch comes back short.
-func (s *FileService) trashChildren(ctx context.Context, userID int64, rootIDs, parents []int64) error {
+// It returns the count of rows it marked.
+func (s *FileService) trashChildren(ctx context.Context, userID int64, rootIDs, parents []int64) (int64, error) {
+	var total int64
 	for {
 		var marked int64
 		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
@@ -479,14 +505,17 @@ func (s *FileService) trashChildren(ctx context.Context, userID int64, rootIDs, 
 			})
 			return err
 		})
+		total += marked
 		if err != nil || marked < trashBatchSize {
-			return err
+			return total, err
 		}
 	}
 }
 
 // moveNestedRootsHome moves the items deleted earlier out of the groups, one batch per transaction, until a batch comes back short.
-func (s *FileService) moveNestedRootsHome(ctx context.Context, userID int64, rootIDs []int64) error {
+// It returns the count of items it moved.
+func (s *FileService) moveNestedRootsHome(ctx context.Context, userID int64, rootIDs []int64) (int64, error) {
+	var total int64
 	for {
 		var moved int64
 		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
@@ -502,8 +531,9 @@ func (s *FileService) moveNestedRootsHome(ctx context.Context, userID int64, roo
 			})
 			return err
 		})
+		total += moved
 		if err != nil || moved < purgeBatchSize {
-			return err
+			return total, err
 		}
 	}
 }
@@ -529,15 +559,23 @@ func (s *FileService) requestExpiredPurges(ctx context.Context, userID int64) er
 			_, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: userID, RootIDs: marked}, nil)
 			return err
 		})
-		if err != nil || len(marked) < purgeBatchSize {
+		if err != nil {
 			return err
+		}
+		if len(marked) > 0 {
+			s.logger.Info("marked expired trash for purge", zap.Int64("user_id", userID), zap.Int64s("root_ids", marked))
+		}
+		if len(marked) < purgeBatchSize {
+			return nil
 		}
 	}
 }
 
 // deleteGroupRows deletes the groups from the bottom up, one batch of rows with nothing under them at a time.
 // It removes the bytes before the rows, so a crash leaves rows the next run deletes, never bytes with no row.
-func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs []int64) error {
+// It returns the count of rows it deleted and of files it removed from disk.
+func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs []int64) (int64, int64, error) {
+	var rows, files int64
 	for {
 		leaves, err := s.queries.ListPurgeLeaves(ctx, database.ListPurgeLeavesParams{
 			UserID:    userID,
@@ -545,7 +583,7 @@ func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs
 			BatchSize: purgeBatchSize,
 		})
 		if err != nil || len(leaves) == 0 {
-			return err
+			return rows, files, err
 		}
 
 		ids := make([]int64, len(leaves))
@@ -555,20 +593,25 @@ func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs
 				continue
 			}
 			if err := utils.RemoveStoredFile(s.cfg.Dir, leaf.StorageKey.String); err != nil {
-				return fmt.Errorf("failed to remove stored file: %w", err)
+				return rows, files, fmt.Errorf("failed to remove stored file: %w", err)
 			}
+			files++
 		}
 
+		var deleted int64
 		err = utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
 			q := s.queries.WithTx(tx)
 			if err := q.LockUserTree(ctx, userID); err != nil {
 				return err
 			}
-			return q.DeletePurgeRows(ctx, database.DeletePurgeRowsParams{UserID: userID, Ids: ids, RootIds: rootIDs})
+			var err error
+			deleted, err = q.DeletePurgeRows(ctx, database.DeletePurgeRowsParams{UserID: userID, Ids: ids, RootIds: rootIDs})
+			return err
 		})
 		if err != nil {
-			return err
+			return rows, files, err
 		}
+		rows += deleted
 	}
 }
 

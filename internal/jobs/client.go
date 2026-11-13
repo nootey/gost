@@ -8,6 +8,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverdatabasesql"
 	"github.com/riverqueue/river/rivertype"
+	"go.uber.org/zap"
 )
 
 const (
@@ -29,17 +30,36 @@ type InserterInterface interface {
 
 // NewClient builds a River client on the app's database/sql pool. This driver has no LISTEN/NOTIFY,
 // so River polls for new jobs, once a second by default. The trash sweep runs at start, then every sweepTrashInterval.
-func NewClient(db *sql.DB, workers *river.Workers) (*river.Client[*sql.Tx], error) {
+func NewClient(db *sql.DB, workers *river.Workers, logger *zap.Logger) (*river.Client[*sql.Tx], error) {
 	return river.NewClient(riverdatabasesql.New(db), &river.Config{
 		Workers:         workers,
 		Queues:          map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: maxWorkers}},
 		SoftStopTimeout: softStopTimeout,
+		Middleware:      []rivertype.Middleware{logRuns(logger)},
 		PeriodicJobs: []*river.PeriodicJob{
 			river.NewPeriodicJob(river.PeriodicInterval(sweepTrashInterval), func() (river.JobArgs, *river.InsertOpts) {
 				return SweepTrashArgs{}, nil
 			}, &river.PeriodicJobOpts{RunOnStart: true}),
 		},
 	})
+}
+
+// logRuns logs the start and the end of every job run, so a new job kind gets these logs with no extra code.
+func logRuns(logger *zap.Logger) river.WorkerMiddlewareFunc {
+	return func(ctx context.Context, job *rivertype.JobRow, doInner func(ctx context.Context) error) error {
+		fields := []zap.Field{zap.String("kind", job.Kind), zap.Int64("job_id", job.ID), zap.Int("attempt", job.Attempt)}
+		logger.Info("job started", fields...)
+
+		start := time.Now()
+		err := doInner(ctx)
+		fields = append(fields, zap.Duration("took", time.Since(start)))
+		if err != nil {
+			logger.Error("job failed", append(fields, zap.Error(err))...)
+			return err
+		}
+		logger.Info("job finished", fields...)
+		return nil
+	}
 }
 
 // Service runs the River client on the worker supervisor.

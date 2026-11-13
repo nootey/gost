@@ -179,7 +179,7 @@ WHERE f.user_id = sqlc.arg(user_id)
   AND NOT EXISTS (SELECT 1 FROM files c WHERE c.parent_id = f.id)
 LIMIT sqlc.arg(batch_size);
 
--- name: DeletePurgeRows :exec
+-- name: DeletePurgeRows :execrows
 -- Deletes the rows in ids. A row outside the root_ids groups stays.
 DELETE FROM files
 WHERE user_id = sqlc.arg(user_id)

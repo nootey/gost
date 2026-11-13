@@ -119,7 +119,7 @@ func main() {
 
 	// The workers go in once the services they call exist. River reads the bundle on insert and on Start.
 	jobWorkers := river.NewWorkers()
-	jobClient, err := jobs.NewClient(db, jobWorkers)
+	jobClient, err := jobs.NewClient(db, jobWorkers, logger.Named("jobs"))
 	if err != nil {
 		logger.Fatal("failed to create job client", zap.Error(err))
 	}
@@ -127,7 +127,7 @@ func main() {
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, mail, cfg)
-	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, logger.Named("files"))
 	// Add more services as needed
 
 	if err := jobs.RegisterWorkers(jobWorkers, fileService); err != nil {

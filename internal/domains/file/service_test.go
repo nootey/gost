@@ -973,6 +973,9 @@ func (s *FileServiceTestSuite) TestTrash_JobMarksRowsUnderFolders() {
 
 	s.Zero(s.liveRowsInTrash(userID))
 	s.Equal(docs.ID, s.trashRoot(inDocs.ID))
+	s.Equal([]map[string]any{
+		{"user_id": userID, "root_ids": []any{docs.ID, empty.ID}, "rows": int64(1)},
+	}, s.logs("trashed the rows under folders"))
 }
 
 // Big holds 1500 files and 1001 folders, so its level takes 3 batches. Each folder holds a file, and that level
@@ -1361,6 +1364,9 @@ func (s *FileServiceTestSuite) TestPurge_DeletesRowsAndBytes() {
 		s.False(s.storedFileExists(key), key)
 	}
 	s.True(s.storedFileExists(s.storageKey(keep.ID)))
+	s.Equal([]map[string]any{
+		{"user_id": userID, "root_ids": []any{docs.ID, gone.ID}, "rows": int64(5), "files": int64(3), "moved_home": int64(0)},
+	}, s.logs("purged trash groups"))
 }
 
 // One bad id undoes the rest. A live item, a row under a deleted folder and an item already marked are bad ids too.
@@ -1422,6 +1428,9 @@ func (s *FileServiceTestSuite) TestPurgeGroups_MovesItemDeletedEarlierHome() {
 	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
 	s.workPurgeJobs()
 
+	s.Equal([]map[string]any{
+		{"user_id": userID, "root_ids": []any{docs.ID}, "rows": int64(1), "files": int64(0), "moved_home": int64(1)},
+	}, s.logs("purged trash groups"))
 	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
 	s.Require().NoError(err)
 	s.Require().Len(trash.Data, 1)
@@ -1551,6 +1560,10 @@ func (s *FileServiceTestSuite) TestSweepTrash_PurgesExpiredItems() {
 		{UserID: alice, RootIDs: []int64{a.ID, docs.ID}},
 		{UserID: bob, RootIDs: []int64{old}},
 	}, s.purgeJobs())
+	s.Equal([]map[string]any{
+		{"user_id": alice, "root_ids": []any{a.ID, docs.ID}},
+		{"user_id": bob, "root_ids": []any{old}},
+	}, s.logs("marked expired trash for purge"))
 
 	s.workPurgeJobs()
 
@@ -1604,6 +1617,7 @@ func (s *FileServiceTestSuite) TestSweepTrash_AddsPurgeJobAgainAfterRiverGivesUp
 
 	s.Require().NoError(svc.SweepTrash(context.Background()))
 	s.Equal([]jobs.PurgeGroupsArgs{stuck, fresh}, s.purgeJobs())
+	s.Empty(s.logs("added the purge job again"))
 
 	_, err = s.TC.DB.ExecContext(context.Background(), `
 		UPDATE river_job SET state = 'discarded', finalized_at = NOW()
@@ -1612,6 +1626,7 @@ func (s *FileServiceTestSuite) TestSweepTrash_AddsPurgeJobAgainAfterRiverGivesUp
 
 	s.Require().NoError(svc.SweepTrash(context.Background()))
 	s.Equal([]jobs.PurgeGroupsArgs{stuck, fresh, stuck}, s.purgeJobs())
+	s.Equal([]map[string]any{{"user_id": userID, "root_ids": []any{a, b}}}, s.logs("added the purge job again"))
 
 	s.workPurgeJobs()
 
@@ -1770,6 +1785,15 @@ func (s *FileServiceTestSuite) liveRowsInTrash(userID int64) int {
 		WHERE c.user_id = $1 AND c.trashed_at IS NULL AND p.trashed_at IS NOT NULL`, userID).Scan(&n)
 	s.Require().NoError(err)
 	return n
+}
+
+// logs reads the fields of the logs with msg, oldest first.
+func (s *FileServiceTestSuite) logs(msg string) []map[string]any {
+	var all []map[string]any
+	for _, entry := range s.TC.Logs.FilterMessage(msg).All() {
+		all = append(all, entry.ContextMap())
+	}
+	return all
 }
 
 // queuedJobs reads the jobs of one kind that wait in the queue.

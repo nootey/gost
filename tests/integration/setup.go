@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type TestContainer struct {
@@ -30,6 +31,7 @@ type TestContainer struct {
 	Redis     *miniredis.Miniredis
 	Mailer    *CaptureMailer
 	UploadDir string
+	Logs      *observer.ObservedLogs
 	Services  *Services
 }
 
@@ -95,8 +97,11 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	// Create queries
 	queries := database.New(db)
 
+	// Tests read the logs of the services through Logs.
+	logCore, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(logCore)
+
 	// Seed basic data (roles, permissions)
-	logger := zap.NewNop()
 	cfg := testConfig()
 	cfg.Upload.Dir = s.T().TempDir()
 	err = seeders.SeedDatabase(s.Ctx, db, logger, cfg, "core")
@@ -110,13 +115,13 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 
 	// The client only adds jobs. Tests run them by hand, so they never race a worker.
 	jobWorkers := river.NewWorkers()
-	jobClient, err := jobs.NewClient(db, jobWorkers)
+	jobClient, err := jobs.NewClient(db, jobWorkers, logger)
 	s.Require().NoError(err, "failed to create job client")
 
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
-	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, logger)
 	s.Require().NoError(jobs.RegisterWorkers(jobWorkers, fileService), "failed to register job workers")
 
 	s.TC = &TestContainer{
@@ -126,6 +131,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 		Redis:     mr,
 		Mailer:    captureMailer,
 		UploadDir: cfg.Upload.Dir,
+		Logs:      logs,
 		Services: &Services{
 			UserService: userService,
 			AuthService: authService,
@@ -158,6 +164,7 @@ func (s *ServiceIntegrationSuite) SetupTest() {
 	s.TC.Redis.FlushAll()
 	s.TC.Mailer.ConfirmationLink = ""
 	s.TC.Mailer.ResetLink = ""
+	s.TC.Logs.TakeAll()
 }
 
 func (s *ServiceIntegrationSuite) TearDownSuite() {
