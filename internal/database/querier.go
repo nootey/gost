@@ -23,6 +23,9 @@ type Querier interface {
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
+	// It skips the group roots, because the job starts from them.
+	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
 	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
@@ -38,9 +41,11 @@ type Querier interface {
 	RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error
 	// parent_ids[i] and names[i] belong to ids[i].
 	RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error
-	// Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
-	// Returns how many of the items it marked.
-	TrashItems(ctx context.Context, arg TrashItemsParams) (int64, error)
+	// Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
+	// still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
+	TrashChildren(ctx context.Context, arg TrashChildrenParams) (int64, error)
+	// Marks only the items. Each item roots its own group. A job marks the rows under the folders (TrashChildren).
+	TrashItems(ctx context.Context, arg TrashItemsParams) ([]TrashItemsRow, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 }
 

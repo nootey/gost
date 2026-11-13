@@ -132,6 +132,46 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) 
 	return i, err
 }
 
+const listGroupFolders = `-- name: ListGroupFolders :many
+SELECT id FROM files
+WHERE user_id = $1
+  AND parent_id = ANY($2::bigint[])
+  AND trash_root_id = ANY($3::bigint[])
+  AND trash_root_id <> id
+  AND storage_key IS NULL
+`
+
+type ListGroupFoldersParams struct {
+	UserID    int64   `json:"user_id"`
+	ParentIds []int64 `json:"parent_ids"`
+	RootIds   []int64 `json:"root_ids"`
+}
+
+// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
+// It skips the group roots, because the job starts from them.
+func (q *Queries) ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listGroupFolders, arg.UserID, pq.Array(arg.ParentIds), pq.Array(arg.RootIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNamesByParentAndPrefix = `-- name: ListNamesByParentAndPrefix :many
 SELECT name FROM files
 WHERE user_id = $1
@@ -411,30 +451,52 @@ func (q *Queries) RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsPa
 	return err
 }
 
-const trashItems = `-- name: TrashItems :one
-WITH RECURSIVE tree AS (
-    SELECT files.id, files.id AS root_id
-    FROM files
-    WHERE files.user_id = $1
-      AND files.id = ANY($2::bigint[])
-      AND files.trashed_at IS NULL
-    UNION ALL
-    SELECT f.id, tree.root_id
-    FROM files f
-    JOIN tree ON COALESCE(f.parent_id, 0) = tree.id
-    WHERE f.user_id = $1
-      AND f.trashed_at IS NULL
-      AND f.id <> ALL($2::bigint[])
-),
-trashed AS (
-    UPDATE files
-    SET trashed_at = NOW(), trash_root_id = tree.root_id
-    FROM tree
-    WHERE files.id = tree.id
-    RETURNING files.id, files.trash_root_id
+const trashChildren = `-- name: TrashChildren :execrows
+WITH batch AS (
+    SELECT c.id, p.trashed_at, p.trash_root_id
+    FROM files p
+    JOIN files c ON c.parent_id = p.id
+    WHERE p.user_id = $1
+      AND p.id = ANY($2::bigint[])
+      AND p.trash_root_id = ANY($3::bigint[])
+      AND c.trashed_at IS NULL
+    LIMIT $4
 )
-SELECT COUNT(*) FROM trashed
-WHERE id = trash_root_id
+UPDATE files
+SET trashed_at = batch.trashed_at, trash_root_id = batch.trash_root_id
+FROM batch
+WHERE files.id = batch.id
+`
+
+type TrashChildrenParams struct {
+	UserID    int64   `json:"user_id"`
+	ParentIds []int64 `json:"parent_ids"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+// Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
+// still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
+func (q *Queries) TrashChildren(ctx context.Context, arg TrashChildrenParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, trashChildren,
+		arg.UserID,
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.RootIds),
+		arg.BatchSize,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const trashItems = `-- name: TrashItems :many
+UPDATE files
+SET trashed_at = NOW(), trash_root_id = id
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trashed_at IS NULL
+    RETURNING id, (storage_key IS NULL)::boolean AS is_folder
 `
 
 type TrashItemsParams struct {
@@ -442,11 +504,31 @@ type TrashItemsParams struct {
 	Ids    []int64 `json:"ids"`
 }
 
-// Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
-// Returns how many of the items it marked.
-func (q *Queries) TrashItems(ctx context.Context, arg TrashItemsParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, trashItems, arg.UserID, pq.Array(arg.Ids))
-	var count int64
-	err := row.Scan(&count)
-	return count, err
+type TrashItemsRow struct {
+	ID       int64 `json:"id"`
+	IsFolder bool  `json:"is_folder"`
+}
+
+// Marks only the items. Each item roots its own group. A job marks the rows under the folders (TrashChildren).
+func (q *Queries) TrashItems(ctx context.Context, arg TrashItemsParams) ([]TrashItemsRow, error) {
+	rows, err := q.db.QueryContext(ctx, trashItems, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TrashItemsRow
+	for rows.Next() {
+		var i TrashItemsRow
+		if err := rows.Scan(&i.ID, &i.IsFolder); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

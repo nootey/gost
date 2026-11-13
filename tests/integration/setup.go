@@ -8,6 +8,7 @@ import (
 	"gost/internal/domains/auth"
 	"gost/internal/domains/file"
 	"gost/internal/domains/user"
+	"gost/internal/jobs"
 	"gost/internal/store/seeders"
 	"gost/internal/tokens"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/pressly/goose/v3"
 	"github.com/redis/go-redis/v9"
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"go.uber.org/zap"
@@ -106,10 +108,16 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	tokenStore := tokens.NewStore(rdb, cfg.Token)
 	captureMailer := &CaptureMailer{}
 
+	// The client only adds jobs. Tests run them by hand, so they never race a worker.
+	jobWorkers := river.NewWorkers()
+	jobClient, err := jobs.NewClient(db, jobWorkers)
+	s.Require().NoError(err, "failed to create job client")
+
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
-	fileService := file.NewFileService(queries, db, cfg.Upload)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload)
+	s.Require().NoError(jobs.RegisterWorkers(jobWorkers, fileService), "failed to register job workers")
 
 	s.TC = &TestContainer{
 		Container: container,
@@ -142,9 +150,9 @@ func testConfig() *config.Config {
 }
 
 func (s *ServiceIntegrationSuite) SetupTest() {
-	// Truncate users between tests (keep roles)
-	_, err := s.TC.DB.ExecContext(s.Ctx, `TRUNCATE TABLE users RESTART IDENTITY CASCADE`)
-	s.Require().NoError(err, "failed to truncate users table")
+	// Truncate users and jobs between tests (keep roles)
+	_, err := s.TC.DB.ExecContext(s.Ctx, `TRUNCATE TABLE users, river_job RESTART IDENTITY CASCADE`)
+	s.Require().NoError(err, "failed to truncate users and jobs")
 
 	// Clear tokens/sessions and the captured mail between tests.
 	s.TC.Redis.FlushAll()

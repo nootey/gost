@@ -7,10 +7,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"gost/internal/apperr"
 	"gost/internal/database"
 	"gost/internal/domains/file"
+	"gost/internal/jobs"
 	"gost/tests/integration"
 	"net/http"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -516,6 +519,7 @@ func (s *FileServiceTestSuite) TestUploadAndCreateFolder_ParallelWithTrashOfPare
 			s.Equal("folder not found", msg)
 		}
 	}
+	s.workTrashJobs()
 	s.Zero(s.liveRowsInTrash(userID))
 }
 
@@ -815,6 +819,7 @@ func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
 	s.seedFile(userID, "a.txt")
 
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
+	s.workTrashJobs()
 
 	result, err := svc.List(context.Background(), userID, newestFirst(0))
 	s.Require().NoError(err)
@@ -916,25 +921,128 @@ func (s *FileServiceTestSuite) TestTrash_AllOrNone() {
 	s.Equal([]string{"bob.txt"}, fileNames(result.Data))
 }
 
-// An item deleted on its own keeps its group when its folder follows, and so does an item listed next to its folder.
+// An item deleted on its own keeps its group when its folder follows, and so do the rows under it.
+// An item listed next to its folder keeps its group too.
 func (s *FileServiceTestSuite) TestTrash_EachItemKeepsItsGroup() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
 	s.Require().NoError(err)
+	oldDir := s.createFolder(userID, docs.ID, "Old")
+	inOldDir, err := svc.Upload(context.Background(), userID, oldDir.ID, "in-old.txt", strings.NewReader("i"))
+	s.Require().NoError(err)
 	listed, err := svc.Upload(context.Background(), userID, docs.ID, "listed.txt", strings.NewReader("l"))
 	s.Require().NoError(err)
 	rest, err := svc.Upload(context.Background(), userID, docs.ID, "rest.txt", strings.NewReader("r"))
 	s.Require().NoError(err)
 
-	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID, oldDir.ID}))
+	s.workTrashJobs()
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{listed.ID, docs.ID}))
+	s.workTrashJobs()
 
 	s.Equal(old.ID, s.trashRoot(old.ID))
+	s.Equal(oldDir.ID, s.trashRoot(oldDir.ID))
+	s.Equal(oldDir.ID, s.trashRoot(inOldDir.ID))
 	s.Equal(listed.ID, s.trashRoot(listed.ID))
 	s.Equal(docs.ID, s.trashRoot(docs.ID))
 	s.Equal(docs.ID, s.trashRoot(rest.ID))
+}
+
+// Trash marks only the items. One job, for the folders only, marks the rows under them.
+func (s *FileServiceTestSuite) TestTrash_JobMarksRowsUnderFolders() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.seedFile(userID, "a.txt")
+	docs := s.createFolder(userID, 0, "Docs")
+	empty := s.createFolder(userID, 0, "Empty")
+	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a}))
+	s.Empty(s.trashJobs())
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{empty.ID, docs.ID}))
+	s.Equal([]jobs.TrashSubtreesArgs{{UserID: userID, RootIDs: []int64{docs.ID, empty.ID}}}, s.trashJobs())
+	s.Equal(1, s.liveRowsInTrash(userID))
+
+	s.workTrashJobs()
+
+	s.Zero(s.liveRowsInTrash(userID))
+	s.Equal(docs.ID, s.trashRoot(inDocs.ID))
+}
+
+// Big holds 1500 files and 1001 folders, so its level takes 3 batches. Each folder holds a file, and that level
+// has more parents than one batch. Sub 1 holds one more level.
+func (s *FileServiceTestSuite) TestTrashSubtrees_ManyBatchesAndLevels() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	big := s.createFolder(userID, 0, "Big")
+	for _, insert := range []string{
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'f' || i || '.txt', 'big-' || i, 'text/plain', 1 FROM generate_series(1, 1500) i`,
+		`INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+		SELECT $1, $2, 'Sub ' || i, '', 0 FROM generate_series(1, 1001) i`,
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT user_id, id, 'in.txt', 'sub-' || id, 'text/plain', 1 FROM files
+		WHERE user_id = $1 AND parent_id = $2 AND storage_key IS NULL`,
+	} {
+		_, err := s.TC.DB.ExecContext(context.Background(), insert, userID, big.ID)
+		s.Require().NoError(err)
+	}
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Big", "Sub 1"})
+	s.Require().NoError(err)
+	deep := s.createFolder(userID, path.Path[1].ID, "Deep")
+	inDeep, err := svc.Upload(context.Background(), userID, deep.ID, "deep.txt", strings.NewReader("d"))
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{big.ID}))
+	s.workTrashJobs()
+
+	s.Zero(s.liveRowsInTrash(userID))
+	s.Equal(1+1500+1001+1001+2, s.rowsInGroup(big.ID))
+	s.Equal(big.ID, s.trashRoot(inDeep.ID))
+}
+
+// The job marked Sub, then the user restored Docs. The rest of the job finds nothing to mark.
+func (s *FileServiceTestSuite) TestTrashSubtrees_RestoreMidJobStopsIt() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	_, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.markInGroup(docs.ID, sub.ID)
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+
+	result, err := svc.List(context.Background(), userID, newestFirst(sub.ID))
+	s.Require().NoError(err)
+	s.Equal([]string{"x.txt"}, fileNames(result.Data))
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Empty(trash.Data)
+}
+
+// The first run marked Sub and failed, so x.txt under it is still live. The next run walks through Sub and marks it.
+func (s *FileServiceTestSuite) TestTrashSubtrees_RunAfterFailureFinishes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	x, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.markInGroup(docs.ID, sub.ID)
+	s.Equal(1, s.liveRowsInTrash(userID))
+
+	s.workTrashJobs()
+
+	s.Zero(s.liveRowsInTrash(userID))
+	s.Equal(docs.ID, s.trashRoot(x.ID))
 }
 
 // The trash lists the items the user deleted, folders first, newest delete first. The rows under them and other users' items stay out.
@@ -951,6 +1059,7 @@ func (s *FileServiceTestSuite) TestListTrash_OnlyDeletedItems() {
 	bobFile := s.seedFile(bob, "bob.txt")
 	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{bobFile}))
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{b, photos.ID}))
+	s.workTrashJobs()
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a}))
 	s.moveTrashedAt(b, 2)
 	s.moveTrashedAt(photos.ID, 2)
@@ -1038,6 +1147,7 @@ func (s *FileServiceTestSuite) TestRestore_BringsBackFolderAndEverythingUnder() 
 	_, err := svc.Upload(context.Background(), userID, cars.ID, "x.txt", strings.NewReader("x"))
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
+	s.workTrashJobs()
 	_, err = s.TC.DB.ExecContext(context.Background(), `UPDATE files SET updated_at = $1 WHERE user_id = $2`, oldUpdatedAt, userID)
 	s.Require().NoError(err)
 
@@ -1103,6 +1213,7 @@ func (s *FileServiceTestSuite) TestRestore_LeavesItemDeletedEarlier() {
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
 
 	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{docs.ID}))
 
@@ -1126,6 +1237,7 @@ func (s *FileServiceTestSuite) TestRestore_FolderInTrashSendsItemHome() {
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
 
 	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID}))
 
@@ -1147,6 +1259,7 @@ func (s *FileServiceTestSuite) TestRestore_WithItsFolderGoesBackIn() {
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
 
 	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{old.ID, docs.ID}))
 
@@ -1166,6 +1279,7 @@ func (s *FileServiceTestSuite) TestRestore_AllOrNone() {
 	under, err := svc.Upload(context.Background(), alice, docs.ID, "under.txt", strings.NewReader("u"))
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a, docs.ID}))
+	s.workTrashJobs()
 	bobFile := s.seedFile(bob, "bob.txt")
 	s.Require().NoError(svc.Trash(context.Background(), bob, []int64{bobFile}))
 
@@ -1209,6 +1323,7 @@ func (s *FileServiceTestSuite) TestRestore_ParallelWithTrashOfItsFolder() {
 	for _, err := range errs {
 		s.Require().NoError(err)
 	}
+	s.workTrashJobs()
 	s.Zero(s.liveRowsInTrash(userID))
 }
 
@@ -1362,6 +1477,51 @@ func (s *FileServiceTestSuite) liveRowsInTrash(userID int64) int {
 	err := s.TC.DB.QueryRowContext(context.Background(), `
 		SELECT COUNT(*) FROM files c JOIN files p ON p.id = c.parent_id
 		WHERE c.user_id = $1 AND c.trashed_at IS NULL AND p.trashed_at IS NOT NULL`, userID).Scan(&n)
+	s.Require().NoError(err)
+	return n
+}
+
+// trashJobs reads the trash jobs that wait in the queue.
+func (s *FileServiceTestSuite) trashJobs() []jobs.TrashSubtreesArgs {
+	rows, err := s.TC.DB.QueryContext(context.Background(),
+		`SELECT args FROM river_job WHERE kind = $1 ORDER BY id`, jobs.TrashSubtreesArgs{}.Kind())
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+
+	var all []jobs.TrashSubtreesArgs
+	for rows.Next() {
+		var raw []byte
+		s.Require().NoError(rows.Scan(&raw))
+		var args jobs.TrashSubtreesArgs
+		s.Require().NoError(json.Unmarshal(raw, &args))
+		all = append(all, args)
+	}
+	s.Require().NoError(rows.Err())
+	return all
+}
+
+// workTrashJobs runs the waiting trash jobs through the worker, the way River does, then removes them.
+func (s *FileServiceTestSuite) workTrashJobs() {
+	worker := jobs.NewTrashSubtreesWorker(s.TC.Services.FileService)
+	for _, args := range s.trashJobs() {
+		s.Require().NoError(worker.Work(context.Background(), &river.Job[jobs.TrashSubtreesArgs]{Args: args}))
+	}
+	_, err := s.TC.DB.ExecContext(context.Background(), `DELETE FROM river_job WHERE kind = $1`, jobs.TrashSubtreesArgs{}.Kind())
+	s.Require().NoError(err)
+}
+
+// markInGroup marks a row the way a batch of the trash job does. It stands for a job that stopped part way.
+func (s *FileServiceTestSuite) markInGroup(rootID, id int64) {
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		UPDATE files SET (trashed_at, trash_root_id) = (SELECT trashed_at, id FROM files WHERE id = $1)
+		WHERE id = $2`, rootID, id)
+	s.Require().NoError(err)
+}
+
+func (s *FileServiceTestSuite) rowsInGroup(rootID int64) int {
+	var n int
+	err := s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM files WHERE trash_root_id = $1`, rootID).Scan(&n)
 	s.Require().NoError(err)
 	return n
 }

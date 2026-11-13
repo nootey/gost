@@ -10,6 +10,7 @@ import (
 	"gost/internal/domains/file"
 	"gost/internal/domains/user"
 	"gost/internal/health"
+	"gost/internal/jobs"
 	"gost/internal/mailer"
 	"gost/internal/sessions"
 	"gost/internal/store"
@@ -30,6 +31,7 @@ import (
 	"github.com/go-chi/cors"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/redis/go-redis/v9"
+	"github.com/riverqueue/river"
 	"go.uber.org/zap"
 )
 
@@ -115,11 +117,22 @@ func main() {
 	healthSvc.Add(health.NewDBChecker(db))
 	healthSvc.Add(health.NewRedisChecker(rdb))
 
+	// The workers go in once the services they call exist. River reads the bundle on insert and on Start.
+	jobWorkers := river.NewWorkers()
+	jobClient, err := jobs.NewClient(db, jobWorkers)
+	if err != nil {
+		logger.Fatal("failed to create job client", zap.Error(err))
+	}
+
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, mail, cfg)
-	fileService := file.NewFileService(queries, db, cfg.Upload)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload)
 	// Add more services as needed
+
+	if err := jobs.RegisterWorkers(jobWorkers, fileService); err != nil {
+		logger.Fatal("failed to register job workers", zap.Error(err))
+	}
 
 	// Initialize handlers
 	responder := apperr.NewResponder(logger)
@@ -152,6 +165,7 @@ func main() {
 	supervisor := worker.NewSupervisor(logger)
 	supervisor.Register(&httpService{srv: srv, logger: logger, shutdownTimeout: 10 * time.Second})
 	supervisor.Register(healthSvc)
+	supervisor.Register(jobs.NewService(jobClient))
 
 	if err := supervisor.Run(ctx); err != nil {
 		logger.Fatal("supervisor exited with error", zap.Error(err))

@@ -9,6 +9,7 @@ import (
 	"gost/config"
 	"gost/internal/apperr"
 	"gost/internal/database"
+	"gost/internal/jobs"
 	"gost/internal/utils"
 	"io"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 const nameIndex = "idx_files_user_parent_name"
 
 const maxNameAttempts = 3
+
+// trashBatchSize caps the rows one transaction of the trash job marks, so the job never holds the tree lock long.
+const trashBatchSize = 1000
 
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
@@ -44,13 +48,15 @@ var _ FileServiceInterface = (*FileService)(nil)
 type FileService struct {
 	queries *database.Queries
 	db      *sql.DB
+	queue   jobs.InserterInterface
 	cfg     config.UploadConfig
 }
 
-func NewFileService(queries *database.Queries, db *sql.DB, cfg config.UploadConfig) *FileService {
+func NewFileService(queries *database.Queries, db *sql.DB, queue jobs.InserterInterface, cfg config.UploadConfig) *FileService {
 	return &FileService{
 		queries: queries,
 		db:      db,
+		queue:   queue,
 		cfg:     cfg,
 	}
 }
@@ -218,6 +224,7 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 }
 
 // Trash is all or none: an id that is unknown, someone else's or already in the trash undoes the rest.
+// It marks only the items. A job marks the rows under the folders (TrashSubtrees), so a big folder does not hold the tree lock long.
 func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) error {
 	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
 
@@ -230,11 +237,47 @@ func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) erro
 		if err != nil {
 			return err
 		}
-		if trashed != int64(len(ids)) {
+		if len(trashed) != len(ids) {
 			return errItemNotFound
 		}
-		return nil
+
+		var folders []int64
+		for _, item := range trashed {
+			if item.IsFolder {
+				folders = append(folders, item.ID)
+			}
+		}
+		if len(folders) == 0 {
+			return nil
+		}
+		_, err = s.queue.InsertTx(ctx, tx, jobs.TrashSubtreesArgs{UserID: userID, RootIDs: folders}, nil)
+		return err
 	})
+}
+
+// TrashSubtrees marks the live rows under the trash roots, one level at a time.
+// Each level walks the folders of the groups, marked now or by an earlier run, so a run after a failure finishes the job.
+func (s *FileService) TrashSubtrees(ctx context.Context, userID int64, rootIDs []int64) error {
+	parents := rootIDs
+	for len(parents) > 0 {
+		var next []int64
+		for chunk := range slices.Chunk(parents, trashBatchSize) {
+			if err := s.trashChildren(ctx, userID, rootIDs, chunk); err != nil {
+				return err
+			}
+			folders, err := s.queries.ListGroupFolders(ctx, database.ListGroupFoldersParams{
+				UserID:    userID,
+				ParentIds: chunk,
+				RootIds:   rootIDs,
+			})
+			if err != nil {
+				return err
+			}
+			next = append(next, folders...)
+		}
+		parents = next
+	}
+	return nil
 }
 
 // Restore is all or none, the same as Trash. Each id must be an item the user deleted, not a row under one.
@@ -324,6 +367,30 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	}
 
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
+}
+
+// trashChildren marks the live rows right under parents, one batch per transaction, until a batch comes back short.
+func (s *FileService) trashChildren(ctx context.Context, userID int64, rootIDs, parents []int64) error {
+	for {
+		var marked int64
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			var err error
+			marked, err = q.TrashChildren(ctx, database.TrashChildrenParams{
+				UserID:    userID,
+				ParentIds: parents,
+				RootIds:   rootIDs,
+				BatchSize: trashBatchSize,
+			})
+			return err
+		})
+		if err != nil || marked < trashBatchSize {
+			return err
+		}
+	}
 }
 
 func (s *FileService) checkFolder(ctx context.Context, q *database.Queries, userID, folderID int64) error {

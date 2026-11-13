@@ -6,8 +6,59 @@ package database
 
 import (
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"time"
 )
+
+type RiverJobState string
+
+const (
+	RiverJobStateAvailable RiverJobState = "available"
+	RiverJobStateCancelled RiverJobState = "cancelled"
+	RiverJobStateCompleted RiverJobState = "completed"
+	RiverJobStateDiscarded RiverJobState = "discarded"
+	RiverJobStatePending   RiverJobState = "pending"
+	RiverJobStateRetryable RiverJobState = "retryable"
+	RiverJobStateRunning   RiverJobState = "running"
+	RiverJobStateScheduled RiverJobState = "scheduled"
+)
+
+func (e *RiverJobState) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = RiverJobState(s)
+	case string:
+		*e = RiverJobState(s)
+	default:
+		return fmt.Errorf("unsupported scan type for RiverJobState: %T", src)
+	}
+	return nil
+}
+
+type NullRiverJobState struct {
+	RiverJobState RiverJobState `json:"river_job_state"`
+	Valid         bool          `json:"valid"` // Valid is true if RiverJobState is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullRiverJobState) Scan(value interface{}) error {
+	if value == nil {
+		ns.RiverJobState, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.RiverJobState.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullRiverJobState) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.RiverJobState), nil
+}
 
 type File struct {
 	ID          int64          `json:"id"`
@@ -29,6 +80,49 @@ type Permission struct {
 	Description sql.NullString `json:"description"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+type RiverJob struct {
+	ID           int64             `json:"id"`
+	State        RiverJobState     `json:"state"`
+	Attempt      int16             `json:"attempt"`
+	MaxAttempts  int16             `json:"max_attempts"`
+	AttemptedAt  sql.NullTime      `json:"attempted_at"`
+	CreatedAt    time.Time         `json:"created_at"`
+	FinalizedAt  sql.NullTime      `json:"finalized_at"`
+	ScheduledAt  time.Time         `json:"scheduled_at"`
+	Priority     int16             `json:"priority"`
+	Args         json.RawMessage   `json:"args"`
+	AttemptedBy  []string          `json:"attempted_by"`
+	Errors       []json.RawMessage `json:"errors"`
+	Kind         string            `json:"kind"`
+	Metadata     json.RawMessage   `json:"metadata"`
+	Queue        string            `json:"queue"`
+	Tags         []string          `json:"tags"`
+	UniqueKey    []byte            `json:"unique_key"`
+	UniqueStates interface{}       `json:"unique_states"`
+}
+
+type RiverLeader struct {
+	ElectedAt time.Time `json:"elected_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	LeaderID  string    `json:"leader_id"`
+	Name      string    `json:"name"`
+}
+
+type RiverNotification struct {
+	ID        int64     `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	Payload   string    `json:"payload"`
+	Topic     string    `json:"topic"`
+}
+
+type RiverQueue struct {
+	Name      string          `json:"name"`
+	CreatedAt time.Time       `json:"created_at"`
+	Metadata  json.RawMessage `json:"metadata"`
+	PausedAt  sql.NullTime    `json:"paused_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 type Role struct {

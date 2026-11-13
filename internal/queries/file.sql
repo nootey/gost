@@ -58,32 +58,42 @@ ORDER BY depth;
 -- Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 SELECT pg_advisory_xact_lock(sqlc.arg(user_id)::bigint);
 
--- name: TrashItems :one
--- Marks each item and the live rows under it. Each item roots its own group, so the walk stops at another item from the list.
--- Returns how many of the items it marked.
-WITH RECURSIVE tree AS (
-    SELECT files.id, files.id AS root_id
-    FROM files
-    WHERE files.user_id = sqlc.arg(user_id)
-      AND files.id = ANY(sqlc.arg(ids)::bigint[])
-      AND files.trashed_at IS NULL
-    UNION ALL
-    SELECT f.id, tree.root_id
-    FROM files f
-    JOIN tree ON COALESCE(f.parent_id, 0) = tree.id
-    WHERE f.user_id = sqlc.arg(user_id)
-      AND f.trashed_at IS NULL
-      AND f.id <> ALL(sqlc.arg(ids)::bigint[])
-),
-trashed AS (
-    UPDATE files
-    SET trashed_at = NOW(), trash_root_id = tree.root_id
-    FROM tree
-    WHERE files.id = tree.id
-    RETURNING files.id, files.trash_root_id
+-- name: TrashItems :many
+-- Marks only the items. Each item roots its own group. A job marks the rows under the folders (TrashChildren).
+UPDATE files
+SET trashed_at = NOW(), trash_root_id = id
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trashed_at IS NULL
+    RETURNING id, (storage_key IS NULL)::boolean AS is_folder;
+
+-- name: TrashChildren :execrows
+-- Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
+-- still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
+WITH batch AS (
+    SELECT c.id, p.trashed_at, p.trash_root_id
+    FROM files p
+    JOIN files c ON c.parent_id = p.id
+    WHERE p.user_id = sqlc.arg(user_id)
+      AND p.id = ANY(sqlc.arg(parent_ids)::bigint[])
+      AND p.trash_root_id = ANY(sqlc.arg(root_ids)::bigint[])
+      AND c.trashed_at IS NULL
+    LIMIT sqlc.arg(batch_size)
 )
-SELECT COUNT(*) FROM trashed
-WHERE id = trash_root_id;
+UPDATE files
+SET trashed_at = batch.trashed_at, trash_root_id = batch.trash_root_id
+FROM batch
+WHERE files.id = batch.id;
+
+-- name: ListGroupFolders :many
+-- The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
+-- It skips the group roots, because the job starts from them.
+SELECT id FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND parent_id = ANY(sqlc.arg(parent_ids)::bigint[])
+  AND trash_root_id = ANY(sqlc.arg(root_ids)::bigint[])
+  AND trash_root_id <> id
+  AND storage_key IS NULL;
 
 -- name: ListTrashRoots :many
 -- Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
