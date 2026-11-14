@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 
-export type ClipboardMode = "cut";
+// A paste of a cut moves the items, and a paste of a copy copies them. Either one clears the clipboard.
+export type ClipboardMode = "cut" | "copy";
 
 // sourceId is the folder the items came from. Null is Home.
 export interface ClipboardContent {
@@ -21,7 +22,7 @@ function readStoredClipboard(): ClipboardContent | null {
         const value: unknown = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "null");
         if (typeof value !== "object" || value === null) return null;
         const { mode, sourceId, ids } = value as Record<string, unknown>;
-        if (mode !== "cut" || !(sourceId === null || isId(sourceId))) return null;
+        if ((mode !== "cut" && mode !== "copy") || !(sourceId === null || isId(sourceId))) return null;
         if (!Array.isArray(ids) || ids.length === 0 || !ids.every(isId)) return null;
         return { mode, sourceId, ids };
     } catch {
@@ -46,8 +47,8 @@ export const useClipboardStore = defineStore("clipboard", {
         },
     },
     actions: {
-        cut(sourceId: number | null, ids: number[]): void {
-            this.save({ mode: "cut", sourceId, ids });
+        put(mode: ClipboardMode, sourceId: number | null, ids: number[]): void {
+            this.save({ mode, sourceId, ids });
         },
 
         // drop takes items off the clipboard, such as items moved to the trash.

@@ -14,10 +14,14 @@ import (
 
 var ErrFileTooLarge = errors.New("file is too large")
 
+// ErrNoStoredFile means the bytes under a key are not on disk.
+var ErrNoStoredFile = errors.New("stored file not found")
+
 // keySize is the count of random bytes in a storage key. The key is their hex, so it has twice as many characters.
 const keySize = 16
 
-// tempPrefix starts the name of an upload while it is written.
+// tempPrefix starts the name of a file while it is written. A random key follows it, so the orphan sweep knows the
+// name, and two writes of one key never share a temp file.
 const tempPrefix = ".upload-"
 
 // StoredFile is a file in the upload dir with a name in key form.
@@ -27,14 +31,22 @@ type StoredFile struct {
 	ModTime time.Time
 }
 
+// NewStorageKey returns a new random key for bytes in the upload dir.
+func NewStorageKey() (string, error) {
+	keyBytes := make([]byte, keySize)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", fmt.Errorf("failed to generate storage key: %w", err)
+	}
+	return hex.EncodeToString(keyBytes), nil
+}
+
 // StoreFile writes src into dir under a new random key and returns the key and size.
 // A file over maxBytes, or one that fails mid-write, is never kept under a real key.
 func StoreFile(dir string, src io.Reader, maxBytes int64) (string, int64, error) {
-	keyBytes := make([]byte, keySize)
-	if _, err := rand.Read(keyBytes); err != nil {
-		return "", 0, fmt.Errorf("failed to generate storage key: %w", err)
+	key, err := NewStorageKey()
+	if err != nil {
+		return "", 0, err
 	}
-	key := hex.EncodeToString(keyBytes)
 
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -42,26 +54,65 @@ func StoreFile(dir string, src io.Reader, maxBytes int64) (string, int64, error)
 	}
 	defer func() { _ = root.Close() }()
 
-	tmpName := tempPrefix + key
+	size, err := writeStoredFile(root, key, src, maxBytes)
+	if err != nil {
+		return "", 0, err
+	}
+	return key, size, nil
+}
+
+// CopyStoredFile writes a copy of the bytes under srcKey to dstKey and returns its size. The copy is new bytes with a
+// fresh modified time, never a link, so the orphan sweep sees it as new. A missing source gives ErrNoStoredFile.
+// A copy already under dstKey is replaced, so a job that runs again, or two runs at once, can write it twice.
+func CopyStoredFile(dir, srcKey, dstKey string) (int64, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open upload dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	src, err := root.Open(srcKey)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, ErrNoStoredFile
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to open stored file: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	info, err := src.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("failed to read stored file: %w", err)
+	}
+	return writeStoredFile(root, dstKey, src, info.Size())
+}
+
+// writeStoredFile writes src under key through a temp file, so a file over maxBytes, or one that fails mid-write,
+// is never kept under a real key. Each write has its own temp file, and the rename replaces key in one step.
+func writeStoredFile(root *os.Root, key string, src io.Reader, maxBytes int64) (int64, error) {
+	tmpKey, err := NewStorageKey()
+	if err != nil {
+		return 0, err
+	}
+	tmpName := tempPrefix + tmpKey
 	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to create upload file: %w", err)
+		return 0, fmt.Errorf("failed to create stored file: %w", err)
 	}
 	defer func() { _ = root.Remove(tmpName) }()
 
 	size, copyErr := io.Copy(tmp, io.LimitReader(src, maxBytes+1))
 	if err := errors.Join(copyErr, tmp.Close()); err != nil {
-		return "", 0, fmt.Errorf("failed to write upload: %w", err)
+		return 0, fmt.Errorf("failed to write stored file: %w", err)
 	}
 	if size > maxBytes {
-		return "", 0, ErrFileTooLarge
+		return 0, ErrFileTooLarge
 	}
 
 	if err := root.Rename(tmpName, key); err != nil {
-		return "", 0, fmt.Errorf("failed to store upload: %w", err)
+		return 0, fmt.Errorf("failed to store file: %w", err)
 	}
-
-	return key, size, nil
+	return size, nil
 }
 
 // RemoveStoredFile removes the bytes under key. A missing file counts as removed, so a job that runs again can call it twice.

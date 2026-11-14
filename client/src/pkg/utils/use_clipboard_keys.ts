@@ -2,11 +2,13 @@ import { onBeforeUnmount, onMounted } from "vue";
 
 export interface ClipboardKeys {
     cut: () => void;
+    copy: () => void;
     paste: () => void;
 }
 
-// Runs cut on ctrl+x and paste on ctrl+v (cmd on macOS) while the component is mounted. In a text field, or while
-// a modal dialog is open, the keys keep their normal meaning. A held key runs once.
+// Runs cut on ctrl+x, copy on ctrl+c and paste on ctrl+v (cmd on macOS) while the component is mounted. In a text
+// field, or while a modal dialog is open, the keys keep their normal meaning. So does ctrl+c while text on the page
+// is selected. A held key runs once.
 export function useClipboardKeys(handlers: ClipboardKeys): void {
     function onKeydown(event: KeyboardEvent): void {
         if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat) return;
@@ -16,6 +18,9 @@ export function useClipboardKeys(handlers: ClipboardKeys): void {
         if (key === "x") {
             event.preventDefault();
             handlers.cut();
+        } else if (key === "c" && !hasSelectedText()) {
+            event.preventDefault();
+            handlers.copy();
         } else if (key === "v") {
             event.preventDefault();
             handlers.paste();
@@ -36,4 +41,9 @@ function isTextField(target: EventTarget | null): boolean {
         target instanceof HTMLSelectElement ||
         (target instanceof HTMLElement && target.isContentEditable)
     );
+}
+
+function hasSelectedText(): boolean {
+    const selected = window.getSelection();
+    return selected !== null && !selected.isCollapsed;
 }

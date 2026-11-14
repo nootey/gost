@@ -14,6 +14,8 @@ type File struct {
 	ContentType string    `json:"content_type"`
 	SizeBytes   int64     `json:"size_bytes"`
 	CreatedAt   time.Time `json:"created_at"`
+	// IsCopying is true until the copy job ends. Until then, nothing can go into the item, and it cannot be deleted or copied.
+	IsCopying bool `json:"is_copying"`
 }
 
 // SortField is a column the list sorts by. The values match the list query.
@@ -124,8 +126,8 @@ type ItemsRequest struct {
 	IDs []int64 `json:"ids"`
 }
 
-// MoveRequest moves the items into one folder. A missing or null ParentID means the root.
-type MoveRequest struct {
+// PasteRequest moves or copies the items into one folder. A missing or null ParentID means the root.
+type PasteRequest struct {
 	IDs      []int64 `json:"ids"`
 	ParentID *int64  `json:"parent_id"`
 }

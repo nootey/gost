@@ -7,7 +7,7 @@ import type {
     FolderResponse,
     ItemsForm,
     ListQuery,
-    MoveForm,
+    PasteForm,
     RenameForm,
     RenameResponse,
     StoredFile,
@@ -48,8 +48,14 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
-        async move(form: MoveForm): Promise<SuccessResponse> {
+        async move(form: PasteForm): Promise<SuccessResponse> {
             const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/move`, form);
+            return response.data;
+        },
+
+        // The answer comes once the copies are in place. A job copies what is under them.
+        async copy(form: PasteForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/copy`, form);
             return response.data;
         },
 

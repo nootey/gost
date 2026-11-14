@@ -28,6 +28,20 @@ func (PurgeGroupsArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}}
 }
 
+// CopyItemsArgs names the copy roots a paste made. The job copies their bytes and the rows under them.
+type CopyItemsArgs struct {
+	UserID  int64   `json:"user_id"`
+	RootIDs []int64 `json:"root_ids"`
+}
+
+func (CopyItemsArgs) Kind() string { return "copy_items" }
+
+// InsertOpts makes River skip a job while one with the same args waits or runs. The copy sweep adds a copy job
+// again for roots marked long ago, and the first job can still be alive.
+func (CopyItemsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}}
+}
+
 // SweepTrashArgs starts the trash sweep. It runs on a schedule, see NewClient.
 type SweepTrashArgs struct{}
 
@@ -35,6 +49,16 @@ func (SweepTrashArgs) Kind() string { return "sweep_trash" }
 
 // InsertOpts runs a sweep once. The next run on the schedule is the retry.
 func (SweepTrashArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1}
+}
+
+// SweepCopiesArgs starts the copy sweep. It runs on a schedule, see NewClient.
+type SweepCopiesArgs struct{}
+
+func (SweepCopiesArgs) Kind() string { return "sweep_copies" }
+
+// InsertOpts runs a sweep once. The next run on the schedule is the retry.
+func (SweepCopiesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1}
 }
 
@@ -56,8 +80,16 @@ type groupPurger interface {
 	PurgeGroups(ctx context.Context, userID int64, rootIDs []int64) error
 }
 
+type itemCopier interface {
+	CopyItems(ctx context.Context, userID int64, rootIDs []int64) error
+}
+
 type trashSweeper interface {
 	SweepTrash(ctx context.Context) error
+}
+
+type copySweeper interface {
+	SweepCopies(ctx context.Context) error
 }
 
 type orphanSweeper interface {
@@ -68,7 +100,9 @@ type orphanSweeper interface {
 type fileJobs interface {
 	subtreeTrasher
 	groupPurger
+	itemCopier
 	trashSweeper
+	copySweeper
 	orphanSweeper
 }
 
@@ -98,6 +132,19 @@ func (w *PurgeGroupsWorker) Work(ctx context.Context, job *river.Job[PurgeGroups
 	return w.files.PurgeGroups(ctx, job.Args.UserID, job.Args.RootIDs)
 }
 
+type CopyItemsWorker struct {
+	river.WorkerDefaults[CopyItemsArgs]
+	files itemCopier
+}
+
+func NewCopyItemsWorker(files itemCopier) *CopyItemsWorker {
+	return &CopyItemsWorker{files: files}
+}
+
+func (w *CopyItemsWorker) Work(ctx context.Context, job *river.Job[CopyItemsArgs]) error {
+	return w.files.CopyItems(ctx, job.Args.UserID, job.Args.RootIDs)
+}
+
 type SweepTrashWorker struct {
 	river.WorkerDefaults[SweepTrashArgs]
 	files trashSweeper
@@ -109,6 +156,19 @@ func NewSweepTrashWorker(files trashSweeper) *SweepTrashWorker {
 
 func (w *SweepTrashWorker) Work(ctx context.Context, _ *river.Job[SweepTrashArgs]) error {
 	return w.files.SweepTrash(ctx)
+}
+
+type SweepCopiesWorker struct {
+	river.WorkerDefaults[SweepCopiesArgs]
+	files copySweeper
+}
+
+func NewSweepCopiesWorker(files copySweeper) *SweepCopiesWorker {
+	return &SweepCopiesWorker{files: files}
+}
+
+func (w *SweepCopiesWorker) Work(ctx context.Context, _ *river.Job[SweepCopiesArgs]) error {
+	return w.files.SweepCopies(ctx)
 }
 
 type SweepOrphansWorker struct {
@@ -131,7 +191,13 @@ func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewPurgeGroupsWorker(files)); err != nil {
 		return err
 	}
+	if err := river.AddWorkerSafely(workers, NewCopyItemsWorker(files)); err != nil {
+		return err
+	}
 	if err := river.AddWorkerSafely(workers, NewSweepTrashWorker(files)); err != nil {
+		return err
+	}
+	if err := river.AddWorkerSafely(workers, NewSweepCopiesWorker(files)); err != nil {
 		return err
 	}
 	return river.AddWorkerSafely(workers, NewSweepOrphansWorker(files))

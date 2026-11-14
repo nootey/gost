@@ -6,6 +6,9 @@ export interface StoredFile {
     content_type: string;
     size_bytes: number;
     created_at: string;
+    // True until the copy job ends. Until then the item does not open, and it cannot be selected or get a menu.
+    // The list does not poll, so the user reloads the page to see the copy end.
+    is_copying: boolean;
 }
 
 export interface UploadResponse {
@@ -64,7 +67,8 @@ export interface ItemsForm {
     ids: number[];
 }
 
-export interface MoveForm {
+// Moves or copies the items into one folder. A null parent_id is the root.
+export interface PasteForm {
     ids: number[];
     parent_id: number | null;
 }

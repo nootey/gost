@@ -11,21 +11,37 @@ import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import RenameDialog from "./RenameDialog.vue";
-import type { DataTablePageEvent, DataTableRowClickEvent, DataTableSortEvent } from "primevue/datatable";
+import type {
+    DataTablePageEvent,
+    DataTableRowClickEvent,
+    DataTableRowContextMenuEvent,
+    DataTableSelectAllChangeEvent,
+    DataTableSortEvent,
+} from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
-import type { SortField, StoredFile } from "../models.ts";
+import type { SuccessResponse } from "../../../pkg/api/api_models.ts";
+import type { ClipboardMode } from "../../../pkg/stores/clipboard_store.ts";
+import type { PasteForm, SortField, StoredFile } from "../models.ts";
 
 const MENU_ITEMS: MenuItem[] = [
     { label: "Add to favorites", icon: "pi pi-star" },
     { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
     { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
-    { label: "Copy", icon: "pi pi-copy" },
+    { label: "Copy", icon: "pi pi-copy", shortcut: "Ctrl+C", command: copyMenuTargets },
     { separator: true },
     { label: "Delete", icon: "pi pi-trash", danger: true, command: moveToTrash },
 ];
 
 const SEARCH_DELAY_MS = 300;
+
+// PrimeVue cannot turn off the checkbox of one row, so a copying row hides its own.
+const COPYING_ROW = "[&>td[data-p-selection-column=true]>*]:invisible";
+
+const CLIPBOARD_VIEWS: Record<ClipboardMode, { verb: string; icon: string }> = {
+    cut: { verb: "cut", icon: "pi pi-file-export" },
+    copy: { verb: "copied", icon: "pi pi-copy" },
+};
 
 const props = defineProps<{ folderId: number | null; dir: string }>();
 
@@ -33,6 +49,11 @@ const fileStore = useFileStore();
 const clipboardStore = useClipboardStore();
 const toastStore = useToastStore();
 const router = useRouter();
+
+const PASTE_ACTIONS: Record<ClipboardMode, (form: PasteForm) => Promise<SuccessResponse>> = {
+    cut: (form) => fileStore.move(form),
+    copy: (form) => fileStore.copy(form),
+};
 
 const rowOptions = [25, 50, 100];
 
@@ -44,14 +65,22 @@ const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
 
+// A copying row cannot be selected, so no action reaches it before its copy job ends.
 const selection = ref<StoredFile[]>([]);
+const selectableRows = computed<StoredFile[]>(() => files.value.filter((item) => !item.is_copying));
+const allSelected = computed<boolean>(
+    () =>
+        selectableRows.value.length > 0 &&
+        selectableRows.value.every((row) => selection.value.some((item) => item.id === row.id)),
+);
 const { menuTarget, menuTargets, showMenu } = useRowMenu(selection, "rowMenu");
 
 const pasting = ref<boolean>(false);
 const canPaste = computed<boolean>(() => clipboardStore.canPasteInto(props.folderId));
+const clipboardView = computed(() => CLIPBOARD_VIEWS[clipboardStore.content?.mode ?? "cut"]);
 const clipboardLabel = computed<string>(() => {
     const count = clipboardStore.count;
-    return `${count} ${count === 1 ? "item" : "items"} cut`;
+    return `${count} ${count === 1 ? "item" : "items"} ${clipboardView.value.verb}`;
 });
 
 const renameVisible = ref<boolean>(false);
@@ -122,13 +151,32 @@ function childRoute(folder: StoredFile): RouteLocationRaw {
 }
 
 function rowClass(item: StoredFile): string {
+    if (item.is_copying) return COPYING_ROW;
     const row = itemView(item).row;
     return clipboardStore.isCut(item.id) ? `${row} opacity-50` : row;
 }
 
-// The whole folder row opens it. A click on the name link already navigates by itself.
+function onSelectionChange(rows: StoredFile[]): void {
+    selection.value = rows.filter((item) => !item.is_copying);
+}
+
+function onSelectAllChange(event: DataTableSelectAllChangeEvent): void {
+    selection.value = event.checked ? selectableRows.value : [];
+}
+
+// A copying row has no menu, and the browser menu stays closed too.
+function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
+    if ((event.data as StoredFile).is_copying) {
+        event.originalEvent.preventDefault();
+        menuTarget.value = undefined;
+        return;
+    }
+    showMenu(event);
+}
+
+// The whole folder row opens it. A click on the name link already navigates by itself. A copying folder does not open.
 async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<void> {
-    if (!event.data.is_folder) return;
+    if (!event.data.is_folder || event.data.is_copying) return;
     const target = event.originalEvent.target;
     if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
     await router.push(childRoute(event.data));
@@ -156,26 +204,32 @@ async function moveToTrash(): Promise<void> {
     await getData();
 }
 
-function cutItems(items: StoredFile[]): void {
+function putItems(mode: ClipboardMode, items: StoredFile[]): void {
     if (items.length === 0) return;
-    clipboardStore.cut(
+    clipboardStore.put(
+        mode,
         props.folderId,
         items.map((item) => item.id),
     );
 }
 
 function cutMenuTargets(): void {
-    cutItems(menuTargets.value);
+    putItems("cut", menuTargets.value);
 }
 
-// A paste that fails keeps the clipboard, so the user can fix the cause and paste again.
+function copyMenuTargets(): void {
+    putItems("copy", menuTargets.value);
+}
+
+// A paste that works clears the clipboard, for a cut and for a copy. A paste that fails keeps it, so the user can
+// fix the cause and paste again.
 async function paste(): Promise<void> {
     const content = clipboardStore.content;
     if (!content || pasting.value || !canPaste.value) return;
     pasting.value = true;
     try {
-        const response = await fileStore.move({ ids: content.ids, parent_id: props.folderId });
-        // A cut made during the request is a new clipboard, so it stays.
+        const response = await PASTE_ACTIONS[content.mode]({ ids: content.ids, parent_id: props.folderId });
+        // A cut or copy made during the request is a new clipboard, so it stays.
         if (clipboardStore.content === content) clipboardStore.clear();
         toastStore.successResponseToast(response);
     } catch (error) {
@@ -186,7 +240,11 @@ async function paste(): Promise<void> {
     await getData();
 }
 
-useClipboardKeys({ cut: () => cutItems(selection.value), paste });
+useClipboardKeys({
+    cut: () => putItems("cut", selection.value),
+    copy: () => putItems("copy", selection.value),
+    paste,
+});
 
 onMounted(getData);
 onBeforeUnmount(() => clearTimeout(searchTimer));
@@ -199,8 +257,9 @@ defineExpose({ refresh });
 <template>
     <div class="overflow-hidden rounded-2xl border border-edge bg-panel">
         <DataTable
-            v-model:selection="selection"
             v-model:context-menu-selection="menuTarget"
+            :selection="selection"
+            :select-all="allSelected"
             :value="files"
             data-key="id"
             highlight-on-select
@@ -223,8 +282,10 @@ defineExpose({ refresh });
             context-menu
             @page="onPage"
             @sort="onSort"
+            @update:selection="onSelectionChange"
+            @select-all-change="onSelectAllChange"
             @row-click="onRowClick"
-            @row-contextmenu="showMenu"
+            @row-contextmenu="onRowContextMenu"
         >
             <template #header>
                 <div class="flex flex-col gap-3">
@@ -259,7 +320,7 @@ defineExpose({ refresh });
                         class="flex items-center justify-between gap-3 rounded-xl bg-inset py-1.5 pr-1.5 pl-3"
                     >
                         <div class="flex min-w-0 items-center gap-2 text-sm">
-                            <i class="pi pi-file-export text-fg-muted" />
+                            <i class="text-fg-muted" :class="clipboardView.icon" />
                             <span class="shrink-0 font-medium text-fg">{{ clipboardLabel }}</span>
                             <span v-if="!canPaste" class="hidden truncate text-fg-muted sm:inline">
                                 Open another folder to paste.
@@ -316,17 +377,27 @@ defineExpose({ refresh });
                             <i :class="itemView(data).icon" />
                         </span>
                         <div class="flex min-w-0 flex-col">
-                            <router-link
-                                v-if="data.is_folder"
-                                :to="childRoute(data)"
-                                class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
-                                :title="data.name"
-                            >
-                                {{ data.name }}
-                            </router-link>
-                            <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
-                                {{ data.name }}
-                            </span>
+                            <div class="flex min-w-0 items-center gap-2">
+                                <router-link
+                                    v-if="data.is_folder && !data.is_copying"
+                                    :to="childRoute(data)"
+                                    class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
+                                    :title="data.name"
+                                >
+                                    {{ data.name }}
+                                </router-link>
+                                <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
+                                    {{ data.name }}
+                                </span>
+                                <Tag
+                                    v-if="data.is_copying"
+                                    value="Copying"
+                                    icon="pi pi-clock"
+                                    severity="secondary"
+                                    class="shrink-0 text-xs"
+                                    title="Reload the page to see when the copy is done."
+                                />
+                            </div>
                             <span class="truncate text-xs text-fg-subtle sm:hidden">
                                 {{ vueHelper.formatDate(data.created_at) }}
                             </span>

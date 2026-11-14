@@ -181,7 +181,7 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req MoveRequest
+	var req PasteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.resp.Error(w, r, errInvalidBody)
 		return
@@ -204,6 +204,39 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.resp.Success(w, http.StatusOK, "Moved.")
+}
+
+// Copy answers once the copy roots are in place. A job copies the bytes and the rows under the folders.
+func (h *FileHandler) Copy(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req PasteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	parentID, err := utils.OptionalBodyID(req.ParentID, "parent_id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.Copy(r.Context(), userID, parentID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Copying.")
 }
 
 func (h *FileHandler) Trash(w http.ResponseWriter, r *http.Request) {

@@ -73,6 +73,8 @@ type File struct {
 	TrashedAt        sql.NullTime   `json:"trashed_at"`
 	TrashRootID      sql.NullInt64  `json:"trash_root_id"`
 	PurgeRequestedAt sql.NullTime   `json:"purge_requested_at"`
+	CopiedFromID     sql.NullInt64  `json:"copied_from_id"`
+	CopyRequestedAt  sql.NullTime   `json:"copy_requested_at"`
 }
 
 type Permission struct {

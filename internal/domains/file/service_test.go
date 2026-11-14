@@ -1060,6 +1060,549 @@ func (s *FileServiceTestSuite) TestMove_ParallelMovesMakeNoLoop() {
 	}
 }
 
+// The roots show up at once, marked as copying, and one job copies the rest. Each file gets new bytes with a fresh
+// modified time, so the orphan sweep sees them as new. The sources stay as they were.
+func (s *FileServiceTestSuite) TestCopy_FilesAndFolders() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	cars := s.createFolder(userID, photos.ID, "Cars")
+	s.createFolder(userID, photos.ID, "Empty")
+	x := s.upload(userID, cars.ID, "x.txt", "x")
+	s.upload(userID, photos.ID, "y.txt", "yy")
+	a := s.upload(userID, 0, "a.txt", "aaa")
+	archive := s.createFolder(userID, 0, "Archive")
+	for _, id := range []int64{a.ID, x.ID} {
+		s.ageStoredFile(s.storageKey(id), 25)
+	}
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{photos.ID, a.ID, photos.ID}))
+
+	copies, err := svc.List(context.Background(), userID, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	s.Require().Equal([]string{"Photos", "a.txt"}, fileNames(copies.Data))
+	photosCopy, aCopy := copies.Data[0], copies.Data[1]
+	s.True(photosCopy.IsCopying)
+	s.True(aCopy.IsCopying)
+	rootIDs := slices.Sorted(slices.Values([]int64{photosCopy.ID, aCopy.ID}))
+	s.Equal([]jobs.CopyItemsArgs{{UserID: userID, RootIDs: rootIDs}}, s.copyJobs())
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"Cars/", "Cars/x.txt=x", "Empty/", "y.txt=yy"}, s.treeOf(photosCopy.ID))
+	s.Equal(s.treeOf(photos.ID), s.treeOf(photosCopy.ID))
+	s.Equal("aaa", s.storedContent(aCopy.ID))
+	s.NotEqual(s.storageKey(a.ID), s.storageKey(aCopy.ID))
+	xCopies := s.copiesOf(x.ID)
+	s.Require().Len(xCopies, 1)
+	for sourceID, copyID := range map[int64]int64{a.ID: aCopy.ID, x.ID: xCopies[0]} {
+		s.True(s.storedModTime(copyID).After(s.storedModTime(sourceID)), copyID)
+	}
+
+	copies, err = svc.List(context.Background(), userID, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	for _, f := range copies.Data {
+		s.False(f.IsCopying, f.Name)
+	}
+	home, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"Archive", "Photos", "a.txt"}, fileNames(home.Data))
+	s.Equal([]map[string]any{{
+		"user_id": userID, "root_ids": []any{rootIDs[0], rootIDs[1]},
+		"rows": int64(4), "files": int64(3), "bytes": int64(6),
+	}}, s.logs("copied items"))
+}
+
+func (s *FileServiceTestSuite) TestCopy_ToRoot() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	s.upload(userID, sub.ID, "x.txt", "x")
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, 0, []int64{sub.ID}))
+	s.workCopyJobs()
+
+	subCopies := s.copiesOf(sub.ID)
+	s.Require().Len(subCopies, 1)
+	s.Zero(s.parentOf(subCopies[0]))
+	s.Equal([]string{"x.txt=x"}, s.treeOf(subCopies[0]))
+	s.Equal([]string{"Sub/", "Sub/x.txt=x"}, s.treeOf(docs.ID))
+}
+
+// A copy does not auto-rename either: the message names the item, and nothing is copied.
+func (s *FileServiceTestSuite) TestCopy_NameTaken() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(userID, 0, "Archive")
+	s.upload(userID, archive.ID, "a.txt", "a")
+	s.createFolder(userID, archive.ID, "Photos")
+	fileA := s.seedFile(userID, "a.txt")
+	fileB := s.seedFile(userID, "b.txt")
+	photos := s.createFolder(userID, 0, "Photos")
+
+	cases := []struct {
+		ids     []int64
+		message string
+	}{
+		{[]int64{fileA}, "a.txt already exists in this folder"},
+		{[]int64{photos.ID}, "Photos already exists in this folder"},
+		{[]int64{fileB, fileA}, "a.txt already exists in this folder"},
+	}
+	for _, tc := range cases {
+		err := svc.Copy(context.Background(), userID, archive.ID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusConflict, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+
+	result, err := svc.List(context.Background(), userID, newestFirst(archive.ID))
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"Photos", "a.txt"}, fileNames(result.Data))
+	s.Empty(s.copyJobs())
+}
+
+// Two items with one name from two folders cannot both go into one folder.
+func (s *FileServiceTestSuite) TestCopy_TwoItemsWithOneName() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	notes := s.createFolder(userID, 0, "Notes")
+	archive := s.createFolder(userID, 0, "Archive")
+	inDocs := s.upload(userID, docs.ID, "a.txt", "a")
+	inNotes := s.upload(userID, notes.ID, "a.txt", "a")
+
+	err := svc.Copy(context.Background(), userID, archive.ID, []int64{inDocs.ID, inNotes.ID})
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("an item with this name already exists", msg)
+	s.Empty(s.treeOf(archive.ID))
+	s.Empty(s.copyJobs())
+}
+
+// A copy into the folder an item is in already is refused, even with other items in the request.
+func (s *FileServiceTestSuite) TestCopy_SameFolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	inDocs := s.upload(userID, docs.ID, "a.txt", "a")
+	atRoot := s.seedFile(userID, "b.txt")
+
+	cases := []struct {
+		parentID int64
+		ids      []int64
+	}{
+		{docs.ID, []int64{inDocs.ID}},
+		{0, []int64{atRoot}},
+		{docs.ID, []int64{atRoot, inDocs.ID}},
+	}
+	for _, tc := range cases {
+		err := svc.Copy(context.Background(), userID, tc.parentID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc.ids)
+		s.Equal("the items are already in this folder", msg)
+	}
+
+	s.Equal(3, s.fileRows())
+	s.Empty(s.copyJobs())
+}
+
+// A copy works from what it finds, so it cannot loop, but A/B/A is almost never what the user wants.
+func (s *FileServiceTestSuite) TestCopy_IntoItselfOrSubfolder() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.createFolder(userID, 0, "A")
+	b := s.createFolder(userID, a.ID, "B")
+	c := s.createFolder(userID, b.ID, "C")
+	fileID := s.seedFile(userID, "x.txt")
+
+	cases := []struct {
+		parentID int64
+		ids      []int64
+	}{
+		{a.ID, []int64{a.ID}},
+		{b.ID, []int64{a.ID}},
+		{c.ID, []int64{a.ID}},
+		{c.ID, []int64{fileID, a.ID}},
+		{c.ID, []int64{b.ID}},
+	}
+	for _, tc := range cases {
+		err := svc.Copy(context.Background(), userID, tc.parentID, tc.ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusBadRequest, status, tc)
+		s.Equal("a folder cannot be copied into itself or its own subfolder", msg)
+	}
+
+	s.Equal(4, s.fileRows())
+	s.Empty(s.copyJobs())
+}
+
+// Unknown ids, other users' items and items in the trash fail the same way. Nothing is copied.
+func (s *FileServiceTestSuite) TestCopy_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(alice, 0, "Archive")
+	mine := s.seedFile(alice, "mine.txt")
+	gone := s.seedFile(alice, "gone.txt")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{gone}))
+	bobFile := s.seedFile(bob, "bob.txt")
+
+	for _, ids := range [][]int64{{999}, {mine, 999}, {mine, bobFile}, {mine, gone}} {
+		err := svc.Copy(context.Background(), alice, archive.ID, ids)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, ids)
+		s.Equal("item not found", msg)
+	}
+
+	s.Empty(s.treeOf(archive.ID))
+	s.Empty(s.copyJobs())
+}
+
+// The target must be a live folder of the user that does not still copy.
+func (s *FileServiceTestSuite) TestCopy_UnknownFolder() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	mine := s.seedFile(alice, "a.txt")
+	fileTarget := s.seedFile(alice, "b.txt")
+	old := s.createFolder(alice, 0, "Old")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{old.ID}))
+	bobFolder := s.createFolder(bob, 0, "Bob")
+	docs := s.createFolder(alice, 0, "Docs")
+	archive := s.createFolder(alice, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), alice, archive.ID, []int64{docs.ID}))
+	copying := s.copiesOf(docs.ID)[0]
+
+	for _, target := range []int64{999, fileTarget, old.ID, bobFolder.ID, copying} {
+		err := svc.Copy(context.Background(), alice, target, []int64{mine})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, target)
+		s.Equal("folder not found", msg)
+	}
+
+	s.Len(s.copyJobs(), 1)
+}
+
+// Until the job ends, nothing can go into a copy, and it cannot be deleted or copied. It can be renamed and moved.
+func (s *FileServiceTestSuite) TestCopy_ItemStillCopying() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "x.txt", "x")
+	archive := s.createFolder(userID, 0, "Archive")
+	empty := s.createFolder(userID, 0, "Empty")
+	other := s.seedFile(userID, "other.txt")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+
+	for _, ids := range [][]int64{{docsCopy}, {other, docsCopy}} {
+		s.Equal("Docs is still copying", s.errorMessage(svc.Copy(context.Background(), userID, empty.ID, ids)))
+		s.Equal("Docs is still copying", s.errorMessage(svc.Trash(context.Background(), userID, ids)))
+	}
+	s.Zero(s.parentOf(other))
+	s.Empty(s.treeOf(empty.ID))
+
+	for _, into := range []func() error{
+		func() error { _, err := svc.List(context.Background(), userID, newestFirst(docsCopy)); return err },
+		func() error {
+			_, err := svc.Upload(context.Background(), userID, docsCopy, "new.txt", strings.NewReader("n"))
+			return err
+		},
+		func() error { _, err := svc.CreateFolder(context.Background(), userID, docsCopy, "New"); return err },
+		func() error { return svc.Move(context.Background(), userID, docsCopy, []int64{other}) },
+		func() error { return svc.Copy(context.Background(), userID, docsCopy, []int64{other}) },
+	} {
+		s.Equal("folder not found", s.errorMessage(into()))
+	}
+	_, err := svc.ResolveFolder(context.Background(), userID, []string{"Archive", "Docs"})
+	s.Equal("folder not found", s.errorMessage(err))
+
+	_, err = svc.Rename(context.Background(), userID, docsCopy, "Docs copy")
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Move(context.Background(), userID, 0, []int64{docsCopy}))
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"x.txt=x"}, s.treeOf(docsCopy))
+	_, err = svc.ResolveFolder(context.Background(), userID, []string{"Docs copy"})
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docsCopy}))
+}
+
+// Big holds 260 files and 251 folders, so its level takes several batches. Each folder holds a file, and that level
+// has more copy folders than one query reads under. Sub 1 holds one more level.
+func (s *FileServiceTestSuite) TestCopyItems_ManyBatchesAndLevels() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	big := s.createFolder(userID, 0, "Big")
+	archive := s.createFolder(userID, 0, "Archive")
+	for _, insert := range []string{
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'f' || i || '.txt', md5(random()::text), 'text/plain', 1 FROM generate_series(1, 260) i`,
+		`INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+		SELECT $1, $2, 'Sub ' || i, '', 0 FROM generate_series(1, 251) i`,
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT user_id, id, 'in.txt', md5(random()::text), 'text/plain', 1 FROM files
+		WHERE user_id = $1 AND parent_id = $2 AND storage_key IS NULL`,
+	} {
+		_, err := s.TC.DB.ExecContext(context.Background(), insert, userID, big.ID)
+		s.Require().NoError(err)
+	}
+	s.writeSeededBytes(userID)
+	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Big", "Sub 1"})
+	s.Require().NoError(err)
+	deep := s.createFolder(userID, path.Path[1].ID, "Deep")
+	s.upload(userID, deep.ID, "deep.txt", "d")
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{big.ID}))
+	s.workCopyJobs()
+
+	bigCopy := s.copiesOf(big.ID)[0]
+	s.Len(s.treeOf(bigCopy), 260+251+251+2)
+	s.Equal(s.treeOf(big.ID), s.treeOf(bigCopy))
+	s.Equal(int64(260+251+251+2), s.logs("copied items")[0]["rows"])
+}
+
+// The first run copied a.txt and Sub, then failed. The next run adds only what is missing.
+func (s *FileServiceTestSuite) TestCopyItems_RunAfterFailureFinishes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	s.upload(userID, docs.ID, "b.txt", "b")
+	s.upload(userID, sub.ID, "c.txt", "c")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+	s.addCopy(docsCopy, a.ID)
+	s.addCopy(docsCopy, sub.ID)
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"Sub/", "Sub/c.txt=c", "a.txt=a", "b.txt=b"}, s.treeOf(docsCopy))
+	s.Equal(int64(2), s.logs("copied items")[0]["rows"])
+}
+
+// a.txt, 250 more files in Docs, and c.txt lost their bytes. Their copies are left out, and the copy root of c.txt
+// goes. The rest is copied. The lost files fill a whole batch, and the job must not read them again and again.
+func (s *FileServiceTestSuite) TestCopyItems_SkipsFilesWithNoBytes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	s.upload(userID, docs.ID, "b.txt", "b")
+	c := s.upload(userID, 0, "c.txt", "c")
+	archive := s.createFolder(userID, 0, "Archive")
+	for _, id := range []int64{a.ID, c.ID} {
+		s.Require().NoError(os.Remove(filepath.Join(s.TC.UploadDir, s.storageKey(id))))
+	}
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'lost ' || i || '.txt', md5(random()::text), 'text/plain', 1 FROM generate_series(1, 250) i`,
+		userID, docs.ID)
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID, c.ID}))
+	cCopy := s.copiesOf(c.ID)[0]
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"Docs/", "Docs/b.txt=b"}, s.treeOf(archive.ID))
+	skipped := s.logs("skipped a file with no bytes")
+	s.Len(skipped, 251)
+	s.Contains(skipped, map[string]any{"user_id": userID, "source_id": a.ID})
+	s.Equal([]map[string]any{{"user_id": userID, "copy_id": cCopy, "source_id": c.ID}}, s.logs("removed a copy with no bytes"))
+	copied := s.logs("copied items")
+	s.Require().Len(copied, 1)
+	s.Equal(int64(1), copied[0]["rows"])
+	s.Equal(int64(1), copied[0]["files"])
+}
+
+// The first batch copied a.txt. Then the user renamed a.txt to z.txt, and b.txt to a.txt. The copy of b.txt takes
+// a free name, so the job does not fail or loop.
+func (s *FileServiceTestSuite) TestCopyItems_NameClashFromRenameInSource() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	b := s.upload(userID, docs.ID, "b.txt", "b")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+	s.addCopy(docsCopy, a.ID)
+	_, err := svc.Rename(context.Background(), userID, a.ID, "z.txt")
+	s.Require().NoError(err)
+	_, err = svc.Rename(context.Background(), userID, b.ID, "a.txt")
+	s.Require().NoError(err)
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"a (1).txt=b", "a.txt=a"}, s.treeOf(docsCopy))
+}
+
+// x.txt went to the trash before the job got to Docs, and n.txt in Docs is a copy that is not done. Both are left out.
+func (s *FileServiceTestSuite) TestCopyItems_LeavesOutDeletedAndUnfinishedItems() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	x := s.upload(userID, docs.ID, "x.txt", "x")
+	s.upload(userID, docs.ID, "keep.txt", "k")
+	notes := s.createFolder(userID, 0, "Notes")
+	n := s.upload(userID, notes.ID, "n.txt", "n")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, docs.ID, []int64{n.ID}))
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{x.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+
+	s.Require().NoError(svc.CopyItems(context.Background(), userID, []int64{docsCopy}))
+
+	s.Equal([]string{"keep.txt=k"}, s.treeOf(docsCopy))
+}
+
+// Archive, with the copy root in it, moved into Docs during the copy. The job copies Archive, finds its own copy
+// root there, and leaves it out. So it does not copy what it makes.
+func (s *FileServiceTestSuite) TestCopyItems_DoesNotCopyItsOwnCopy() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "x.txt", "x")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	s.Require().NoError(svc.Move(context.Background(), userID, docs.ID, []int64{archive.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"Archive/", "x.txt=x"}, s.treeOf(docsCopy))
+}
+
+// The first run made Sub in the copy. Then Sub went to the trash. The job adds nothing under it and ends.
+// Sub holds a whole batch, and the job must not read it again and again.
+func (s *FileServiceTestSuite) TestCopyItems_CopyFolderInTrashGetsNothingMore() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	s.upload(userID, sub.ID, "x.txt", "x")
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+		SELECT $1, $2, 'Sub ' || i, '', 0 FROM generate_series(1, 250) i`, userID, sub.ID)
+	s.Require().NoError(err)
+	s.upload(userID, docs.ID, "a.txt", "a")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+	subCopy := s.addCopy(docsCopy, sub.ID)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{subCopy}))
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"a.txt=a"}, s.treeOf(docsCopy))
+	s.Zero(s.liveRowsInTrash(userID))
+	s.Equal(int64(1), s.logs("copied items")[0]["rows"])
+}
+
+// A job for an item that is not a copy root, or one that finished, changes nothing.
+func (s *FileServiceTestSuite) TestCopyItems_SkipsRootsNotMarked() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.upload(userID, 0, "a.txt", "a")
+
+	s.Require().NoError(svc.CopyItems(context.Background(), userID, []int64{a.ID}))
+
+	s.Equal(1, s.fileRows())
+	s.Empty(s.logs("copied items"))
+}
+
+// The sweep can add a copy job while the first one still runs, under other args. The runs skip each other's rows,
+// and each byte copy has its own temp file. So nothing is copied twice, and no bytes are left without a row.
+func (s *FileServiceTestSuite) TestCopyItems_RunsAtOnce() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'f' || i || '.txt', md5(random()::text), 'text/plain', 1 FROM generate_series(1, 150) i`,
+		userID, docs.ID)
+	s.Require().NoError(err)
+	s.writeSeededBytes(userID)
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	s.upload(userID, sub.ID, "x.txt", "x")
+	big := s.seedFile(userID, "big.bin")
+	bigPath := filepath.Join(s.TC.UploadDir, s.storageKey(big))
+	s.Require().NoError(os.WriteFile(bigPath, bytes.Repeat([]byte("b"), 8<<20), 0o640))
+	s.T().Cleanup(func() { _ = os.Remove(bigPath) })
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID, big}))
+	rootIDs := s.copyJobs()[0].RootIDs
+	before := s.dirEntries()
+
+	errs := make([]error, 4)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Go(func() { errs[i] = svc.CopyItems(context.Background(), userID, rootIDs) })
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		s.Require().NoError(err)
+	}
+	s.Equal(s.treeOf(docs.ID), s.treeOf(s.copiesOf(docs.ID)[0]))
+	s.Len(s.storedContent(s.copiesOf(big)[0]), 8<<20)
+	var added []string
+	for _, name := range s.dirEntries() {
+		if !slices.Contains(before, name) {
+			added = append(added, name)
+		}
+	}
+	s.ElementsMatch(s.copyKeys(userID), added)
+}
+
+// A copy root marked more than a day ago gets its job again, unless River still holds a job with the same args.
+func (s *FileServiceTestSuite) TestSweepCopies_AddsCopyJobAgainAfterRiverGivesUp() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "x.txt", "x")
+	a := s.upload(userID, 0, "a.txt", "a")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{a.ID}))
+	docsCopy := s.copiesOf(docs.ID)[0]
+	_, err := s.TC.DB.ExecContext(context.Background(),
+		`UPDATE files SET copy_requested_at = copy_requested_at - INTERVAL '25 hours' WHERE id = $1`, docsCopy)
+	s.Require().NoError(err)
+	stuck := jobs.CopyItemsArgs{UserID: userID, RootIDs: []int64{docsCopy}}
+	fresh := jobs.CopyItemsArgs{UserID: userID, RootIDs: []int64{s.copiesOf(a.ID)[0]}}
+
+	s.Require().NoError(svc.SweepCopies(context.Background()))
+	s.Equal([]jobs.CopyItemsArgs{stuck, fresh}, s.copyJobs())
+	s.Empty(s.logs("added the copy job again"))
+
+	_, err = s.TC.DB.ExecContext(context.Background(), `
+		UPDATE river_job SET state = 'discarded', finalized_at = NOW()
+		WHERE id = (SELECT MIN(id) FROM river_job WHERE kind = 'copy_items')`)
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.SweepCopies(context.Background()))
+	s.Equal([]jobs.CopyItemsArgs{stuck, fresh, stuck}, s.copyJobs())
+	s.Equal([]map[string]any{{"user_id": userID, "root_ids": []any{docsCopy}}}, s.logs("added the copy job again"))
+
+	s.workCopyJobs()
+
+	s.Equal([]string{"x.txt=x"}, s.treeOf(docsCopy))
+	s.Require().NoError(svc.SweepCopies(context.Background()))
+	s.Empty(s.copyJobs())
+}
+
 // Every row under the folder goes to the trash with it, so no path, list, upload or rename can reach them.
 func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
 	userID := s.seedUser()
@@ -2168,6 +2711,20 @@ func (s *FileServiceTestSuite) workPurgeJobs() {
 	workJobs[jobs.PurgeGroupsArgs](s, jobs.NewPurgeGroupsWorker(s.TC.Services.FileService))
 }
 
+func (s *FileServiceTestSuite) copyJobs() []jobs.CopyItemsArgs {
+	return queuedJobs[jobs.CopyItemsArgs](s)
+}
+
+func (s *FileServiceTestSuite) workCopyJobs() {
+	workJobs[jobs.CopyItemsArgs](s, jobs.NewCopyItemsWorker(s.TC.Services.FileService))
+}
+
+func (s *FileServiceTestSuite) upload(userID, parentID int64, name, content string) *file.File {
+	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, parentID, name, strings.NewReader(content))
+	s.Require().NoError(err)
+	return f
+}
+
 // writeStoredFile writes a file into the upload dir and moves its modified time back by hoursAgo.
 func (s *FileServiceTestSuite) writeStoredFile(name string, hoursAgo int) string {
 	s.Require().NoError(os.WriteFile(filepath.Join(s.TC.UploadDir, name), []byte("orphan"), 0o640))
@@ -2214,6 +2771,115 @@ func (s *FileServiceTestSuite) rowsInGroup(rootID int64) int {
 		`SELECT COUNT(*) FROM files WHERE trash_root_id = $1`, rootID).Scan(&n)
 	s.Require().NoError(err)
 	return n
+}
+
+// copiesOf reads the ids of the copies of a row, oldest first.
+func (s *FileServiceTestSuite) copiesOf(sourceID int64) []int64 {
+	rows, err := s.TC.DB.QueryContext(context.Background(),
+		`SELECT id FROM files WHERE copied_from_id = $1 ORDER BY id`, sourceID)
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		s.Require().NoError(rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	s.Require().NoError(rows.Err())
+	return ids
+}
+
+// copyKeys reads the storage keys of the user's copied files.
+func (s *FileServiceTestSuite) copyKeys(userID int64) []string {
+	rows, err := s.TC.DB.QueryContext(context.Background(),
+		`SELECT storage_key FROM files WHERE user_id = $1 AND copied_from_id IS NOT NULL AND storage_key IS NOT NULL`, userID)
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+
+	var keys []string
+	for rows.Next() {
+		var key string
+		s.Require().NoError(rows.Scan(&key))
+		keys = append(keys, key)
+	}
+	s.Require().NoError(rows.Err())
+	return keys
+}
+
+// addCopy adds a copy of a row the way a batch of the copy job does. It stands for a job that stopped part way.
+func (s *FileServiceTestSuite) addCopy(parentID, sourceID int64) int64 {
+	var id int64
+	var key sql.NullString
+	err := s.TC.DB.QueryRowContext(context.Background(), `
+		INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id)
+		SELECT user_id, $1, name, CASE WHEN storage_key IS NOT NULL THEN md5(random()::text) END, content_type, size_bytes, id
+		FROM files WHERE id = $2
+		RETURNING id, storage_key`, parentID, sourceID).Scan(&id, &key)
+	s.Require().NoError(err)
+	if key.Valid {
+		s.Require().NoError(os.WriteFile(filepath.Join(s.TC.UploadDir, key.String), []byte(s.storedContent(sourceID)), 0o640))
+	}
+	return id
+}
+
+// writeSeededBytes writes each of the user's seeded files to disk, with its name as its content.
+func (s *FileServiceTestSuite) writeSeededBytes(userID int64) {
+	rows, err := s.TC.DB.QueryContext(context.Background(),
+		`SELECT storage_key, name FROM files WHERE user_id = $1 AND storage_key IS NOT NULL`, userID)
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var key, name string
+		s.Require().NoError(rows.Scan(&key, &name))
+		s.Require().NoError(os.WriteFile(filepath.Join(s.TC.UploadDir, key), []byte(name), 0o640))
+	}
+	s.Require().NoError(rows.Err())
+}
+
+// treeOf lists the live rows under a folder by path, in byte order. A folder ends in "/", and a file shows its content.
+func (s *FileServiceTestSuite) treeOf(folderID int64) []string {
+	rows, err := s.TC.DB.QueryContext(context.Background(), `
+		WITH RECURSIVE tree AS (
+			SELECT id, name::text AS path, storage_key FROM files WHERE parent_id = $1 AND trashed_at IS NULL
+			UNION ALL
+			SELECT f.id, tree.path || '/' || f.name, f.storage_key
+			FROM files f JOIN tree ON f.parent_id = tree.id
+			WHERE f.trashed_at IS NULL
+		)
+		SELECT path, storage_key FROM tree`, folderID)
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		var key sql.NullString
+		s.Require().NoError(rows.Scan(&path, &key))
+		if !key.Valid {
+			paths = append(paths, path+"/")
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(s.TC.UploadDir, key.String))
+		s.Require().NoError(err, path)
+		paths = append(paths, path+"="+string(content))
+	}
+	s.Require().NoError(rows.Err())
+	slices.Sort(paths)
+	return paths
+}
+
+func (s *FileServiceTestSuite) storedContent(id int64) string {
+	content, err := os.ReadFile(filepath.Join(s.TC.UploadDir, s.storageKey(id)))
+	s.Require().NoError(err)
+	return string(content)
+}
+
+func (s *FileServiceTestSuite) storedModTime(id int64) time.Time {
+	info, err := os.Stat(filepath.Join(s.TC.UploadDir, s.storageKey(id)))
+	s.Require().NoError(err)
+	return info.ModTime()
 }
 
 // parentOf reads parent_id. The root is 0.

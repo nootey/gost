@@ -45,12 +45,21 @@ const orphanGraceHours = 24
 // orphanBatchSize caps the file names the orphan sweep checks in one query.
 const orphanBatchSize = 1000
 
+// copyBatchSize caps the rows one transaction of the copy job adds, and the copy folders one query reads under.
+// The insert updates every index of the table for each row: about 8 ms for 100 rows, 23 ms for 250.
+// The job copies the bytes of a batch before its transaction, so a crash loses at most one batch of work.
+const copyBatchSize = 100
+
+// copyRetryHours is how long a copy root waits for its copy job before the sweep adds the job again.
+const copyRetryHours = 24
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
 	errItemNotFound   = apperr.New(apperr.KindNotFound, "item not found")
 	errNameTaken      = apperr.New(apperr.KindConflict, "an item with this name already exists")
 	errMoveIntoItself = apperr.New(apperr.KindValidation, "a folder cannot move into itself or its own subfolder")
+	errCopyIntoItself = apperr.New(apperr.KindValidation, "a folder cannot be copied into itself or its own subfolder")
 	errSameFolder     = apperr.New(apperr.KindValidation, "the items are already in this folder")
 )
 
@@ -62,6 +71,7 @@ type FileServiceInterface interface {
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 	Move(ctx context.Context, userID, parentID int64, ids []int64) error
+	Copy(ctx context.Context, userID, parentID int64, ids []int64) error
 	Trash(ctx context.Context, userID int64, ids []int64) error
 	Restore(ctx context.Context, userID int64, ids []int64) error
 	Purge(ctx context.Context, userID int64, ids []int64) error
@@ -102,6 +112,7 @@ func toFileModel(dbFile database.File) *File {
 		ContentType: dbFile.ContentType,
 		SizeBytes:   dbFile.SizeBytes,
 		CreatedAt:   dbFile.CreatedAt,
+		IsCopying:   dbFile.CopyRequestedAt.Valid,
 	}
 }
 
@@ -110,6 +121,7 @@ func fileFields(f *database.File) []any {
 	return []any{
 		&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes,
 		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
+		&f.CopiedFromID, &f.CopyRequestedAt,
 	}
 }
 
@@ -261,43 +273,60 @@ func (s *FileService) Move(ctx context.Context, userID, parentID int64, ids []in
 		if err := q.LockUserTree(ctx, userID); err != nil {
 			return err
 		}
-		items, err := q.LockLiveItems(ctx, database.LockLiveItemsParams{UserID: userID, Ids: ids})
+		if _, err := s.lockPasteItems(ctx, q, userID, parentID, ids, errMoveIntoItself); err != nil {
+			return err
+		}
+		return q.MoveItems(ctx, database.MoveItemsParams{ParentID: parentID, UserID: userID, Ids: ids})
+	})
+	if utils.IsUniqueViolation(err, nameIndex) {
+		return errNameTaken
+	}
+	return err
+}
+
+// Copy is all or none, with the same checks as Move. It adds the copy roots at once, marked as copying, so their names
+// are taken. A job copies the bytes and the rows under the folders (CopyItems). An item that still copies cannot be
+// copied, because the job would copy only part of it.
+func (s *FileService) Copy(ctx context.Context, userID, parentID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserTree(ctx, userID); err != nil {
+			return err
+		}
+		items, err := s.lockPasteItems(ctx, q, userID, parentID, ids, errCopyIntoItself)
 		if err != nil {
 			return err
 		}
-		if len(items) != len(ids) {
-			return errItemNotFound
-		}
 
-		if parentID != 0 {
-			path, err := q.ListFolderPathIDs(ctx, database.ListFolderPathIDsParams{ID: parentID, UserID: userID})
-			if err != nil {
+		roots := database.CreateCopyRootsParams{
+			ParentID: parentID,
+			Keys:     make([]string, len(items)),
+			Ids:      make([]int64, len(items)),
+			UserID:   userID,
+		}
+		for i, item := range items {
+			if item.Copying {
+				return apperr.New(apperr.KindConflict, item.Name+" is still copying")
+			}
+			roots.Ids[i] = item.ID
+			if item.IsFolder {
+				continue
+			}
+			// The job writes the bytes under this key.
+			if roots.Keys[i], err = utils.NewStorageKey(); err != nil {
 				return err
 			}
-			if len(path) == 0 {
-				return errFolderNotFound
-			}
-			if slices.ContainsFunc(path, func(id int64) bool { return slices.Contains(ids, id) }) {
-				return errMoveIntoItself
-			}
 		}
 
-		names := make([]string, len(items))
-		for i, item := range items {
-			if item.ParentID == parentID {
-				return errSameFolder
-			}
-			names[i] = item.Name
-		}
-		taken, err := q.ListTakenNames(ctx, database.ListTakenNamesParams{UserID: userID, ParentID: parentID, Names: names})
+		rootIDs, err := q.CreateCopyRoots(ctx, roots)
 		if err != nil {
 			return err
 		}
-		if len(taken) > 0 {
-			return apperr.New(apperr.KindConflict, taken[0]+" already exists in this folder")
-		}
-
-		return q.MoveItems(ctx, database.MoveItemsParams{ParentID: parentID, UserID: userID, Ids: ids})
+		slices.Sort(rootIDs)
+		_, err = s.queue.InsertTx(ctx, tx, jobs.CopyItemsArgs{UserID: userID, RootIDs: rootIDs}, nil)
+		return err
 	})
 	if utils.IsUniqueViolation(err, nameIndex) {
 		return errNameTaken
@@ -325,6 +354,10 @@ func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) erro
 
 		var folders []int64
 		for _, item := range trashed {
+			// The rollback undoes the whole delete. A delete in the middle of a copy would leave a part copy.
+			if item.Copying {
+				return apperr.New(apperr.KindConflict, item.Name+" is still copying")
+			}
 			if item.IsFolder {
 				folders = append(folders, item.ID)
 			}
@@ -494,6 +527,76 @@ func (s *FileService) PurgeGroups(ctx context.Context, userID int64, rootIDs []i
 	return nil
 }
 
+// CopyItems copies what the copy roots stand for: the bytes of each file, and the rows under each folder, one level at
+// a time. It finds the rows it made by copied_from_id, so a run after a failure skips them. Then it clears the mark.
+func (s *FileService) CopyItems(ctx context.Context, userID int64, rootIDs []int64) error {
+	roots, err := s.queries.ListCopyRoots(ctx, database.ListCopyRootsParams{UserID: userID, Ids: rootIDs})
+	if err != nil || len(roots) == 0 {
+		return err
+	}
+
+	var rows, files, size int64
+	ids := make([]int64, len(roots))
+	var parents []int64
+	for i, root := range roots {
+		ids[i] = root.ID
+		if root.IsFolder {
+			parents = append(parents, root.ID)
+			continue
+		}
+
+		n, err := int64(0), utils.ErrNoStoredFile
+		if root.SourceKey.Valid {
+			n, err = utils.CopyStoredFile(s.cfg.Dir, root.SourceKey.String, root.StorageKey.String)
+		}
+		if errors.Is(err, utils.ErrNoStoredFile) {
+			// The source is gone or lost its bytes, so the copy can never get any.
+			err = utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+				q := s.queries.WithTx(tx)
+				if err := q.LockUserTree(ctx, userID); err != nil {
+					return err
+				}
+				return q.DeleteCopyRoot(ctx, database.DeleteCopyRootParams{UserID: userID, ID: root.ID})
+			})
+			if err != nil {
+				return err
+			}
+			s.logger.Warn("removed a copy with no bytes",
+				zap.Int64("user_id", userID), zap.Int64("copy_id", root.ID), zap.Int64("source_id", root.SourceID))
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		files++
+		size += n
+	}
+
+	for len(parents) > 0 {
+		var next []int64
+		for chunk := range slices.Chunk(parents, copyBatchSize) {
+			r, f, n, err := s.copyChildren(ctx, userID, chunk)
+			rows, files, size = rows+r, files+f, size+n
+			if err != nil {
+				return err
+			}
+			folders, err := s.queries.ListCopyFolders(ctx, database.ListCopyFoldersParams{UserID: userID, ParentIds: chunk})
+			if err != nil {
+				return err
+			}
+			next = append(next, folders...)
+		}
+		parents = next
+	}
+
+	if err := s.queries.FinishCopies(ctx, database.FinishCopiesParams{UserID: userID, Ids: ids}); err != nil {
+		return err
+	}
+	s.logger.Info("copied items", zap.Int64("user_id", userID), zap.Int64s("root_ids", ids),
+		zap.Int64("rows", rows), zap.Int64("files", files), zap.Int64("bytes", size))
+	return nil
+}
+
 // SweepTrash marks the items in the trash longer than trashRetentionDays for a permanent delete and adds their purge jobs.
 // It also adds the purge job again for groups marked long ago, so a job River gave up on does not hide them forever.
 func (s *FileService) SweepTrash(ctx context.Context) error {
@@ -524,6 +627,34 @@ func (s *FileService) SweepTrash(ctx context.Context) error {
 			}
 			if !res.UniqueSkippedAsDuplicate {
 				s.logger.Info("added the purge job again",
+					zap.Int64("user_id", group.UserID), zap.Int64s("root_ids", rootIDs))
+			}
+		}
+	}
+	return nil
+}
+
+// SweepCopies adds the copy job again for copy roots marked long ago, so a job River gave up on does not leave them
+// copying forever. The first job can still be alive under other args. Two runs at once are safe: a batch skips the rows
+// the other run added, and each byte copy has its own temp file.
+func (s *FileService) SweepCopies(ctx context.Context) error {
+	stale, err := s.queries.ListStaleCopies(ctx, copyRetryHours)
+	if err != nil {
+		return err
+	}
+	for _, group := range stale {
+		for rootIDs := range slices.Chunk(group.RootIds, copyBatchSize) {
+			var res *rivertype.JobInsertResult
+			err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+				var err error
+				res, err = s.queue.InsertTx(ctx, tx, jobs.CopyItemsArgs{UserID: group.UserID, RootIDs: rootIDs}, nil)
+				return err
+			})
+			if err != nil {
+				return err
+			}
+			if !res.UniqueSkippedAsDuplicate {
+				s.logger.Info("added the copy job again",
 					zap.Int64("user_id", group.UserID), zap.Int64s("root_ids", rootIDs))
 			}
 		}
@@ -714,6 +845,196 @@ func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs
 		}
 		rows += deleted
 	}
+}
+
+// copyChildren copies the rows under the sources of the copy folders, one batch at a time, until a batch comes back
+// short. The bytes of a batch go first, then its rows in one short transaction. So a crash leaves bytes with no row,
+// which the orphan sweep removes, never a row with no bytes. It returns the count of rows it added, of files and of bytes.
+func (s *FileService) copyChildren(ctx context.Context, userID int64, copyIDs []int64) (int64, int64, int64, error) {
+	var rows, files, size int64
+	// Not nil: pq sends a nil slice as NULL, and "<> ALL(NULL)" matches no row.
+	skip := []int64{}
+	for {
+		batch, err := s.queries.ListUncopiedChildren(ctx, database.ListUncopiedChildrenParams{
+			UserID:    userID,
+			CopyIds:   copyIDs,
+			SkipIds:   skip,
+			BatchSize: copyBatchSize,
+		})
+		if err != nil || len(batch) == 0 {
+			return rows, files, size, err
+		}
+
+		add := database.InsertCopiesParams{UserID: userID}
+		sizes := make(map[string]int64)
+		for _, row := range batch {
+			key := ""
+			if row.StorageKey.Valid {
+				if key, err = utils.NewStorageKey(); err != nil {
+					break
+				}
+				var n int64
+				n, err = utils.CopyStoredFile(s.cfg.Dir, row.StorageKey.String, key)
+				if errors.Is(err, utils.ErrNoStoredFile) {
+					s.logger.Warn("skipped a file with no bytes", zap.Int64("user_id", userID), zap.Int64("source_id", row.ID))
+					skip = append(skip, row.ID)
+					err = nil
+					continue
+				}
+				if err != nil {
+					break
+				}
+				sizes[key] = n
+			}
+			add.ParentIds = append(add.ParentIds, row.CopyParentID)
+			add.Names = append(add.Names, row.Name)
+			add.Keys = append(add.Keys, key)
+			add.ContentTypes = append(add.ContentTypes, row.ContentType)
+			add.Sizes = append(add.Sizes, row.SizeBytes)
+			add.SourceIds = append(add.SourceIds, row.ID)
+		}
+
+		var added []sql.NullString
+		if err == nil && len(add.SourceIds) > 0 {
+			added, err = s.insertCopies(ctx, add)
+		}
+		// Bytes whose row did not go in have no use: the copy folder went to the trash, or the batch failed.
+		for _, key := range added {
+			if key.Valid {
+				files++
+				size += sizes[key.String]
+				delete(sizes, key.String)
+			}
+		}
+		for key := range sizes {
+			_ = utils.RemoveStoredFile(s.cfg.Dir, key)
+		}
+		rows += int64(len(added))
+		if err != nil || len(batch) < copyBatchSize {
+			return rows, files, size, err
+		}
+	}
+}
+
+// insertCopies adds one batch of copies in a short transaction with the tree lock. Only the copy job adds rows to a
+// copy folder, so a name in use there comes from a rename in the source during the copy: b.txt renamed to a.txt after
+// a.txt was copied. Such a row gets a free name, the way restore does. It returns the storage keys of the rows it added.
+func (s *FileService) insertCopies(ctx context.Context, add database.InsertCopiesParams) ([]sql.NullString, error) {
+	var added []sql.NullString
+	err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserTree(ctx, add.UserID); err != nil {
+			return err
+		}
+		// Each folder once: the index lookups are folders times names.
+		inUse, err := q.ListTakenNamesInFolders(ctx, database.ListTakenNamesInFoldersParams{
+			UserID:    add.UserID,
+			ParentIds: slices.Compact(slices.Sorted(slices.Values(add.ParentIds))),
+			Names:     add.Names,
+		})
+		if err != nil {
+			return err
+		}
+		type folderName struct {
+			parentID int64
+			name     string
+		}
+		clashes := make(map[folderName]bool, len(inUse))
+		for _, row := range inUse {
+			clashes[folderName{row.ParentID, row.Name}] = true
+		}
+
+		var renames []int
+		for i := range add.Names {
+			if clashes[folderName{add.ParentIds[i], add.Names[i]}] {
+				renames = append(renames, i)
+			}
+		}
+		if len(renames) > 0 {
+			parents := make([]int64, len(renames))
+			prefixes := make([]string, len(renames))
+			for j, i := range renames {
+				parents[j] = add.ParentIds[i]
+				prefixes[j], _ = utils.SplitName(add.Names[i], utils.NameKindOf(add.Keys[i] == ""))
+			}
+			rows, err := q.ListNamesByParentsAndPrefixes(ctx, database.ListNamesByParentsAndPrefixesParams{
+				UserID:    add.UserID,
+				ParentIds: parents,
+				Prefixes:  prefixes,
+			})
+			if err != nil {
+				return err
+			}
+			// The batch's own names are taken too, so a new name does not clash with a row added next to it.
+			taken := make(map[int64][]string)
+			for _, row := range rows {
+				taken[row.ParentID] = append(taken[row.ParentID], row.Name)
+			}
+			for i, name := range add.Names {
+				taken[add.ParentIds[i]] = append(taken[add.ParentIds[i]], name)
+			}
+			for _, i := range renames {
+				name, err := utils.FreeName(add.Names[i], utils.NameKindOf(add.Keys[i] == ""), taken[add.ParentIds[i]])
+				if err != nil {
+					return err
+				}
+				taken[add.ParentIds[i]] = append(taken[add.ParentIds[i]], name)
+				add.Names[i] = name
+			}
+		}
+
+		added, err = q.InsertCopies(ctx, add)
+		return err
+	})
+	return added, err
+}
+
+// lockPasteItems runs the checks that Move and Copy share, after the tree lock: the items are live, the target is a
+// live folder outside them, no item is in it already, and no name is in use in it. intoItself is the error for a
+// target inside one of the items. It returns the items in id order.
+func (s *FileService) lockPasteItems(
+	ctx context.Context,
+	q *database.Queries,
+	userID, parentID int64,
+	ids []int64,
+	intoItself error,
+) ([]database.LockLiveItemsRow, error) {
+	items, err := q.LockLiveItems(ctx, database.LockLiveItemsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) != len(ids) {
+		return nil, errItemNotFound
+	}
+
+	if parentID != 0 {
+		path, err := q.ListFolderPathIDs(ctx, database.ListFolderPathIDsParams{ID: parentID, UserID: userID})
+		if err != nil {
+			return nil, err
+		}
+		if len(path) == 0 {
+			return nil, errFolderNotFound
+		}
+		if slices.ContainsFunc(path, func(id int64) bool { return slices.Contains(ids, id) }) {
+			return nil, intoItself
+		}
+	}
+
+	names := make([]string, len(items))
+	for i, item := range items {
+		if item.ParentID == parentID {
+			return nil, errSameFolder
+		}
+		names[i] = item.Name
+	}
+	taken, err := q.ListTakenNames(ctx, database.ListTakenNamesParams{UserID: userID, ParentID: parentID, Names: names})
+	if err != nil {
+		return nil, err
+	}
+	if len(taken) > 0 {
+		return nil, apperr.New(apperr.KindConflict, taken[0]+" already exists in this folder")
+	}
+	return items, nil
 }
 
 func (s *FileService) checkFolder(ctx context.Context, q *database.Queries, userID, folderID int64) error {
