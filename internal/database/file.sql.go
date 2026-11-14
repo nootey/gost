@@ -7,25 +7,79 @@ package database
 
 import (
 	"context"
+	"database/sql"
+
+	"github.com/lib/pq"
 )
 
+const createCopyRoots = `-- name: CreateCopyRoots :many
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, copy_requested_at)
+SELECT src.user_id, NULLIF($1::bigint, 0), src.name,
+       NULLIF(($2::text[])[array_position($3::bigint[], src.id)], ''),
+       src.content_type, src.size_bytes, src.id, NOW()
+FROM files src
+WHERE src.user_id = $4
+  AND src.id = ANY($3::bigint[])
+  AND src.trashed_at IS NULL
+    RETURNING id
+`
+
+type CreateCopyRootsParams struct {
+	ParentID int64    `json:"parent_id"`
+	Keys     []string `json:"keys"`
+	Ids      []int64  `json:"ids"`
+	UserID   int64    `json:"user_id"`
+}
+
+// Adds a copy of each live item in ids to the folder, marked as copying. keys[i] is the new storage key of ids[i],
+// empty for a folder. A parent_id of 0 means the root.
+func (q *Queries) CreateCopyRoots(ctx context.Context, arg CreateCopyRootsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, createCopyRoots,
+		arg.ParentID,
+		pq.Array(arg.Keys),
+		pq.Array(arg.Ids),
+		arg.UserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createFile = `-- name: CreateFile :one
-INSERT INTO files (user_id, name, storage_key, content_type, size_bytes)
-VALUES ($1, $2, $3, $4, $5)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
 `
 
 type CreateFileParams struct {
-	UserID      int64  `json:"user_id"`
-	Name        string `json:"name"`
-	StorageKey  string `json:"storage_key"`
-	ContentType string `json:"content_type"`
-	SizeBytes   int64  `json:"size_bytes"`
+	UserID      int64          `json:"user_id"`
+	ParentID    sql.NullInt64  `json:"parent_id"`
+	Name        string         `json:"name"`
+	StorageKey  sql.NullString `json:"storage_key"`
+	ContentType string         `json:"content_type"`
+	SizeBytes   int64          `json:"size_bytes"`
 }
 
 func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, error) {
 	row := q.db.QueryRowContext(ctx, createFile,
 		arg.UserID,
+		arg.ParentID,
 		arg.Name,
 		arg.StorageKey,
 		arg.ContentType,
@@ -41,6 +95,1330 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.SizeBytes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
+		&i.PurgeRequestedAt,
+		&i.CopiedFromID,
+		&i.CopyRequestedAt,
 	)
 	return i, err
+}
+
+const createFolder = `-- name: CreateFolder :one
+INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+VALUES ($1, $2, $3, '', 0)
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
+`
+
+type CreateFolderParams struct {
+	UserID   int64         `json:"user_id"`
+	ParentID sql.NullInt64 `json:"parent_id"`
+	Name     string        `json:"name"`
+}
+
+func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, createFolder, arg.UserID, arg.ParentID, arg.Name)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
+		&i.PurgeRequestedAt,
+		&i.CopiedFromID,
+		&i.CopyRequestedAt,
+	)
+	return i, err
+}
+
+const deleteCopyRoot = `-- name: DeleteCopyRoot :exec
+DELETE FROM files
+WHERE user_id = $1
+  AND id = $2
+  AND copy_requested_at IS NOT NULL
+  AND storage_key IS NOT NULL
+`
+
+type DeleteCopyRootParams struct {
+	UserID int64 `json:"user_id"`
+	ID     int64 `json:"id"`
+}
+
+// Deletes a file copy root whose source has no bytes left to copy.
+func (q *Queries) DeleteCopyRoot(ctx context.Context, arg DeleteCopyRootParams) error {
+	_, err := q.db.ExecContext(ctx, deleteCopyRoot, arg.UserID, arg.ID)
+	return err
+}
+
+const deletePurgeRows = `-- name: DeletePurgeRows :execrows
+DELETE FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trash_root_id = ANY($3::bigint[])
+`
+
+type DeletePurgeRowsParams struct {
+	UserID  int64   `json:"user_id"`
+	Ids     []int64 `json:"ids"`
+	RootIds []int64 `json:"root_ids"`
+}
+
+// Deletes the rows in ids. A row outside the root_ids groups stays.
+func (q *Queries) DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deletePurgeRows, arg.UserID, pq.Array(arg.Ids), pq.Array(arg.RootIds))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const finishCopies = `-- name: FinishCopies :exec
+UPDATE files
+SET copy_requested_at = NULL
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+`
+
+type FinishCopiesParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Clears the copying mark, so the copy roots work like any other item.
+func (q *Queries) FinishCopies(ctx context.Context, arg FinishCopiesParams) error {
+	_, err := q.db.ExecContext(ctx, finishCopies, arg.UserID, pq.Array(arg.Ids))
+	return err
+}
+
+const folderExists = `-- name: FolderExists :one
+SELECT EXISTS (
+    SELECT 1 FROM files
+    WHERE id = $1 AND user_id = $2 AND storage_key IS NULL AND trashed_at IS NULL AND copy_requested_at IS NULL
+)
+`
+
+type FolderExistsParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+// A folder that still copies does not count: nothing goes into it until the copy job ends.
+func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, folderExists, arg.ID, arg.UserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const getFile = `-- name: GetFile :one
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at FROM files
+WHERE id = $1 AND user_id = $2 AND trashed_at IS NULL
+`
+
+type GetFileParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, getFile, arg.ID, arg.UserID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
+		&i.PurgeRequestedAt,
+		&i.CopiedFromID,
+		&i.CopyRequestedAt,
+	)
+	return i, err
+}
+
+const hasStoredFiles = `-- name: HasStoredFiles :one
+SELECT EXISTS (SELECT 1 FROM files WHERE storage_key IS NOT NULL)
+`
+
+// Reports whether any row points to bytes on disk.
+func (q *Queries) HasStoredFiles(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasStoredFiles)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const insertCopies = `-- name: InsertCopies :many
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id)
+SELECT p.user_id, p.id, u.name, NULLIF(u.storage_key, ''), u.content_type, u.size_bytes, u.copied_from_id
+FROM (
+    SELECT unnest($1::bigint[]) AS parent_id,
+           unnest($2::text[]) AS name,
+           unnest($3::text[]) AS storage_key,
+           unnest($4::text[]) AS content_type,
+           unnest($5::bigint[]) AS size_bytes,
+           unnest($6::bigint[]) AS copied_from_id
+) AS u
+JOIN files p ON p.id = u.parent_id
+WHERE p.user_id = $7
+  AND p.trashed_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM files c WHERE c.copied_from_id = u.copied_from_id AND c.parent_id = p.id)
+    RETURNING storage_key
+`
+
+type InsertCopiesParams struct {
+	ParentIds    []int64  `json:"parent_ids"`
+	Names        []string `json:"names"`
+	Keys         []string `json:"keys"`
+	ContentTypes []string `json:"content_types"`
+	Sizes        []int64  `json:"sizes"`
+	SourceIds    []int64  `json:"source_ids"`
+	UserID       int64    `json:"user_id"`
+}
+
+// Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
+// An empty key marks a folder. A row whose copy folder is gone or in the trash is left out, and so is a row whose
+// copy is in the folder already: another run of the job added it. It returns the storage keys of the rows it added.
+func (q *Queries) InsertCopies(ctx context.Context, arg InsertCopiesParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, insertCopies,
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.Names),
+		pq.Array(arg.Keys),
+		pq.Array(arg.ContentTypes),
+		pq.Array(arg.Sizes),
+		pq.Array(arg.SourceIds),
+		arg.UserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var storage_key sql.NullString
+		if err := rows.Scan(&storage_key); err != nil {
+			return nil, err
+		}
+		items = append(items, storage_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCopyFolders = `-- name: ListCopyFolders :many
+SELECT id FROM files
+WHERE user_id = $1
+  AND parent_id = ANY($2::bigint[])
+  AND copied_from_id IS NOT NULL
+  AND storage_key IS NULL
+  AND trashed_at IS NULL
+`
+
+type ListCopyFoldersParams struct {
+	UserID    int64   `json:"user_id"`
+	ParentIds []int64 `json:"parent_ids"`
+}
+
+// The folders the copy job made right under parent_ids: the next level of the job.
+func (q *Queries) ListCopyFolders(ctx context.Context, arg ListCopyFoldersParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listCopyFolders, arg.UserID, pq.Array(arg.ParentIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCopyRoots = `-- name: ListCopyRoots :many
+SELECT c.id, (c.storage_key IS NULL)::boolean AS is_folder, c.storage_key,
+       COALESCE(c.copied_from_id, 0)::bigint AS source_id, s.storage_key AS source_key
+FROM files c
+LEFT JOIN files s ON s.id = c.copied_from_id AND s.user_id = c.user_id
+WHERE c.user_id = $1
+  AND c.id = ANY($2::bigint[])
+  AND c.copy_requested_at IS NOT NULL
+ORDER BY c.id
+`
+
+type ListCopyRootsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type ListCopyRootsRow struct {
+	ID         int64          `json:"id"`
+	IsFolder   bool           `json:"is_folder"`
+	StorageKey sql.NullString `json:"storage_key"`
+	SourceID   int64          `json:"source_id"`
+	SourceKey  sql.NullString `json:"source_key"`
+}
+
+// The copy roots in ids that still copy, with the storage key of their source. A root the job finished is not in it.
+func (q *Queries) ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCopyRoots, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCopyRootsRow
+	for rows.Next() {
+		var i ListCopyRootsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.IsFolder,
+			&i.StorageKey,
+			&i.SourceID,
+			&i.SourceKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFolderPathIDs = `-- name: ListFolderPathIDs :many
+WITH RECURSIVE up AS (
+    SELECT files.id, files.parent_id
+    FROM files
+    WHERE files.id = $1
+      AND files.user_id = $2
+      AND files.storage_key IS NULL
+      AND files.trashed_at IS NULL
+      AND files.copy_requested_at IS NULL
+    UNION
+    SELECT f.id, f.parent_id
+    FROM files f
+    JOIN up ON f.id = up.parent_id
+)
+SELECT id FROM up
+`
+
+type ListFolderPathIDsParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
+// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
+func (q *Queries) ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listFolderPathIDs, arg.ID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupFolders = `-- name: ListGroupFolders :many
+SELECT id FROM files
+WHERE user_id = $1
+  AND parent_id = ANY($2::bigint[])
+  AND trash_root_id = ANY($3::bigint[])
+  AND trash_root_id <> id
+  AND storage_key IS NULL
+`
+
+type ListGroupFoldersParams struct {
+	UserID    int64   `json:"user_id"`
+	ParentIds []int64 `json:"parent_ids"`
+	RootIds   []int64 `json:"root_ids"`
+}
+
+// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
+// It skips the group roots, because the job starts from them.
+func (q *Queries) ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listGroupFolders, arg.UserID, pq.Array(arg.ParentIds), pq.Array(arg.RootIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNamesByParentAndPrefix = `-- name: ListNamesByParentAndPrefix :many
+SELECT name FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
+  AND starts_with(name, $3::text)
+  AND trashed_at IS NULL
+`
+
+type ListNamesByParentAndPrefixParams struct {
+	UserID   int64  `json:"user_id"`
+	ParentID int64  `json:"parent_id"`
+	Prefix   string `json:"prefix"`
+}
+
+func (q *Queries) ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listNamesByParentAndPrefix, arg.UserID, arg.ParentID, arg.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNamesByParentsAndPrefixes = `-- name: ListNamesByParentsAndPrefixes :many
+SELECT COALESCE(parent_id, 0)::bigint AS parent_id, name
+FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = ANY($2::bigint[])
+  AND name ^@ ANY($3::text[])
+  AND trashed_at IS NULL
+`
+
+type ListNamesByParentsAndPrefixesParams struct {
+	UserID    int64    `json:"user_id"`
+	ParentIds []int64  `json:"parent_ids"`
+	Prefixes  []string `json:"prefixes"`
+}
+
+type ListNamesByParentsAndPrefixesRow struct {
+	ParentID int64  `json:"parent_id"`
+	Name     string `json:"name"`
+}
+
+// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
+func (q *Queries) ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNamesByParentsAndPrefixes, arg.UserID, pq.Array(arg.ParentIds), pq.Array(arg.Prefixes))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNamesByParentsAndPrefixesRow
+	for rows.Next() {
+		var i ListNamesByParentsAndPrefixesRow
+		if err := rows.Scan(&i.ParentID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrphanKeys = `-- name: ListOrphanKeys :many
+SELECT k.key::text FROM unnest($1::text[]) AS k(key)
+WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.storage_key = k.key)
+`
+
+// The names in keys that no row has as its storage key.
+func (q *Queries) ListOrphanKeys(ctx context.Context, keys []string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listOrphanKeys, pq.Array(keys))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var k_key string
+		if err := rows.Scan(&k_key); err != nil {
+			return nil, err
+		}
+		items = append(items, k_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPurgeLeaves = `-- name: ListPurgeLeaves :many
+SELECT f.id, f.storage_key
+FROM files f
+WHERE f.user_id = $1
+  AND f.trash_root_id = ANY($2::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM files c WHERE c.parent_id = f.id)
+LIMIT $3
+`
+
+type ListPurgeLeavesParams struct {
+	UserID    int64   `json:"user_id"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+type ListPurgeLeavesRow struct {
+	ID         int64          `json:"id"`
+	StorageKey sql.NullString `json:"storage_key"`
+}
+
+// Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
+// the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
+func (q *Queries) ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPurgeLeaves, arg.UserID, pq.Array(arg.RootIds), arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPurgeLeavesRow
+	for rows.Next() {
+		var i ListPurgeLeavesRow
+		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPurgeRoots = `-- name: ListPurgeRoots :many
+SELECT id FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND purge_requested_at IS NOT NULL
+ORDER BY id
+`
+
+type ListPurgeRootsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
+func (q *Queries) ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listPurgeRoots, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleCopies = `-- name: ListStaleCopies :many
+SELECT user_id, array_agg(id ORDER BY id)::bigint[] AS root_ids
+FROM files
+WHERE copy_requested_at < NOW() - make_interval(hours => $1::int)
+GROUP BY user_id
+ORDER BY user_id
+`
+
+type ListStaleCopiesRow struct {
+	UserID  int64   `json:"user_id"`
+	RootIds []int64 `json:"root_ids"`
+}
+
+// The copy roots marked more than retry_hours ago, per user. Their copy job can have failed for good.
+func (q *Queries) ListStaleCopies(ctx context.Context, retryHours int32) ([]ListStaleCopiesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listStaleCopies, retryHours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStaleCopiesRow
+	for rows.Next() {
+		var i ListStaleCopiesRow
+		if err := rows.Scan(&i.UserID, pq.Array(&i.RootIds)); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStalePurges = `-- name: ListStalePurges :many
+SELECT user_id, array_agg(id ORDER BY id)::bigint[] AS root_ids
+FROM files
+WHERE purge_requested_at < NOW() - make_interval(hours => $1::int)
+GROUP BY user_id
+ORDER BY user_id
+`
+
+type ListStalePurgesRow struct {
+	UserID  int64   `json:"user_id"`
+	RootIds []int64 `json:"root_ids"`
+}
+
+// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
+func (q *Queries) ListStalePurges(ctx context.Context, retryHours int32) ([]ListStalePurgesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listStalePurges, retryHours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStalePurgesRow
+	for rows.Next() {
+		var i ListStalePurgesRow
+		if err := rows.Scan(&i.UserID, pq.Array(&i.RootIds)); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTakenNames = `-- name: ListTakenNames :many
+SELECT name FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = $2::bigint
+  AND name = ANY($3::text[])
+  AND trashed_at IS NULL
+ORDER BY name
+`
+
+type ListTakenNamesParams struct {
+	UserID   int64    `json:"user_id"`
+	ParentID int64    `json:"parent_id"`
+	Names    []string `json:"names"`
+}
+
+// The names in names that a live item in the folder already has.
+func (q *Queries) ListTakenNames(ctx context.Context, arg ListTakenNamesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listTakenNames, arg.UserID, arg.ParentID, pq.Array(arg.Names))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTakenNamesInFolders = `-- name: ListTakenNamesInFolders :many
+SELECT COALESCE(parent_id, 0)::bigint AS parent_id, name FROM files
+WHERE user_id = $1
+  AND COALESCE(parent_id, 0) = ANY($2::bigint[])
+  AND name = ANY($3::text[])
+  AND trashed_at IS NULL
+`
+
+type ListTakenNamesInFoldersParams struct {
+	UserID    int64    `json:"user_id"`
+	ParentIds []int64  `json:"parent_ids"`
+	Names     []string `json:"names"`
+}
+
+type ListTakenNamesInFoldersRow struct {
+	ParentID int64  `json:"parent_id"`
+	Name     string `json:"name"`
+}
+
+// The live items in the folders whose name is one of names. The caller pairs each folder with its own names.
+// COALESCE matches the unique name index, so each folder and name is one index lookup.
+func (q *Queries) ListTakenNamesInFolders(ctx context.Context, arg ListTakenNamesInFoldersParams) ([]ListTakenNamesInFoldersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTakenNamesInFolders, arg.UserID, pq.Array(arg.ParentIds), pq.Array(arg.Names))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTakenNamesInFoldersRow
+	for rows.Next() {
+		var i ListTakenNamesInFoldersRow
+		if err := rows.Scan(&i.ParentID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTrashRoots = `-- name: ListTrashRoots :many
+SELECT f.id, f.name, (f.storage_key IS NULL)::boolean AS is_folder, COALESCE(p.id, 0)::bigint AS new_parent_id
+FROM files f
+LEFT JOIN files p ON p.id = f.parent_id
+    AND (p.trashed_at IS NULL OR p.trash_root_id = ANY($1::bigint[]))
+WHERE f.user_id = $2
+  AND f.id = ANY($1::bigint[])
+  AND f.trash_root_id = f.id
+  AND f.purge_requested_at IS NULL
+ORDER BY f.id
+FOR UPDATE OF f
+`
+
+type ListTrashRootsParams struct {
+	Ids    []int64 `json:"ids"`
+	UserID int64   `json:"user_id"`
+}
+
+type ListTrashRootsRow struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	IsFolder    bool   `json:"is_folder"`
+	NewParentID int64  `json:"new_parent_id"`
+}
+
+// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+// An item marked for a permanent delete is left out.
+func (q *Queries) ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTrashRoots, pq.Array(arg.Ids), arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTrashRootsRow
+	for rows.Next() {
+		var i ListTrashRootsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IsFolder,
+			&i.NewParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUncopiedChildren = `-- name: ListUncopiedChildren :many
+SELECT p.id AS copy_parent_id, s.id, s.name, s.storage_key, s.content_type, s.size_bytes
+FROM files p
+JOIN files s ON s.parent_id = p.copied_from_id
+WHERE p.user_id = $1
+  AND p.id = ANY($2::bigint[])
+  AND p.storage_key IS NULL
+  AND p.trashed_at IS NULL
+  AND s.user_id = $1
+  AND s.trashed_at IS NULL
+  AND s.copy_requested_at IS NULL
+  AND s.id <> ALL($3::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM files c WHERE c.copied_from_id = s.id AND c.parent_id = p.id)
+LIMIT $4
+`
+
+type ListUncopiedChildrenParams struct {
+	UserID    int64   `json:"user_id"`
+	CopyIds   []int64 `json:"copy_ids"`
+	SkipIds   []int64 `json:"skip_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+type ListUncopiedChildrenRow struct {
+	CopyParentID int64          `json:"copy_parent_id"`
+	ID           int64          `json:"id"`
+	Name         string         `json:"name"`
+	StorageKey   sql.NullString `json:"storage_key"`
+	ContentType  string         `json:"content_type"`
+	SizeBytes    int64          `json:"size_bytes"`
+}
+
+// Up to batch_size live rows right under the sources of the copy folders in copy_ids that have no copy in them yet.
+// A copy folder in the trash gets nothing more. A copy that is not done yet is left out, and so are the rows in skip_ids.
+func (q *Queries) ListUncopiedChildren(ctx context.Context, arg ListUncopiedChildrenParams) ([]ListUncopiedChildrenRow, error) {
+	rows, err := q.db.QueryContext(ctx, listUncopiedChildren,
+		arg.UserID,
+		pq.Array(arg.CopyIds),
+		pq.Array(arg.SkipIds),
+		arg.BatchSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUncopiedChildrenRow
+	for rows.Next() {
+		var i ListUncopiedChildrenRow
+		if err := rows.Scan(
+			&i.CopyParentID,
+			&i.ID,
+			&i.Name,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.SizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersWithExpiredTrash = `-- name: ListUsersWithExpiredTrash :many
+SELECT DISTINCT user_id FROM files
+WHERE trash_root_id = id
+  AND purge_requested_at IS NULL
+  AND trashed_at < NOW() - make_interval(days => $1::int)
+ORDER BY user_id
+`
+
+// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
+func (q *Queries) ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listUsersWithExpiredTrash, retentionDays)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var user_id int64
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockLiveItems = `-- name: LockLiveItems :many
+SELECT id, COALESCE(parent_id, 0)::bigint AS parent_id, name,
+       (storage_key IS NULL)::boolean AS is_folder, (copy_requested_at IS NOT NULL)::boolean AS copying
+FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trashed_at IS NULL
+ORDER BY id
+FOR UPDATE
+`
+
+type LockLiveItemsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type LockLiveItemsRow struct {
+	ID       int64  `json:"id"`
+	ParentID int64  `json:"parent_id"`
+	Name     string `json:"name"`
+	IsFolder bool   `json:"is_folder"`
+	Copying  bool   `json:"copying"`
+}
+
+// Locks the live items in ids, so a rename cannot change a name before a move or a copy checks it.
+func (q *Queries) LockLiveItems(ctx context.Context, arg LockLiveItemsParams) ([]LockLiveItemsRow, error) {
+	rows, err := q.db.QueryContext(ctx, lockLiveItems, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockLiveItemsRow
+	for rows.Next() {
+		var i LockLiveItemsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ParentID,
+			&i.Name,
+			&i.IsFolder,
+			&i.Copying,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockUserTree = `-- name: LockUserTree :exec
+SELECT pg_advisory_xact_lock($1::bigint)
+`
+
+// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
+func (q *Queries) LockUserTree(ctx context.Context, userID int64) error {
+	_, err := q.db.ExecContext(ctx, lockUserTree, userID)
+	return err
+}
+
+const moveItems = `-- name: MoveItems :exec
+UPDATE files
+SET parent_id = NULLIF($1::bigint, 0), updated_at = NOW()
+WHERE user_id = $2
+  AND id = ANY($3::bigint[])
+  AND trashed_at IS NULL
+`
+
+type MoveItemsParams struct {
+	ParentID int64   `json:"parent_id"`
+	UserID   int64   `json:"user_id"`
+	Ids      []int64 `json:"ids"`
+}
+
+// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
+func (q *Queries) MoveItems(ctx context.Context, arg MoveItemsParams) error {
+	_, err := q.db.ExecContext(ctx, moveItems, arg.ParentID, arg.UserID, pq.Array(arg.Ids))
+	return err
+}
+
+const moveNestedTrashRootsHome = `-- name: MoveNestedTrashRootsHome :execrows
+WITH batch AS (
+    SELECT c.id
+    FROM files c
+    JOIN files p ON p.id = c.parent_id
+    WHERE c.user_id = $1
+      AND c.trash_root_id = c.id
+      AND p.trash_root_id = ANY($2::bigint[])
+    LIMIT $3
+)
+UPDATE files
+SET parent_id = NULL
+FROM batch
+WHERE files.id = batch.id
+`
+
+type MoveNestedTrashRootsHomeParams struct {
+	UserID    int64   `json:"user_id"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
+// Else the parent_id foreign key blocks the delete of the folder they were in.
+func (q *Queries) MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, moveNestedTrashRootsHome, arg.UserID, pq.Array(arg.RootIds), arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const renameFile = `-- name: RenameFile :one
+UPDATE files
+SET name = $1, updated_at = NOW()
+WHERE id = $2 AND user_id = $3 AND trashed_at IS NULL
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
+`
+
+type RenameFileParams struct {
+	Name   string `json:"name"`
+	ID     int64  `json:"id"`
+	UserID int64  `json:"user_id"`
+}
+
+func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, renameFile, arg.Name, arg.ID, arg.UserID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.TrashedAt,
+		&i.TrashRootID,
+		&i.PurgeRequestedAt,
+		&i.CopiedFromID,
+		&i.CopyRequestedAt,
+	)
+	return i, err
+}
+
+const requestExpiredPurge = `-- name: RequestExpiredPurge :many
+WITH batch AS (
+    SELECT f.id FROM files f
+    WHERE f.user_id = $1
+      AND f.trash_root_id = f.id
+      AND f.purge_requested_at IS NULL
+      AND f.trashed_at < NOW() - make_interval(days => $2::int)
+    LIMIT $3
+)
+UPDATE files
+SET purge_requested_at = NOW()
+FROM batch
+WHERE files.id = batch.id
+RETURNING files.id
+`
+
+type RequestExpiredPurgeParams struct {
+	UserID        int64 `json:"user_id"`
+	RetentionDays int32 `json:"retention_days"`
+	BatchSize     int32 `json:"batch_size"`
+}
+
+// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
+func (q *Queries) RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, requestExpiredPurge, arg.UserID, arg.RetentionDays, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const requestPurge = `-- name: RequestPurge :execrows
+UPDATE files
+SET purge_requested_at = NOW()
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trash_root_id = id
+  AND purge_requested_at IS NULL
+`
+
+type RequestPurgeParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
+func (q *Queries) RequestPurge(ctx context.Context, arg RequestPurgeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requestPurge, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const resolveFolderPath = `-- name: ResolveFolderPath :many
+WITH RECURSIVE path AS (
+    SELECT files.id, files.name, 1 AS depth
+    FROM files
+    WHERE files.user_id = $1
+      AND COALESCE(files.parent_id, 0) = 0
+      AND files.name = ($2::text[])[1]
+      AND files.storage_key IS NULL
+      AND files.trashed_at IS NULL
+      AND files.copy_requested_at IS NULL
+    UNION ALL
+    SELECT f.id, f.name, path.depth + 1
+    FROM files f
+    JOIN path ON COALESCE(f.parent_id, 0) = path.id
+    WHERE f.user_id = $1
+      AND f.name = ($2::text[])[path.depth + 1]
+      AND f.storage_key IS NULL
+      AND f.trashed_at IS NULL
+      AND f.copy_requested_at IS NULL
+)
+SELECT id, name FROM path
+ORDER BY depth
+`
+
+type ResolveFolderPathParams struct {
+	UserID int64    `json:"user_id"`
+	Names  []string `json:"names"`
+}
+
+type ResolveFolderPathRow struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// Walks folder names down from the root and returns each folder it finds, root first.
+// Fewer rows than names means the path does not exist. The walk stops at a folder that still copies.
+func (q *Queries) ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error) {
+	rows, err := q.db.QueryContext(ctx, resolveFolderPath, arg.UserID, pq.Array(arg.Names))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ResolveFolderPathRow
+	for rows.Next() {
+		var i ResolveFolderPathRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const restoreTrashGroups = `-- name: RestoreTrashGroups :exec
+UPDATE files
+SET trashed_at = NULL, trash_root_id = NULL
+WHERE user_id = $1
+  AND trash_root_id = ANY($2::bigint[])
+  AND trash_root_id <> id
+`
+
+type RestoreTrashGroupsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// Brings back the rows under each deleted item. They keep their names, because nothing new can go into a folder in the trash.
+func (q *Queries) RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error {
+	_, err := q.db.ExecContext(ctx, restoreTrashGroups, arg.UserID, pq.Array(arg.Ids))
+	return err
+}
+
+const restoreTrashRoots = `-- name: RestoreTrashRoots :exec
+UPDATE files
+SET parent_id = NULLIF(($1::bigint[])[array_position($2::bigint[], id)], 0),
+    name = ($3::text[])[array_position($2::bigint[], id)],
+    trashed_at = NULL, trash_root_id = NULL, updated_at = NOW()
+WHERE user_id = $4
+  AND id = ANY($2::bigint[])
+`
+
+type RestoreTrashRootsParams struct {
+	ParentIds []int64  `json:"parent_ids"`
+	Ids       []int64  `json:"ids"`
+	Names     []string `json:"names"`
+	UserID    int64    `json:"user_id"`
+}
+
+// parent_ids[i] and names[i] belong to ids[i].
+func (q *Queries) RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error {
+	_, err := q.db.ExecContext(ctx, restoreTrashRoots,
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.Ids),
+		pq.Array(arg.Names),
+		arg.UserID,
+	)
+	return err
+}
+
+const trashChildren = `-- name: TrashChildren :execrows
+WITH batch AS (
+    SELECT c.id, p.trashed_at, p.trash_root_id
+    FROM files p
+    JOIN files c ON c.parent_id = p.id
+    WHERE p.user_id = $1
+      AND p.id = ANY($2::bigint[])
+      AND p.trash_root_id = ANY($3::bigint[])
+      AND c.trashed_at IS NULL
+    LIMIT $4
+)
+UPDATE files
+SET trashed_at = batch.trashed_at, trash_root_id = batch.trash_root_id
+FROM batch
+WHERE files.id = batch.id
+`
+
+type TrashChildrenParams struct {
+	UserID    int64   `json:"user_id"`
+	ParentIds []int64 `json:"parent_ids"`
+	RootIds   []int64 `json:"root_ids"`
+	BatchSize int32   `json:"batch_size"`
+}
+
+// Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
+// still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
+func (q *Queries) TrashChildren(ctx context.Context, arg TrashChildrenParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, trashChildren,
+		arg.UserID,
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.RootIds),
+		arg.BatchSize,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const trashItems = `-- name: TrashItems :many
+UPDATE files
+SET trashed_at = NOW(), trash_root_id = id
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trashed_at IS NULL
+    RETURNING id, name, (storage_key IS NULL)::boolean AS is_folder, (copy_requested_at IS NOT NULL)::boolean AS copying
+`
+
+type TrashItemsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type TrashItemsRow struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	IsFolder bool   `json:"is_folder"`
+	Copying  bool   `json:"copying"`
+}
+
+// Marks only the items. Each item roots its own group. A job marks the rows under the folders (TrashChildren).
+// It marks an item that still copies too, and the caller undoes the delete.
+func (q *Queries) TrashItems(ctx context.Context, arg TrashItemsParams) ([]TrashItemsRow, error) {
+	rows, err := q.db.QueryContext(ctx, trashItems, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TrashItemsRow
+	for rows.Next() {
+		var i TrashItemsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IsFolder,
+			&i.Copying,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

@@ -2,23 +2,26 @@ package user
 
 import (
 	"context"
+	"database/sql"
 	"gost/internal/database"
-	"math"
+	"gost/internal/utils"
 )
 
 type UserServiceInterface interface {
-	ListUsers(ctx context.Context, page, pageSize int) (*PaginatedUsers, error)
+	ListUsers(ctx context.Context, cursor string, pageSize int) (*utils.Page[*User], error)
 }
 
 var _ UserServiceInterface = (*UserService)(nil)
 
 type UserService struct {
 	queries *database.Queries
+	db      *sql.DB
 }
 
-func NewUserService(queries *database.Queries) *UserService {
+func NewUserService(queries *database.Queries, db *sql.DB) *UserService {
 	return &UserService{
 		queries: queries,
+		db:      db,
 	}
 }
 
@@ -42,41 +45,26 @@ func toUserModel(dbUser database.User) *User {
 	return user
 }
 
-func (s *UserService) ListUsers(ctx context.Context, page, pageSize int) (*PaginatedUsers, error) {
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-	// Cap page so the offset still fits in int32
-	page = min(max(page, 1), math.MaxInt32/pageSize)
+// userFields follows the column order of the users table, which SELECT * returns.
+func userFields(u *database.User) []any {
+	return []any{&u.ID, &u.Email, &u.Password, &u.DisplayName, &u.EmailConfirmed, &u.RoleID, &u.CreatedAt, &u.UpdatedAt, &u.DeletedAt}
+}
 
-	offset := (page - 1) * pageSize
-
-	dbUsers, err := s.queries.ListUsersPaginated(ctx, database.ListUsersPaginatedParams{
-		Limit:  int32(pageSize),
-		Offset: int32(offset), //nolint:gosec // page is capped above so the offset fits
-	})
+func (s *UserService) ListUsers(ctx context.Context, cursor string, pageSize int) (*utils.Page[*User], error) {
+	page, err := utils.FetchPage(ctx, s.db, userList, utils.PageQuery[sortField]{
+		Sort:     sortByDate,
+		Desc:     true,
+		Cursor:   cursor,
+		PageSize: pageSize,
+	}, userFields)
 	if err != nil {
 		return nil, err
 	}
 
-	total, err := s.queries.CountUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to domain models
-	users := make([]*User, len(dbUsers))
-	for i, dbUser := range dbUsers {
+	users := make([]*User, len(page.Data))
+	for i, dbUser := range page.Data {
 		users[i] = toUserModel(dbUser)
 	}
 
-	totalPages := (int(total) + pageSize - 1) / pageSize
-
-	return &PaginatedUsers{
-		Data:       users,
-		Page:       page,
-		PageSize:   pageSize,
-		Total:      int(total),
-		TotalPages: totalPages,
-	}, nil
+	return &utils.Page[*User]{Data: users, NextCursor: page.NextCursor}, nil
 }

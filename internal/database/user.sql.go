@@ -19,18 +19,6 @@ func (q *Queries) ConfirmUserEmail(ctx context.Context, id int64) error {
 	return err
 }
 
-const countUsers = `-- name: CountUsers :one
-SELECT COUNT(*) FROM users
-WHERE deleted_at IS NULL
-`
-
-func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countUsers)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password, display_name, role_id)
 VALUES ($1, $2, $3, $4)
@@ -128,51 +116,6 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.DeletedAt,
 	)
 	return i, err
-}
-
-const listUsersPaginated = `-- name: ListUsersPaginated :many
-SELECT id, email, password, display_name, email_confirmed, role_id, created_at, updated_at, deleted_at FROM users
-WHERE deleted_at IS NULL
-ORDER BY created_at DESC
-    LIMIT $1 OFFSET $2
-`
-
-type ListUsersPaginatedParams struct {
-	Limit  int32 `json:"limit"`
-	Offset int32 `json:"offset"`
-}
-
-func (q *Queries) ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error) {
-	rows, err := q.db.QueryContext(ctx, listUsersPaginated, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []User
-	for rows.Next() {
-		var i User
-		if err := rows.Scan(
-			&i.ID,
-			&i.Email,
-			&i.Password,
-			&i.DisplayName,
-			&i.EmailConfirmed,
-			&i.RoleID,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.DeletedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const updateUserPassword = `-- name: UpdateUserPassword :exec

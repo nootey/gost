@@ -8,20 +8,20 @@ import (
 	"gost/internal/domains/auth"
 	"gost/internal/domains/file"
 	"gost/internal/domains/user"
+	"gost/internal/jobs"
 	"gost/internal/store/seeders"
 	"gost/internal/tokens"
 	"path/filepath"
-	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	_ "github.com/lib/pq"
 	"github.com/pressly/goose/v3"
 	"github.com/redis/go-redis/v9"
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/suite"
-	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type TestContainer struct {
@@ -31,6 +31,7 @@ type TestContainer struct {
 	Redis     *miniredis.Miniredis
 	Mailer    *CaptureMailer
 	UploadDir string
+	Logs      *observer.ObservedLogs
 	Services  *Services
 }
 
@@ -73,11 +74,8 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 		postgres.WithDatabase("testdb"),
 		postgres.WithUsername("testuser"),
 		postgres.WithPassword("testpass"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second),
-		),
+		// The ready log can come before the port is mapped, so wait for both.
+		postgres.BasicWaitStrategies(),
 	)
 	s.Require().NoError(err, "failed to start container")
 
@@ -99,8 +97,11 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	// Create queries
 	queries := database.New(db)
 
+	// Tests read the logs of the services through Logs.
+	logCore, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(logCore)
+
 	// Seed basic data (roles, permissions)
-	logger := zap.NewNop()
 	cfg := testConfig()
 	cfg.Upload.Dir = s.T().TempDir()
 	err = seeders.SeedDatabase(s.Ctx, db, logger, cfg, "core")
@@ -112,10 +113,16 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	tokenStore := tokens.NewStore(rdb, cfg.Token)
 	captureMailer := &CaptureMailer{}
 
+	// The client only adds jobs. Tests run them by hand, so they never race a worker.
+	jobWorkers := river.NewWorkers()
+	jobClient, err := jobs.NewClient(db, jobWorkers, logger)
+	s.Require().NoError(err, "failed to create job client")
+
 	// Initialize services
-	userService := user.NewUserService(queries)
+	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
-	fileService := file.NewFileService(queries, cfg.Upload)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, logger)
+	s.Require().NoError(jobs.RegisterWorkers(jobWorkers, fileService), "failed to register job workers")
 
 	s.TC = &TestContainer{
 		Container: container,
@@ -124,6 +131,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 		Redis:     mr,
 		Mailer:    captureMailer,
 		UploadDir: cfg.Upload.Dir,
+		Logs:      logs,
 		Services: &Services{
 			UserService: userService,
 			AuthService: authService,
@@ -148,14 +156,15 @@ func testConfig() *config.Config {
 }
 
 func (s *ServiceIntegrationSuite) SetupTest() {
-	// Truncate users between tests (keep roles)
-	_, err := s.TC.DB.ExecContext(s.Ctx, `TRUNCATE TABLE users RESTART IDENTITY CASCADE`)
-	s.Require().NoError(err, "failed to truncate users table")
+	// Truncate users and jobs between tests (keep roles)
+	_, err := s.TC.DB.ExecContext(s.Ctx, `TRUNCATE TABLE users, river_job RESTART IDENTITY CASCADE`)
+	s.Require().NoError(err, "failed to truncate users and jobs")
 
 	// Clear tokens/sessions and the captured mail between tests.
 	s.TC.Redis.FlushAll()
 	s.TC.Mailer.ConfirmationLink = ""
 	s.TC.Mailer.ResetLink = ""
+	s.TC.Logs.TakeAll()
 }
 
 func (s *ServiceIntegrationSuite) TearDownSuite() {

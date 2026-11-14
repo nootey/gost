@@ -6,22 +6,104 @@ package database
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
-	CountUsers(ctx context.Context) (int64, error)
+	// Adds a copy of each live item in ids to the folder, marked as copying. keys[i] is the new storage key of ids[i],
+	// empty for a folder. A parent_id of 0 means the root.
+	CreateCopyRoots(ctx context.Context, arg CreateCopyRootsParams) ([]int64, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
+	CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error)
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// Deletes a file copy root whose source has no bytes left to copy.
+	DeleteCopyRoot(ctx context.Context, arg DeleteCopyRootParams) error
+	// Deletes the rows in ids. A row outside the root_ids groups stays.
+	DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) (int64, error)
+	// Clears the copying mark, so the copy roots work like any other item.
+	FinishCopies(ctx context.Context, arg FinishCopiesParams) error
+	// A folder that still copies does not count: nothing goes into it until the copy job ends.
+	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
+	GetFile(ctx context.Context, arg GetFileParams) (File, error)
 	GetPermissionByName(ctx context.Context, name string) (Permission, error)
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
-	ListUsersPaginated(ctx context.Context, arg ListUsersPaginatedParams) ([]User, error)
+	// Reports whether any row points to bytes on disk.
+	HasStoredFiles(ctx context.Context) (bool, error)
+	// Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
+	// An empty key marks a folder. A row whose copy folder is gone or in the trash is left out, and so is a row whose
+	// copy is in the folder already: another run of the job added it. It returns the storage keys of the rows it added.
+	InsertCopies(ctx context.Context, arg InsertCopiesParams) ([]sql.NullString, error)
+	// The folders the copy job made right under parent_ids: the next level of the job.
+	ListCopyFolders(ctx context.Context, arg ListCopyFoldersParams) ([]int64, error)
+	// The copy roots in ids that still copy, with the storage key of their source. A root the job finished is not in it.
+	ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error)
+	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
+	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
+	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
+	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
+	// It skips the group roots, because the job starts from them.
+	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)
+	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
+	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
+	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
+	// The names in keys that no row has as its storage key.
+	ListOrphanKeys(ctx context.Context, keys []string) ([]string, error)
+	// Up to batch_size rows of the root_ids groups with no rows under them. The parent_id foreign key blocks
+	// the delete of a folder that still has rows under it, so the purge deletes from the bottom up.
+	ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error)
+	// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
+	ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error)
+	// The copy roots marked more than retry_hours ago, per user. Their copy job can have failed for good.
+	ListStaleCopies(ctx context.Context, retryHours int32) ([]ListStaleCopiesRow, error)
+	// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.
+	ListStalePurges(ctx context.Context, retryHours int32) ([]ListStalePurgesRow, error)
+	// The names in names that a live item in the folder already has.
+	ListTakenNames(ctx context.Context, arg ListTakenNamesParams) ([]string, error)
+	// The live items in the folders whose name is one of names. The caller pairs each folder with its own names.
+	// COALESCE matches the unique name index, so each folder and name is one index lookup.
+	ListTakenNamesInFolders(ctx context.Context, arg ListTakenNamesInFoldersParams) ([]ListTakenNamesInFoldersRow, error)
+	// Locks the deleted items in ids. new_parent_id is the old folder if it is live or comes back with this restore, else 0 (Home).
+	// An item marked for a permanent delete is left out.
+	ListTrashRoots(ctx context.Context, arg ListTrashRootsParams) ([]ListTrashRootsRow, error)
+	// Up to batch_size live rows right under the sources of the copy folders in copy_ids that have no copy in them yet.
+	// A copy folder in the trash gets nothing more. A copy that is not done yet is left out, and so are the rows in skip_ids.
+	ListUncopiedChildren(ctx context.Context, arg ListUncopiedChildrenParams) ([]ListUncopiedChildrenRow, error)
+	// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
+	ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error)
+	// Locks the live items in ids, so a rename cannot change a name before a move or a copy checks it.
+	LockLiveItems(ctx context.Context, arg LockLiveItemsParams) ([]LockLiveItemsRow, error)
+	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
+	LockUserTree(ctx context.Context, userID int64) error
+	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
+	MoveItems(ctx context.Context, arg MoveItemsParams) error
+	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
+	// Else the parent_id foreign key blocks the delete of the folder they were in.
+	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
+	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
+	// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
+	RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error)
+	// Marks the deleted items in ids for a permanent delete. The trash view and restore skip a marked group.
+	RequestPurge(ctx context.Context, arg RequestPurgeParams) (int64, error)
+	// Walks folder names down from the root and returns each folder it finds, root first.
+	// Fewer rows than names means the path does not exist. The walk stops at a folder that still copies.
+	ResolveFolderPath(ctx context.Context, arg ResolveFolderPathParams) ([]ResolveFolderPathRow, error)
+	// Brings back the rows under each deleted item. They keep their names, because nothing new can go into a folder in the trash.
+	RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error
+	// parent_ids[i] and names[i] belong to ids[i].
+	RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error
+	// Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
+	// still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
+	TrashChildren(ctx context.Context, arg TrashChildrenParams) (int64, error)
+	// Marks only the items. Each item roots its own group. A job marks the rows under the folders (TrashChildren).
+	// It marks an item that still copies too, and the caller undoes the delete.
+	TrashItems(ctx context.Context, arg TrashItemsParams) ([]TrashItemsRow, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 }
 

@@ -3,11 +3,14 @@
 <template>
     <span class="flex items-center gap-2.5">
         <span class="grid size-8 place-items-center rounded-lg bg-primary text-primary-contrast shadow-sm">
-            <svg viewBox="0 0 24 24" class="size-5" aria-hidden="true">
+            <svg viewBox="0 0 24 24" class="size-5" fill="currentColor" aria-hidden="true">
                 <path
-                    fill="currentColor"
+                    d="M9.5 2h-4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V8.25h-2.75a2.25 2.25 0 0 1-2.25-2.25V2Z"
+                />
+                <path d="M10.75 2.6l3.15 4.25h-2.15a1 1 0 0 1-1-1Z" />
+                <path
                     fill-rule="evenodd"
-                    d="M12 2.5c-4.4 0-7.5 3.3-7.5 7.6v10.4c0 .7.8 1.1 1.4.7l1.6-1.2 1.9 1.5c.4.3.9.3 1.2 0L12 20l1.4 1.5c.3.3.8.3 1.2 0l1.9-1.5 1.6 1.2c.6.4 1.4 0 1.4-.7V10.1c0-4.3-3.1-7.6-7.5-7.6ZM10.9 10.5a1.4 1.4 0 1 1-2.8 0 1.4 1.4 0 0 1 2.8 0Zm5 0a1.4 1.4 0 1 1-2.8 0 1.4 1.4 0 0 1 2.8 0Z"
+                    d="M15.75 4.06A4.5 4.5 0 0 1 21 8.5v8a1.5 1 0 0 1-3 0 1.5 1 0 0 0-2.25.87ZM16.45 8.9a.75 1.05 0 1 0 1.5 0 .75 1.05 0 1 0-1.5 0Zm2.05 0a.75 1.05 0 1 0 1.5 0 .75 1.05 0 1 0-1.5 0Z"
                 />
             </svg>
         </span>

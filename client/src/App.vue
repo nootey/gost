@@ -18,6 +18,8 @@ const requiresAuthView = computed<boolean>(() => route.matched.some((r) => r.met
 const hideNavigation = computed<boolean>(() => route.matched.some((r) => r.meta.hideNavigation));
 const showShell = computed<boolean>(() => isAuthenticated.value && isInitialized.value && !hideNavigation.value);
 
+const SHELL_WIDTH = "mx-auto w-full px-4 lg:w-3/4";
+
 onMounted(async () => {
     if (isAuthenticated.value) {
         await authStore.init();
@@ -59,10 +61,15 @@ onMounted(async () => {
     </ConfirmDialog>
 
     <div class="flex min-h-screen flex-col">
-        <AppHeader v-if="showShell" />
+        <header v-if="showShell" class="sticky top-0 z-30 border-b border-edge bg-page/80 backdrop-blur">
+            <AppHeader :class="SHELL_WIDTH" />
+        </header>
         <main class="flex flex-1 flex-col">
             <div v-if="requiresAuthView && !isInitialized" class="flex flex-1 items-center justify-center">
                 <i class="pi pi-spin pi-spinner text-2xl text-fg-muted" />
+            </div>
+            <div v-else-if="showShell" :class="[SHELL_WIDTH, 'py-10']">
+                <router-view />
             </div>
             <router-view v-else />
         </main>

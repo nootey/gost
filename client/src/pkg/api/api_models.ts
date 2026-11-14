@@ -17,3 +17,15 @@ export type RequestOptions = {
     headers?: Record<string, string>;
     responseType?: "blob";
 };
+
+// A plain success message, the same as Go apperr.SuccessResponse.
+export interface SuccessResponse {
+    title: string;
+    message: string;
+}
+
+// One page of a list. next_cursor is null on the last page.
+export interface Page<T> {
+    data: T[];
+    next_cursor: string | null;
+}
