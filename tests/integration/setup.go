@@ -121,7 +121,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, captureMailer, cfg)
-	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, logger)
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, cfg.Download, logger)
 	s.Require().NoError(jobs.RegisterWorkers(jobWorkers, fileService), "failed to register job workers")
 
 	s.TC = &TestContainer{
@@ -152,6 +152,8 @@ func testConfig() *config.Config {
 	cfg.Token.ResetTTLMinutes = 60
 	cfg.Upload.MaxSizeMB = 1
 	cfg.Upload.TimeoutSeconds = 60
+	cfg.Download.TimeoutSeconds = 60
+	cfg.Download.MaxZipMB = 1
 	return cfg
 }
 

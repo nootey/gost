@@ -378,3 +378,11 @@ UPDATE files
 SET copy_requested_at = NULL
 WHERE user_id = sqlc.arg(user_id)
   AND id = ANY(sqlc.arg(ids)::bigint[]);
+
+-- name: ListLiveItems :many
+-- The live items in ids, without locks. A zip request checks them, and the zip job reads them again when it starts.
+SELECT * FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND id = ANY(sqlc.arg(ids)::bigint[])
+  AND trashed_at IS NULL
+ORDER BY id;

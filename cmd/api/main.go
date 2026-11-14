@@ -127,7 +127,7 @@ func main() {
 	// Initialize services
 	userService := user.NewUserService(queries, db)
 	authService := auth.NewAuthService(queries, tokenStore, mail, cfg)
-	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, logger.Named("files"))
+	fileService := file.NewFileService(queries, db, jobClient, cfg.Upload, cfg.Download, logger.Named("files"))
 	// Add more services as needed
 
 	if err := jobs.RegisterWorkers(jobWorkers, fileService); err != nil {
@@ -138,7 +138,7 @@ func main() {
 	responder := apperr.NewResponder(logger)
 	userHandler := user.NewUserHandler(userService, responder)
 	authHandler := auth.NewAuthHandler(authService, authMiddleware, responder, logger)
-	fileHandler := file.NewFileHandler(fileService, cfg.Upload, responder)
+	fileHandler := file.NewFileHandler(fileService, cfg.Upload, cfg.Download, responder)
 	healthHandler := health.NewHealthHandler(healthSvc, responder)
 	// Add more handlers as needed
 
@@ -193,9 +193,10 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 		MaxAge:           300,
 	}))
 
-	// Timeout is set per group, because uploads need a longer one than the rest.
+	// Timeout is set per group, because uploads and downloads need a longer one than the rest.
 	requestTimeout := middleware.Timeout(60 * time.Second)
 	uploadTimeout := middleware.Timeout(time.Duration(cfg.Upload.TimeoutSeconds) * time.Second)
+	downloadTimeout := middleware.Timeout(time.Duration(cfg.Download.TimeoutSeconds) * time.Second)
 
 	r.Group(func(r chi.Router) {
 		r.Use(requestTimeout)
@@ -228,6 +229,8 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Post("/trash", h.File.Trash)
 				r.Post("/trash/restore", h.File.Restore)
 				r.Post("/trash/purge", h.File.Purge)
+				r.Post("/downloads", h.File.RequestZip)
+				r.Get("/downloads/{id}", h.File.GetDownload)
 				// Mount more protected handlers as needed
 			})
 		})
@@ -238,6 +241,15 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 			r.Use(authMiddleware.WebClientAuthentication)
 
 			r.Post("/files", h.File.Upload)
+		})
+
+		// Protected download routes
+		r.Group(func(r chi.Router) {
+			r.Use(downloadTimeout)
+			r.Use(authMiddleware.WebClientAuthentication)
+
+			r.Get("/files/{id}/download", h.File.Download)
+			r.Get("/downloads/{id}/file", h.File.DownloadZip)
 		})
 	})
 

@@ -1,12 +1,15 @@
 package file
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"gost/config"
 	"gost/internal/apperr"
 	"gost/internal/middleware"
 	"gost/internal/utils"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,16 +21,18 @@ const multipartOverhead = 1 << 20
 var errInvalidBody = apperr.New(apperr.KindInvalid, "invalid request body")
 
 type FileHandler struct {
-	service FileServiceInterface
-	cfg     config.UploadConfig
-	resp    *apperr.Responder
+	service  FileServiceInterface
+	cfg      config.UploadConfig
+	download config.DownloadConfig
+	resp     *apperr.Responder
 }
 
-func NewFileHandler(srv FileServiceInterface, cfg config.UploadConfig, resp *apperr.Responder) *FileHandler {
+func NewFileHandler(srv FileServiceInterface, cfg config.UploadConfig, download config.DownloadConfig, resp *apperr.Responder) *FileHandler {
 	return &FileHandler{
-		service: srv,
-		cfg:     cfg,
-		resp:    resp,
+		service:  srv,
+		cfg:      cfg,
+		download: download,
+		resp:     resp,
 	}
 }
 
@@ -141,6 +146,109 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: f.Name + " uploaded."},
 		File:            f,
 	})
+}
+
+// Download sends one file.
+func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
+	h.serveContent(w, r, h.service.OpenFile)
+}
+
+// DownloadZip sends a ready zip.
+func (h *FileHandler) DownloadZip(w http.ResponseWriter, r *http.Request) {
+	h.serveContent(w, r, h.service.OpenZip)
+}
+
+// RequestZip answers once the download row and its job are in place. The client asks GetDownload until the zip is ready.
+func (h *FileHandler) RequestZip(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	dl, err := h.service.RequestZip(r.Context(), userID, req.IDs)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusAccepted, DownloadResponse{
+		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: "Preparing " + dl.Name + "."},
+		Download:        dl,
+	})
+}
+
+func (h *FileHandler) GetDownload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	dl, err := h.service.GetDownload(r.Context(), userID, id)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, dl)
+}
+
+// serveContent sends the bytes open returns for the id in the URL. ServeContent answers range requests and the
+// If-None-Match and If-Modified-Since checks. The bytes come as an attachment with nosniff, so a user's HTML file
+// never runs as a page on this origin.
+func (h *FileHandler) serveContent(
+	w http.ResponseWriter,
+	r *http.Request,
+	open func(ctx context.Context, userID, id int64) (*FileContent, error),
+) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	// The server write timeout fits small answers. A big file on a slow link needs much longer.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(h.download.TimeoutSeconds) * time.Second))
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	content, err := open(r.Context(), userID, id)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+	defer func() { _ = content.Content.Close() }()
+
+	header := w.Header()
+	header.Set("Content-Type", cmp.Or(content.ContentType, "application/octet-stream"))
+	header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": content.Name}))
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("ETag", content.ETag)
+	// The browser can keep the bytes, but asks first, so it never shows a deleted file from its cache.
+	header.Set("Cache-Control", "private, no-cache")
+	http.ServeContent(w, r, content.Name, content.ModTime, content.Content)
 }
 
 func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {

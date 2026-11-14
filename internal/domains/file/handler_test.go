@@ -41,7 +41,7 @@ type FileHandlerTestSuite struct {
 func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.mockService = mocks.NewMockFileServiceInterface(suite.T())
 	cfg := config.UploadConfig{Dir: suite.T().TempDir(), MaxSizeMB: 1, TimeoutSeconds: 60}
-	suite.handler = file.NewFileHandler(suite.mockService, cfg, apperr.NewResponder(zap.NewNop()))
+	suite.handler = file.NewFileHandler(suite.mockService, cfg, config.DownloadConfig{TimeoutSeconds: 60}, apperr.NewResponder(zap.NewNop()))
 
 	suite.router = chi.NewRouter()
 	suite.router.Get("/files", suite.handler.List)
@@ -49,12 +49,16 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/folders", suite.handler.CreateFolder)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
+	suite.router.Get("/files/{id}/download", suite.handler.Download)
 	suite.router.Post("/files/move", suite.handler.Move)
 	suite.router.Post("/files/copy", suite.handler.Copy)
 	suite.router.Get("/trash", suite.handler.ListTrash)
 	suite.router.Post("/trash", suite.handler.Trash)
 	suite.router.Post("/trash/restore", suite.handler.Restore)
 	suite.router.Post("/trash/purge", suite.handler.Purge)
+	suite.router.Post("/downloads", suite.handler.RequestZip)
+	suite.router.Get("/downloads/{id}", suite.handler.GetDownload)
+	suite.router.Get("/downloads/{id}/file", suite.handler.DownloadZip)
 }
 
 func TestFileHandlerTestSuite(t *testing.T) {
@@ -538,6 +542,263 @@ func (suite *FileHandlerTestSuite) TestRename_ServiceError() {
 
 	suite.Equal(http.StatusConflict, w.Code)
 	suite.Equal("an item with this name already exists", suite.errorMessage(w))
+}
+
+// trackedContent is file bytes that remember a Close.
+type trackedContent struct {
+	*bytes.Reader
+	closed bool
+}
+
+func (c *trackedContent) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (suite *FileHandlerTestSuite) download(id string, header http.Header, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/files/"+id+"/download", nil)
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+// expectOpen makes OpenFile return name with "hello world" as its bytes, once.
+func (suite *FileHandlerTestSuite) expectOpen(name string) *trackedContent {
+	content := &trackedContent{Reader: bytes.NewReader([]byte("hello world"))}
+	suite.mockService.EXPECT().
+		OpenFile(mock.Anything, testUserID, int64(5)).
+		Return(&file.FileContent{
+			Name:        name,
+			ContentType: "text/plain; charset=utf-8",
+			ModTime:     time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			ETag:        `"abc123"`,
+			Content:     content,
+		}, nil).
+		Once()
+	return content
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_Success() {
+	content := suite.expectOpen("notes.txt")
+
+	w := suite.download("5", nil, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("hello world", w.Body.String())
+	suite.Equal("text/plain; charset=utf-8", w.Header().Get("Content-Type"))
+	suite.Equal("attachment; filename=notes.txt", w.Header().Get("Content-Disposition"))
+	suite.Equal("nosniff", w.Header().Get("X-Content-Type-Options"))
+	suite.Equal(`"abc123"`, w.Header().Get("ETag"))
+	suite.Equal("private, no-cache", w.Header().Get("Cache-Control"))
+	suite.Equal("bytes", w.Header().Get("Accept-Ranges"))
+	suite.Equal("11", w.Header().Get("Content-Length"))
+	suite.True(content.closed)
+}
+
+// A name that is not ASCII goes in the RFC 2231 form, which browsers read as UTF-8.
+func (suite *FileHandlerTestSuite) TestDownload_NameNotASCII() {
+	suite.expectOpen("poročilo 1.txt")
+
+	w := suite.download("5", nil, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("attachment; filename*=utf-8''poro%C4%8Dilo%201.txt", w.Header().Get("Content-Disposition"))
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_Range() {
+	suite.expectOpen("notes.txt")
+
+	w := suite.download("5", http.Header{"Range": {"bytes=6-10"}}, true)
+
+	suite.Equal(http.StatusPartialContent, w.Code)
+	suite.Equal("world", w.Body.String())
+	suite.Equal("bytes 6-10/11", w.Header().Get("Content-Range"))
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_NotModified() {
+	suite.expectOpen("notes.txt")
+
+	w := suite.download("5", http.Header{"If-None-Match": {`"abc123"`}}, true)
+
+	suite.Equal(http.StatusNotModified, w.Code)
+	suite.Empty(w.Body.String())
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_InvalidID() {
+	for _, id := range []string{"abc", "0", "-4"} {
+		w := suite.download(id, nil, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, id)
+		suite.Equal("invalid id", suite.errorMessage(w), id)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_Unauthenticated() {
+	w := suite.download("5", nil, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestDownload_ServiceError() {
+	suite.mockService.EXPECT().
+		OpenFile(mock.Anything, testUserID, int64(5)).
+		Return(nil, apperr.New(apperr.KindValidation, "a folder downloads as a zip")).
+		Once()
+
+	w := suite.download("5", nil, true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("a folder downloads as a zip", suite.errorMessage(w))
+	suite.Empty(w.Header().Get("Content-Disposition"))
+}
+
+func (suite *FileHandlerTestSuite) getPath(path string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestRequestZip_Success() {
+	suite.mockService.EXPECT().
+		RequestZip(mock.Anything, testUserID, []int64{5, 3}).
+		Return(&file.Download{ID: 9, Name: "Docs.zip", State: file.DownloadBuilding}, nil).
+		Once()
+
+	w := suite.postItems("/downloads", `{"ids":[5,3]}`, true)
+
+	suite.Equal(http.StatusAccepted, w.Code)
+	var resp file.DownloadResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Preparing Docs.zip.", resp.Message)
+	suite.Require().NotNil(resp.Download)
+	suite.Equal(int64(9), resp.Download.ID)
+	suite.Equal(file.DownloadBuilding, resp.Download.State)
+}
+
+func (suite *FileHandlerTestSuite) TestRequestZip_InvalidIDs() {
+	for _, body := range []string{`{"ids":[]}`, `{}`, `{"ids":[0]}`, `{"ids":[-1]}`} {
+		w := suite.postItems("/downloads", body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid ids", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestRequestZip_InvalidBody() {
+	w := suite.postItems("/downloads", `not json`, true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid request body", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestRequestZip_Unauthenticated() {
+	w := suite.postItems("/downloads", `{"ids":[5]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestRequestZip_ServiceError() {
+	suite.mockService.EXPECT().
+		RequestZip(mock.Anything, testUserID, []int64{5}).
+		Return(nil, apperr.New(apperr.KindConflict, "wait for your other downloads to finish")).
+		Once()
+
+	w := suite.postItems("/downloads", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusConflict, w.Code)
+	suite.Equal("wait for your other downloads to finish", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestGetDownload_Success() {
+	suite.mockService.EXPECT().
+		GetDownload(mock.Anything, testUserID, int64(9)).
+		Return(&file.Download{ID: 9, Name: "Docs.zip", State: file.DownloadFailed, Error: "the zip could not be built"}, nil).
+		Once()
+
+	w := suite.getPath("/downloads/9", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.Download
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal(file.DownloadFailed, resp.State)
+	suite.Equal("the zip could not be built", resp.Error)
+}
+
+func (suite *FileHandlerTestSuite) TestGetDownload_InvalidID() {
+	w := suite.getPath("/downloads/abc", true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid id", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestGetDownload_Unauthenticated() {
+	w := suite.getPath("/downloads/9", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestGetDownload_ServiceError() {
+	suite.mockService.EXPECT().
+		GetDownload(mock.Anything, testUserID, int64(9)).
+		Return(nil, apperr.New(apperr.KindNotFound, "download not found")).
+		Once()
+
+	w := suite.getPath("/downloads/9", true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("download not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestDownloadZip_Success() {
+	content := &trackedContent{Reader: bytes.NewReader([]byte("PK zip"))}
+	suite.mockService.EXPECT().
+		OpenZip(mock.Anything, testUserID, int64(9)).
+		Return(&file.FileContent{
+			Name:        "Docs.zip",
+			ContentType: "application/zip",
+			ModTime:     time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			ETag:        `"zip123"`,
+			Content:     content,
+		}, nil).
+		Once()
+
+	w := suite.getPath("/downloads/9/file", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("PK zip", w.Body.String())
+	suite.Equal("application/zip", w.Header().Get("Content-Type"))
+	suite.Equal("attachment; filename=Docs.zip", w.Header().Get("Content-Disposition"))
+	suite.Equal("nosniff", w.Header().Get("X-Content-Type-Options"))
+	suite.Equal(`"zip123"`, w.Header().Get("ETag"))
+	suite.True(content.closed)
+}
+
+func (suite *FileHandlerTestSuite) TestDownloadZip_NotReady() {
+	suite.mockService.EXPECT().
+		OpenZip(mock.Anything, testUserID, int64(9)).
+		Return(nil, apperr.New(apperr.KindConflict, "the zip is not ready yet")).
+		Once()
+
+	w := suite.getPath("/downloads/9/file", true)
+
+	suite.Equal(http.StatusConflict, w.Code)
+	suite.Equal("the zip is not ready yet", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestDownloadZip_Unauthenticated() {
+	w := suite.getPath("/downloads/9/file", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
 func (suite *FileHandlerTestSuite) postItems(path, body string, authenticated bool) *httptest.ResponseRecorder {

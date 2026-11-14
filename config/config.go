@@ -21,6 +21,7 @@ type Config struct {
 	Token     TokenConfig     `mapstructure:"token"`
 	WebClient WebClientConfig `mapstructure:"web_client"`
 	Upload    UploadConfig    `mapstructure:"upload"`
+	Download  DownloadConfig  `mapstructure:"download"`
 }
 
 type ServerConfig struct {
@@ -90,6 +91,13 @@ type UploadConfig struct {
 	TimeoutSeconds int    `mapstructure:"timeout_seconds" validate:"gt=0"`
 }
 
+type DownloadConfig struct {
+	// TimeoutSeconds is how long one download request may take. A big file on a slow link needs much longer than other requests.
+	TimeoutSeconds int `mapstructure:"timeout_seconds" validate:"gt=0"`
+	// MaxZipMB caps one zip of a folder or many items. A zip takes as much disk space again as the files in it.
+	MaxZipMB int64 `mapstructure:"max_zip_mb" validate:"gt=0"`
+}
+
 var cfg *Config
 
 // setDefaults doubles as the key registry: AutomaticEnv only resolves keys viper
@@ -139,6 +147,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("upload.dir", "./storage/uploads")
 	v.SetDefault("upload.max_size_mb", 50)
 	v.SetDefault("upload.timeout_seconds", 300)
+
+	v.SetDefault("download.timeout_seconds", 3600)
+	v.SetDefault("download.max_zip_mb", 10240)
 }
 
 func Load() error {

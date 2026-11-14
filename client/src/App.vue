@@ -3,11 +3,13 @@ import { computed, onMounted } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import { useAuthStore } from "./pkg/stores/auth_store.ts";
+import { useDownloadStore } from "./pkg/stores/download_store.ts";
 import { useThemeStore } from "./pkg/stores/theme_store.ts";
 import AppHeader from "./pkg/components/AppHeader.vue";
 
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
+const downloadStore = useDownloadStore();
 const route = useRoute();
 
 themeStore.initializeTheme();
@@ -20,9 +22,11 @@ const showShell = computed<boolean>(() => isAuthenticated.value && isInitialized
 
 const SHELL_WIDTH = "mx-auto w-full px-4 lg:w-3/4";
 
+// The zips asked for before a reload are still on the way, so the wait goes on.
 onMounted(async () => {
     if (isAuthenticated.value) {
         await authStore.init();
+        downloadStore.resume();
     }
 });
 </script>

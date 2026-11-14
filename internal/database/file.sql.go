@@ -503,6 +503,58 @@ func (q *Queries) ListGroupFolders(ctx context.Context, arg ListGroupFoldersPara
 	return items, nil
 }
 
+const listLiveItems = `-- name: ListLiveItems :many
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at FROM files
+WHERE user_id = $1
+  AND id = ANY($2::bigint[])
+  AND trashed_at IS NULL
+ORDER BY id
+`
+
+type ListLiveItemsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+// The live items in ids, without locks. A zip request checks them, and the zip job reads them again when it starts.
+func (q *Queries) ListLiveItems(ctx context.Context, arg ListLiveItemsParams) ([]File, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveItems, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ParentID,
+			&i.TrashedAt,
+			&i.TrashRootID,
+			&i.PurgeRequestedAt,
+			&i.CopiedFromID,
+			&i.CopyRequestedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNamesByParentAndPrefix = `-- name: ListNamesByParentAndPrefix :many
 SELECT name FROM files
 WHERE user_id = $1

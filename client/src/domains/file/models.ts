@@ -78,6 +78,25 @@ export interface PathEntry {
     name: string;
 }
 
+// building until the zip job ends, then ready or failed. error says why a failed zip failed.
+export type DownloadState = "building" | "ready" | "failed";
+
+// A zip of a folder or many items. A job builds it, and the download store waits for it.
+export interface Download {
+    id: number;
+    name: string;
+    state: DownloadState;
+    error?: string;
+    size_bytes: number;
+    created_at: string;
+}
+
+export interface DownloadResponse {
+    title: string;
+    message: string;
+    download: Download;
+}
+
 // A folder and its parents, root first. The root itself is not in it.
 export interface FolderPath {
     path: PathEntry[];

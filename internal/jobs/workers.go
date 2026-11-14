@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 
 	"github.com/riverqueue/river"
 )
@@ -42,6 +43,20 @@ func (CopyItemsArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}}
 }
 
+// BuildZipArgs names the download a zip request made. The job builds its zip.
+type BuildZipArgs struct {
+	UserID     int64 `json:"user_id"`
+	DownloadID int64 `json:"download_id"`
+}
+
+func (BuildZipArgs) Kind() string { return "build_zip" }
+
+// InsertOpts puts zips on their own queue. A zip that fails three times will not work on a fourth, and the client
+// waits on it, so it gives up sooner than the other jobs.
+func (BuildZipArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueueDownloads, MaxAttempts: 3}
+}
+
 // SweepTrashArgs starts the trash sweep. It runs on a schedule, see NewClient.
 type SweepTrashArgs struct{}
 
@@ -59,6 +74,16 @@ func (SweepCopiesArgs) Kind() string { return "sweep_copies" }
 
 // InsertOpts runs a sweep once. The next run on the schedule is the retry.
 func (SweepCopiesArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1}
+}
+
+// SweepDownloadsArgs starts the download sweep. It runs on a schedule, see NewClient.
+type SweepDownloadsArgs struct{}
+
+func (SweepDownloadsArgs) Kind() string { return "sweep_downloads" }
+
+// InsertOpts runs a sweep once. The next run on the schedule is the retry.
+func (SweepDownloadsArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1}
 }
 
@@ -84,12 +109,21 @@ type itemCopier interface {
 	CopyItems(ctx context.Context, userID int64, rootIDs []int64) error
 }
 
+type zipBuilder interface {
+	BuildZip(ctx context.Context, userID, downloadID int64) error
+	FailZip(ctx context.Context, userID, downloadID int64) error
+}
+
 type trashSweeper interface {
 	SweepTrash(ctx context.Context) error
 }
 
 type copySweeper interface {
 	SweepCopies(ctx context.Context) error
+}
+
+type downloadSweeper interface {
+	SweepDownloads(ctx context.Context) error
 }
 
 type orphanSweeper interface {
@@ -101,8 +135,10 @@ type fileJobs interface {
 	subtreeTrasher
 	groupPurger
 	itemCopier
+	zipBuilder
 	trashSweeper
 	copySweeper
+	downloadSweeper
 	orphanSweeper
 }
 
@@ -145,6 +181,25 @@ func (w *CopyItemsWorker) Work(ctx context.Context, job *river.Job[CopyItemsArgs
 	return w.files.CopyItems(ctx, job.Args.UserID, job.Args.RootIDs)
 }
 
+type BuildZipWorker struct {
+	river.WorkerDefaults[BuildZipArgs]
+	files zipBuilder
+}
+
+func NewBuildZipWorker(files zipBuilder) *BuildZipWorker {
+	return &BuildZipWorker{files: files}
+}
+
+// Work marks the download failed after the last attempt, so the client stops waiting for it. The run context can be
+// over by then, so that write does not use its deadline.
+func (w *BuildZipWorker) Work(ctx context.Context, job *river.Job[BuildZipArgs]) error {
+	err := w.files.BuildZip(ctx, job.Args.UserID, job.Args.DownloadID)
+	if err != nil && job.Attempt >= job.MaxAttempts {
+		return errors.Join(err, w.files.FailZip(context.WithoutCancel(ctx), job.Args.UserID, job.Args.DownloadID))
+	}
+	return err
+}
+
 type SweepTrashWorker struct {
 	river.WorkerDefaults[SweepTrashArgs]
 	files trashSweeper
@@ -171,6 +226,19 @@ func (w *SweepCopiesWorker) Work(ctx context.Context, _ *river.Job[SweepCopiesAr
 	return w.files.SweepCopies(ctx)
 }
 
+type SweepDownloadsWorker struct {
+	river.WorkerDefaults[SweepDownloadsArgs]
+	files downloadSweeper
+}
+
+func NewSweepDownloadsWorker(files downloadSweeper) *SweepDownloadsWorker {
+	return &SweepDownloadsWorker{files: files}
+}
+
+func (w *SweepDownloadsWorker) Work(ctx context.Context, _ *river.Job[SweepDownloadsArgs]) error {
+	return w.files.SweepDownloads(ctx)
+}
+
 type SweepOrphansWorker struct {
 	river.WorkerDefaults[SweepOrphansArgs]
 	files orphanSweeper
@@ -194,10 +262,16 @@ func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewCopyItemsWorker(files)); err != nil {
 		return err
 	}
+	if err := river.AddWorkerSafely(workers, NewBuildZipWorker(files)); err != nil {
+		return err
+	}
 	if err := river.AddWorkerSafely(workers, NewSweepTrashWorker(files)); err != nil {
 		return err
 	}
 	if err := river.AddWorkerSafely(workers, NewSweepCopiesWorker(files)); err != nil {
+		return err
+	}
+	if err := river.AddWorkerSafely(workers, NewSweepDownloadsWorker(files)); err != nil {
 		return err
 	}
 	return river.AddWorkerSafely(workers, NewSweepOrphansWorker(files))

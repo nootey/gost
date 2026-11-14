@@ -89,10 +89,21 @@ export const useToastStore = defineStore("toast", () => {
         }
     };
 
+    const createErrorToast = (title: string, msg: string) => {
+        toast.add({
+            severity: "error",
+            summary: title,
+            detail: msg,
+            life: isMobile ? 2500 : 5000,
+            group,
+        });
+    };
+
     return {
         errorResponseToast,
         successResponseToast,
         infoResponseToast,
         createInfoToast,
+        createErrorToast,
     };
 });

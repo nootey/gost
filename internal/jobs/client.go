@@ -19,9 +19,19 @@ const (
 	softStopTimeout = 5 * time.Second
 	stopTimeout     = 10 * time.Second
 
-	sweepTrashInterval   = time.Hour
-	sweepCopiesInterval  = time.Hour
-	sweepOrphansInterval = 24 * time.Hour
+	sweepTrashInterval     = time.Hour
+	sweepCopiesInterval    = time.Hour
+	sweepDownloadsInterval = time.Hour
+	sweepOrphansInterval   = 24 * time.Hour
+
+	// jobTimeout is how long one run may take. River's default is 1 minute, which cuts a big trash, purge, copy or zip.
+	// It must stay under River's stuck-job rescue (1 hour), or River starts a second run next to the first.
+	jobTimeout = 50 * time.Minute
+
+	// QueueDownloads holds the zip jobs. A zip of a big folder runs for minutes, so it gets its own queue and does not
+	// hold the workers that trash, purge and copy use. One worker also keeps two zips from fighting over the disk.
+	QueueDownloads     = "downloads"
+	maxDownloadWorkers = 1
 )
 
 // InserterInterface adds a job inside the caller's transaction, so a rollback drops the job too.
@@ -31,11 +41,16 @@ type InserterInterface interface {
 }
 
 // NewClient builds a River client on the app's database/sql pool. This driver has no LISTEN/NOTIFY,
-// so River polls for new jobs, once a second by default. The trash, copy and orphan sweeps run at start, then on their intervals.
+// so River polls for new jobs, once a second by default. The trash, copy, download and orphan sweeps run at start,
+// then on their intervals.
 func NewClient(db *sql.DB, workers *river.Workers, logger *zap.Logger) (*river.Client[*sql.Tx], error) {
 	return river.NewClient(riverdatabasesql.New(db), &river.Config{
-		Workers:         workers,
-		Queues:          map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: maxWorkers}},
+		Workers: workers,
+		Queues: map[string]river.QueueConfig{
+			river.QueueDefault: {MaxWorkers: maxWorkers},
+			QueueDownloads:     {MaxWorkers: maxDownloadWorkers},
+		},
+		JobTimeout:      jobTimeout,
 		SoftStopTimeout: softStopTimeout,
 		Middleware:      []rivertype.Middleware{logRuns(logger)},
 		PeriodicJobs: []*river.PeriodicJob{
@@ -44,6 +59,9 @@ func NewClient(db *sql.DB, workers *river.Workers, logger *zap.Logger) (*river.C
 			}, &river.PeriodicJobOpts{RunOnStart: true}),
 			river.NewPeriodicJob(river.PeriodicInterval(sweepCopiesInterval), func() (river.JobArgs, *river.InsertOpts) {
 				return SweepCopiesArgs{}, nil
+			}, &river.PeriodicJobOpts{RunOnStart: true}),
+			river.NewPeriodicJob(river.PeriodicInterval(sweepDownloadsInterval), func() (river.JobArgs, *river.InsertOpts) {
+				return SweepDownloadsArgs{}, nil
 			}, &river.PeriodicJobOpts{RunOnStart: true}),
 			river.NewPeriodicJob(river.PeriodicInterval(sweepOrphansInterval), func() (river.JobArgs, *river.InsertOpts) {
 				return SweepOrphansArgs{}, nil
