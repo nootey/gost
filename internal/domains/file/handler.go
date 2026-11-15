@@ -550,6 +550,57 @@ func (h *FileHandler) ListTrash(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusOK, result)
 }
 
+// GetItem sends one live item, for its details.
+func (h *FileHandler) GetItem(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	f, err := h.service.GetItem(r.Context(), userID, id)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, f)
+}
+
+// ListActivity sends one page of an item's audit log, newest first.
+func (h *FileHandler) ListActivity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.ListActivity(r.Context(), userID, id, ActivityQuery{
+		Cursor:   r.URL.Query().Get("cursor"),
+		PageSize: pageSize,
+	})
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
+}
+
 func (h *FileHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

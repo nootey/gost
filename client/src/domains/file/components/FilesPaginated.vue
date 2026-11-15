@@ -12,6 +12,7 @@ import { itemView } from "../../../pkg/utils/item_view.ts";
 import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
+import DetailsDialog from "./DetailsDialog.vue";
 import RenameDialog from "./RenameDialog.vue";
 import type {
     DataTablePageEvent,
@@ -33,6 +34,7 @@ const MENU_ITEMS: MenuItem[] = [
     { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
     { label: "Copy", icon: "pi pi-copy", shortcut: "Ctrl+C", command: copyMenuTargets },
     { label: "Download", icon: "pi pi-download", command: downloadMenuTargets },
+    { label: "Details", icon: "pi pi-info-circle", command: openDetails, disabled: notOneTarget },
     { label: "Add to favorites", icon: "pi pi-star", command: addFavorites, visible: () => !allFavorites() },
     { label: "Remove from favorites", icon: "pi pi-star-fill", command: removeFavorites, visible: allFavorites },
     { separator: true },
@@ -92,6 +94,9 @@ const clipboardLabel = computed<string>(() => {
 
 const renameVisible = ref<boolean>(false);
 const renameTarget = ref<StoredFile | null>(null);
+
+const detailsVisible = ref<boolean>(false);
+const detailsTarget = ref<StoredFile | null>(null);
 
 const pagerTotal = computed<number>(() => total(files.value.length));
 
@@ -233,6 +238,11 @@ async function changeItems(change: (form: ItemsForm) => Promise<SuccessResponse>
         toastStore.errorResponseToast(error);
     }
     await getData();
+}
+
+function openDetails(): void {
+    detailsTarget.value = menuTarget.value ?? null;
+    detailsVisible.value = true;
 }
 
 function openRename(): void {
@@ -508,5 +518,6 @@ defineExpose({ refresh });
         </ContextMenu>
 
         <RenameDialog v-model:visible="renameVisible" :item="renameTarget" @renamed="getData" />
+        <DetailsDialog v-model:visible="detailsVisible" :item="detailsTarget" :dir="dir" />
     </div>
 </template>

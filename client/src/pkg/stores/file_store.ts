@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
 import type { Page, SuccessResponse } from "../api/api_models.ts";
 import type {
+    Activity,
+    ActivityQuery,
     DownloadList,
     DownloadResponse,
     FolderForm,
@@ -43,6 +45,18 @@ export const useFileStore = defineStore("file", {
 
         async createFolder(form: FolderForm): Promise<FolderResponse> {
             const response = await apiClient.post<FolderResponse>(this.folderPrefix, form);
+            return response.data;
+        },
+
+        async getItem(id: number): Promise<StoredFile> {
+            const response = await apiClient.get<StoredFile>(`${this.apiPrefix}/${id}`);
+            return response.data;
+        },
+
+        async listActivity(id: number, query: ActivityQuery): Promise<Page<Activity>> {
+            const response = await apiClient.get<Page<Activity>>(`${this.apiPrefix}/${id}/activity`, {
+                params: { ...query },
+            });
             return response.data;
         },
 

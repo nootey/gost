@@ -1,6 +1,7 @@
 package file
 
 import (
+	"encoding/json"
 	"gost/internal/apperr"
 	"gost/internal/utils"
 	"io"
@@ -15,6 +16,7 @@ type File struct {
 	ContentType string    `json:"content_type"`
 	SizeBytes   int64     `json:"size_bytes"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 	// IsCopying is true until the copy job ends. Until then, nothing can go into the item, and it cannot be deleted or copied.
 	IsCopying  bool `json:"is_copying"`
 	IsFavorite bool `json:"is_favorite"`
@@ -180,4 +182,43 @@ type DownloadList struct {
 type PasteRequest struct {
 	IDs      []int64 `json:"ids"`
 	ParentID *int64  `json:"parent_id"`
+}
+
+// ActivityEvent is one kind of event in an item's audit log.
+type ActivityEvent string
+
+const (
+	EventUploaded ActivityEvent = "uploaded"
+	EventCreated  ActivityEvent = "created"
+	EventCopied   ActivityEvent = "copied"
+	EventRenamed  ActivityEvent = "renamed"
+	EventMoved    ActivityEvent = "moved"
+	EventTrashed  ActivityEvent = "trashed"
+	EventRestored ActivityEvent = "restored"
+	EventPurged   ActivityEvent = "purged"
+	// EventExpired is a purge the trash sweep asked for after the retention days.
+	EventExpired ActivityEvent = "expired"
+)
+
+// activityList lists one record's audit log, newest first. The args are the user id and the item id.
+var activityList = utils.KeysetList[SortField]{
+	Select: "id, event, metadata, created_at",
+	From:   "activity_logs",
+	Where:  "user_id = $1 AND category = 'file' AND record_id = $2::bigint",
+	Sorts:  map[SortField][]string{SortByDate: {"id"}},
+}
+
+// Activity is one event in an item's audit log. Metadata holds the item's name and its folder's name at the time
+// (a null folder is Home), and the values of the event: "old_name" for a rename, "from" for a move.
+type Activity struct {
+	ID        int64           `json:"id"`
+	Event     ActivityEvent   `json:"event"`
+	Metadata  json.RawMessage `json:"metadata"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// ActivityQuery picks one page of an item's audit log, newest first.
+type ActivityQuery struct {
+	Cursor   string
+	PageSize int
 }

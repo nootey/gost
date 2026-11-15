@@ -60,6 +60,16 @@ func (ns NullRiverJobState) Value() (driver.Value, error) {
 	return string(ns.RiverJobState), nil
 }
 
+type ActivityLog struct {
+	ID        int64           `json:"id"`
+	UserID    int64           `json:"user_id"`
+	Category  string          `json:"category"`
+	RecordID  int64           `json:"record_id"`
+	Event     string          `json:"event"`
+	Metadata  json.RawMessage `json:"metadata"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
 type Download struct {
 	ID           int64          `json:"id"`
 	UserID       int64          `json:"user_id"`

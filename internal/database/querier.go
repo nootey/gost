@@ -106,6 +106,12 @@ type Querier interface {
 	LockUserDownloads(ctx context.Context, userID int64) error
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// Adds one "file" audit row per item in ids. The metadata holds the item's name and its folder's name as they are
+	// now (a null folder is Home), merged with extra. So a caller runs it after the change.
+	LogItems(ctx context.Context, arg LogItemsParams) error
+	// Adds a "moved" audit row per item in ids. It runs before the move, so "from" is the folder each item leaves and
+	// "folder" the one it goes to. A parent_id of 0 means the root, and a null folder is Home.
+	LogMoves(ctx context.Context, arg LogMovesParams) error
 	// Marks a ready zip as downloaded the first time the user gets it.
 	MarkDownloaded(ctx context.Context, arg MarkDownloadedParams) error
 	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.

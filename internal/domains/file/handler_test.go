@@ -50,6 +50,8 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/favorites", suite.handler.AddFavorites)
 	suite.router.Post("/favorites/remove", suite.handler.RemoveFavorites)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
+	suite.router.Get("/files/{id}", suite.handler.GetItem)
+	suite.router.Get("/files/{id}/activity", suite.handler.ListActivity)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
 	suite.router.Get("/files/{id}/download", suite.handler.Download)
 	suite.router.Post("/files/move", suite.handler.Move)
@@ -1057,6 +1059,76 @@ func (suite *FileHandlerTestSuite) TestCopy_ServiceError() {
 
 	suite.Equal(http.StatusConflict, w.Code)
 	suite.Equal("Docs is still copying", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestGetItem_Success() {
+	suite.mockService.EXPECT().
+		GetItem(mock.Anything, testUserID, int64(9)).
+		Return(&file.File{ID: 9, Name: "a.txt", SizeBytes: 5, IsFavorite: true}, nil).
+		Once()
+
+	w := suite.getPath("/files/9", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.File
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("a.txt", resp.Name)
+	suite.True(resp.IsFavorite)
+}
+
+func (suite *FileHandlerTestSuite) TestGetItem_Errors() {
+	w := suite.getPath("/files/abc", true)
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid id", suite.errorMessage(w))
+
+	w = suite.getPath("/files/9", false)
+	suite.Equal(http.StatusUnauthorized, w.Code)
+
+	suite.mockService.EXPECT().
+		GetItem(mock.Anything, testUserID, int64(9)).
+		Return(nil, apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+	w = suite.getPath("/files/9", true)
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestListActivity_Success() {
+	next := "next"
+	suite.mockService.EXPECT().
+		ListActivity(mock.Anything, testUserID, int64(9), file.ActivityQuery{Cursor: "abc", PageSize: 10}).
+		Return(&utils.Page[*file.Activity]{
+			Data:       []*file.Activity{{ID: 3, Event: file.EventRenamed, Metadata: []byte(`{"name":"b.txt","old_name":"a.txt"}`)}},
+			NextCursor: &next,
+		}, nil).
+		Once()
+
+	w := suite.getPath("/files/9/activity?cursor=abc&page_size=10", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp utils.Page[*file.Activity]
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Data, 1)
+	suite.Equal(file.EventRenamed, resp.Data[0].Event)
+	suite.JSONEq(`{"name":"b.txt","old_name":"a.txt"}`, string(resp.Data[0].Metadata))
+	suite.Equal(&next, resp.NextCursor)
+}
+
+func (suite *FileHandlerTestSuite) TestListActivity_Errors() {
+	w := suite.getPath("/files/abc/activity", true)
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid id", suite.errorMessage(w))
+
+	w = suite.getPath("/files/9/activity", false)
+	suite.Equal(http.StatusUnauthorized, w.Code)
+
+	suite.mockService.EXPECT().
+		ListActivity(mock.Anything, testUserID, int64(9), file.ActivityQuery{Cursor: "bad"}).
+		Return(nil, apperr.New(apperr.KindInvalid, "invalid cursor")).
+		Once()
+	w = suite.getPath("/files/9/activity?cursor=bad", true)
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid cursor", suite.errorMessage(w))
 }
 
 func (suite *FileHandlerTestSuite) TestAddFavorites_Success() {
