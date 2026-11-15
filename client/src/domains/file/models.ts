@@ -9,6 +9,7 @@ export interface StoredFile {
     // True until the copy job ends. Until then the item does not open, and it cannot be selected or get a menu.
     // The list does not poll, so the user reloads the page to see the copy end.
     is_copying: boolean;
+    is_favorite: boolean;
 }
 
 export interface UploadResponse {

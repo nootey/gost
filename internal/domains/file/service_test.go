@@ -813,6 +813,94 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
 
+// Favorites show in the list. Adding a favorite again changes nothing.
+func (s *FileServiceTestSuite) TestAddFavorites_MarksItems() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, 0, "a.txt", "a")
+	b := s.upload(userID, 0, "b.txt", "b")
+
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID, a.ID, a.ID}))
+
+	s.Equal(map[string]bool{"Docs": true, "a.txt": true, "b.txt": false}, s.favoriteMarks(userID, 0))
+
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{a.ID, b.ID}))
+
+	s.Equal(map[string]bool{"Docs": true, "a.txt": true, "b.txt": true}, s.favoriteMarks(userID, 0))
+	s.Equal(3, s.favoriteRows())
+}
+
+// One bad id undoes the rest: an unknown id, another user's item, or an item in the trash.
+func (s *FileServiceTestSuite) TestAddFavorites_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a.txt", "a")
+	trashed := s.upload(alice, 0, "trashed.txt", "t")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+	bobFile := s.upload(bob, 0, "bob.txt", "b")
+
+	for _, bad := range []int64{999, bobFile.ID, trashed.ID} {
+		err := svc.AddFavorites(context.Background(), alice, []int64{a.ID, bad})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+	s.Equal(0, s.favoriteRows())
+}
+
+// Remove drops only the user's own marks. An id that is no favorite changes nothing.
+func (s *FileServiceTestSuite) TestRemoveFavorites() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a.txt", "a")
+	b := s.upload(alice, 0, "b.txt", "b")
+	s.Require().NoError(svc.AddFavorites(context.Background(), alice, []int64{a.ID, b.ID}))
+
+	s.Require().NoError(svc.RemoveFavorites(context.Background(), bob, []int64{a.ID, b.ID}))
+	s.Require().NoError(svc.RemoveFavorites(context.Background(), alice, []int64{a.ID, 999}))
+
+	s.Equal(map[string]bool{"a.txt": false, "b.txt": true}, s.favoriteMarks(alice, 0))
+}
+
+// A favorite keeps its mark through a rename, the trash and a restore. A copy is no favorite, and a purge removes
+// the mark with the row.
+func (s *FileServiceTestSuite) TestFavorites_FollowTheItem() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	inner := s.upload(userID, docs.ID, "in.txt", "in")
+	other := s.createFolder(userID, 0, "Other")
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID, inner.ID}))
+
+	renamed, err := svc.Rename(context.Background(), userID, docs.ID, "Papers")
+	s.Require().NoError(err)
+	s.True(renamed.IsFavorite)
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, other.ID, []int64{docs.ID}))
+	s.workCopyJobs()
+	s.Equal(map[string]bool{"Papers": false}, s.favoriteMarks(userID, other.ID))
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Require().Len(trash.Data, 1)
+	s.True(trash.Data[0].IsFavorite)
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{docs.ID}))
+	s.Equal(map[string]bool{"in.txt": true}, s.favoriteMarks(userID, docs.ID))
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+	s.workPurgeJobs()
+	s.Equal(0, s.favoriteRows())
+}
+
 func (s *FileServiceTestSuite) TestOpenFile_Success() {
 	userID := s.seedUser()
 	docs := s.createFolder(userID, 0, "Docs")
@@ -3514,6 +3602,23 @@ func (s *FileServiceTestSuite) downloadIDs() []int64 {
 	}
 	s.Require().NoError(rows.Err())
 	return ids
+}
+
+// favoriteMarks maps each item in one folder to its favorite mark.
+func (s *FileServiceTestSuite) favoriteMarks(userID, parentID int64) map[string]bool {
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(parentID))
+	s.Require().NoError(err)
+	marks := map[string]bool{}
+	for _, f := range result.Data {
+		marks[f.Name] = f.IsFavorite
+	}
+	return marks
+}
+
+func (s *FileServiceTestSuite) favoriteRows() int {
+	var n int
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM favorites`).Scan(&n))
+	return n
 }
 
 func (s *FileServiceTestSuite) downloadRows() int {

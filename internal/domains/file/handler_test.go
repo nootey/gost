@@ -47,6 +47,8 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files", suite.handler.List)
 	suite.router.Post("/files", suite.handler.Upload)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
+	suite.router.Post("/favorites", suite.handler.AddFavorites)
+	suite.router.Post("/favorites/remove", suite.handler.RemoveFavorites)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
 	suite.router.Get("/files/{id}/download", suite.handler.Download)
@@ -1055,6 +1057,66 @@ func (suite *FileHandlerTestSuite) TestCopy_ServiceError() {
 
 	suite.Equal(http.StatusConflict, w.Code)
 	suite.Equal("Docs is still copying", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestAddFavorites_Success() {
+	suite.mockService.EXPECT().AddFavorites(mock.Anything, testUserID, []int64{5, 3}).Return(nil).Once()
+
+	w := suite.postItems("/favorites", `{"ids":[5,3]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Added to favorites.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveFavorites_Success() {
+	suite.mockService.EXPECT().RemoveFavorites(mock.Anything, testUserID, []int64{5}).Return(nil).Once()
+
+	w := suite.postItems("/favorites/remove", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Removed from favorites.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestFavorites_InvalidInput() {
+	for _, path := range []string{"/favorites", "/favorites/remove"} {
+		for _, body := range []string{`{"ids":[]}`, `{}`, `{"ids":[0]}`} {
+			w := suite.postItems(path, body, true)
+
+			suite.Equal(http.StatusBadRequest, w.Code, path+" "+body)
+			suite.Equal("invalid ids", suite.errorMessage(w), path+" "+body)
+		}
+
+		w := suite.postItems(path, `not json`, true)
+		suite.Equal(http.StatusBadRequest, w.Code, path)
+		suite.Equal("invalid request body", suite.errorMessage(w), path)
+
+		w = suite.postItems(path, `{"ids":[5]}`, false)
+		suite.Equal(http.StatusUnauthorized, w.Code, path)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestAddFavorites_ServiceError() {
+	suite.mockService.EXPECT().
+		AddFavorites(mock.Anything, testUserID, []int64{5}).
+		Return(apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.postItems("/favorites", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveFavorites_ServiceError() {
+	suite.mockService.EXPECT().RemoveFavorites(mock.Anything, testUserID, []int64{5}).Return(assert.AnError).Once()
+
+	w := suite.postItems("/favorites/remove", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
 }
 
 func (suite *FileHandlerTestSuite) TestTrash_Success() {

@@ -16,7 +16,8 @@ type File struct {
 	SizeBytes   int64     `json:"size_bytes"`
 	CreatedAt   time.Time `json:"created_at"`
 	// IsCopying is true until the copy job ends. Until then, nothing can go into the item, and it cannot be deleted or copied.
-	IsCopying bool `json:"is_copying"`
+	IsCopying  bool `json:"is_copying"`
+	IsFavorite bool `json:"is_favorite"`
 }
 
 // SortField is a column the list sorts by. The values match the list query.

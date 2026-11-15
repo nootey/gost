@@ -73,6 +73,12 @@ type Download struct {
 	DownloadedAt sql.NullTime   `json:"downloaded_at"`
 }
 
+type Favorite struct {
+	FileID    int64     `json:"file_id"`
+	UserID    int64     `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type File struct {
 	ID               int64          `json:"id"`
 	UserID           int64          `json:"user_id"`

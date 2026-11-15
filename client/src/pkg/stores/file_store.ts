@@ -87,6 +87,16 @@ export const useFileStore = defineStore("file", {
             return apiClient.url(`${this.downloadPrefix}/${id}/file`);
         },
 
+        async addFavorites(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>("favorites", form);
+            return response.data;
+        },
+
+        async removeFavorites(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>("favorites/remove", form);
+            return response.data;
+        },
+
         async listTrash(query: TrashQuery): Promise<Page<TrashedFile>> {
             const response = await apiClient.get<Page<TrashedFile>>(this.trashPrefix, { params: { ...query } });
             return response.data;

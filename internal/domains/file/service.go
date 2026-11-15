@@ -103,6 +103,8 @@ type FileServiceInterface interface {
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
+	AddFavorites(ctx context.Context, userID int64, ids []int64) error
+	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
 	GetDownload(ctx context.Context, userID, id int64) (*Download, error)
@@ -279,6 +281,9 @@ func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*uti
 	for i, dbFile := range page.Data {
 		files[i] = toFileModel(dbFile)
 	}
+	if err := s.markFavorites(ctx, userID, files); err != nil {
+		return nil, err
+	}
 
 	return &utils.Page[*File]{Data: files, NextCursor: page.NextCursor}, nil
 }
@@ -329,7 +334,32 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 		return nil, err
 	}
 
-	return toFileModel(dbFile), nil
+	f := toFileModel(dbFile)
+	if err := s.markFavorites(ctx, userID, []*File{f}); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// AddFavorites marks the items as favorites. It is all or none, the same as Trash. An item that is a favorite already
+// stays one. It changes no item, so it takes no tree lock. A favorite stays with its item in the trash, and a purge
+// removes it.
+func (s *FileService) AddFavorites(ctx context.Context, userID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	items, err := s.queries.ListLiveItems(ctx, database.ListLiveItemsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return err
+	}
+	if len(items) != len(ids) {
+		return errItemNotFound
+	}
+	return s.queries.AddFavorites(ctx, database.AddFavoritesParams{UserID: userID, Ids: ids})
+}
+
+// RemoveFavorites drops the favorite mark of the items. An id that is not a favorite of the user changes nothing.
+func (s *FileService) RemoveFavorites(ctx context.Context, userID int64, ids []int64) error {
+	return s.queries.RemoveFavorites(ctx, database.RemoveFavoritesParams{UserID: userID, Ids: ids})
 }
 
 // OpenFile opens one live file of the user for a download. A folder downloads as a zip, and a file that still copies
@@ -1085,11 +1115,35 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	}
 
 	items := make([]*TrashedFile, len(page.Data))
+	files := make([]*File, len(page.Data))
 	for i, dbFile := range page.Data {
 		items[i] = &TrashedFile{File: *toFileModel(dbFile), TrashedAt: dbFile.TrashedAt.Time}
+		files[i] = &items[i].File
+	}
+	if err := s.markFavorites(ctx, userID, files); err != nil {
+		return nil, err
 	}
 
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
+}
+
+// markFavorites sets IsFavorite on the items with one query.
+func (s *FileService) markFavorites(ctx context.Context, userID int64, items []*File) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
+	}
+	favorites, err := s.queries.ListFavoriteIDs(ctx, database.ListFavoriteIDsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		item.IsFavorite = slices.Contains(favorites, item.ID)
+	}
+	return nil
 }
 
 // trashChildren marks the live rows right under parents, one batch per transaction, until a batch comes back short.

@@ -10,6 +10,8 @@ import (
 )
 
 type Querier interface {
+	// Marks the user's live items in ids as favorites. An item that is a favorite already stays as it is.
+	AddFavorites(ctx context.Context, arg AddFavoritesParams) error
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
 	CountBuildingDownloads(ctx context.Context, userID int64) (int64, error)
@@ -58,6 +60,8 @@ type Querier interface {
 	ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error)
 	// The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
 	ListDownloads(ctx context.Context, arg ListDownloadsParams) ([]Download, error)
+	// The items in ids that are the user's favorites.
+	ListFavoriteIDs(ctx context.Context, arg ListFavoriteIDsParams) ([]int64, error)
 	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
 	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
 	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
@@ -109,6 +113,7 @@ type Querier interface {
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
 	// Else the parent_id foreign key blocks the delete of the folder they were in.
 	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
+	RemoveFavorites(ctx context.Context, arg RemoveFavoritesParams) error
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
 	RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error)

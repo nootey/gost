@@ -49,6 +49,69 @@ func (_m *MockFileServiceInterface) EXPECT() *MockFileServiceInterface_Expecter 
 	return &MockFileServiceInterface_Expecter{mock: &_m.Mock}
 }
 
+// AddFavorites provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) AddFavorites(ctx context.Context, userID int64, ids []int64) error {
+	ret := _mock.Called(ctx, userID, ids)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddFavorites")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64) error); ok {
+		r0 = returnFunc(ctx, userID, ids)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_AddFavorites_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddFavorites'
+type MockFileServiceInterface_AddFavorites_Call struct {
+	*mock.Call
+}
+
+// AddFavorites is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - ids []int64
+func (_e *MockFileServiceInterface_Expecter) AddFavorites(ctx any, userID any, ids any) *MockFileServiceInterface_AddFavorites_Call {
+	return &MockFileServiceInterface_AddFavorites_Call{Call: _e.mock.On("AddFavorites", ctx, userID, ids)}
+}
+
+func (_c *MockFileServiceInterface_AddFavorites_Call) Run(run func(ctx context.Context, userID int64, ids []int64)) *MockFileServiceInterface_AddFavorites_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []int64
+		if args[2] != nil {
+			arg2 = args[2].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_AddFavorites_Call) Return(err error) *MockFileServiceInterface_AddFavorites_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_AddFavorites_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_AddFavorites_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Copy provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) Copy(ctx context.Context, userID int64, parentID int64, ids []int64) error {
 	ret := _mock.Called(ctx, userID, parentID, ids)
@@ -827,6 +890,69 @@ func (_c *MockFileServiceInterface_RemoveDownload_Call) Return(err error) *MockF
 }
 
 func (_c *MockFileServiceInterface_RemoveDownload_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) error) *MockFileServiceInterface_RemoveDownload_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RemoveFavorites provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) RemoveFavorites(ctx context.Context, userID int64, ids []int64) error {
+	ret := _mock.Called(ctx, userID, ids)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RemoveFavorites")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64) error); ok {
+		r0 = returnFunc(ctx, userID, ids)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_RemoveFavorites_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RemoveFavorites'
+type MockFileServiceInterface_RemoveFavorites_Call struct {
+	*mock.Call
+}
+
+// RemoveFavorites is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - ids []int64
+func (_e *MockFileServiceInterface_Expecter) RemoveFavorites(ctx any, userID any, ids any) *MockFileServiceInterface_RemoveFavorites_Call {
+	return &MockFileServiceInterface_RemoveFavorites_Call{Call: _e.mock.On("RemoveFavorites", ctx, userID, ids)}
+}
+
+func (_c *MockFileServiceInterface_RemoveFavorites_Call) Run(run func(ctx context.Context, userID int64, ids []int64)) *MockFileServiceInterface_RemoveFavorites_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []int64
+		if args[2] != nil {
+			arg2 = args[2].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RemoveFavorites_Call) Return(err error) *MockFileServiceInterface_RemoveFavorites_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RemoveFavorites_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_RemoveFavorites_Call {
 	_c.Call.Return(run)
 	return _c
 }

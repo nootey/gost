@@ -24,14 +24,17 @@ import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
 import type { SuccessResponse } from "../../../pkg/api/api_models.ts";
 import type { ClipboardMode } from "../../../pkg/stores/clipboard_store.ts";
-import type { PasteForm, SortField, StoredFile } from "../models.ts";
+import type { ItemsForm, PasteForm, SortField, StoredFile } from "../models.ts";
 
+// Add shows while any target is no favorite yet, so a mixed selection adds the rest. Remove shows when all targets are
+// favorites.
 const MENU_ITEMS: MenuItem[] = [
-    { label: "Add to favorites", icon: "pi pi-star" },
     { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
     { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
     { label: "Copy", icon: "pi pi-copy", shortcut: "Ctrl+C", command: copyMenuTargets },
     { label: "Download", icon: "pi pi-download", command: downloadMenuTargets },
+    { label: "Add to favorites", icon: "pi pi-star", command: addFavorites, visible: () => !allFavorites() },
+    { label: "Remove from favorites", icon: "pi pi-star-fill", command: removeFavorites, visible: allFavorites },
     { separator: true },
     { label: "Delete", icon: "pi pi-trash", danger: true, command: moveToTrash },
 ];
@@ -206,6 +209,30 @@ async function downloadMenuTargets(): Promise<void> {
     } catch (error) {
         toastStore.errorResponseToast(error);
     }
+}
+
+function allFavorites(): boolean {
+    return menuTargets.value.length > 0 && menuTargets.value.every((item) => item.is_favorite);
+}
+
+// The targets are read before the first await, because the menu clears its target when it hides.
+async function addFavorites(): Promise<void> {
+    await changeItems(fileStore.addFavorites, menuTargets.value);
+}
+
+async function removeFavorites(): Promise<void> {
+    await changeItems(fileStore.removeFavorites, menuTargets.value);
+}
+
+// changeItems runs one action on the items, shows the server's toast and reads the page again.
+async function changeItems(change: (form: ItemsForm) => Promise<SuccessResponse>, items: StoredFile[]): Promise<void> {
+    try {
+        const response = await change({ ids: items.map((item) => item.id) });
+        toastStore.successResponseToast(response);
+    } catch (error) {
+        toastStore.errorResponseToast(error);
+    }
+    await getData();
 }
 
 function openRename(): void {
@@ -411,6 +438,13 @@ defineExpose({ refresh });
                                 <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
                                     {{ data.name }}
                                 </span>
+                                <i
+                                    v-if="data.is_favorite"
+                                    class="pi pi-star-fill shrink-0 text-xs text-accent"
+                                    role="img"
+                                    aria-label="Favorite"
+                                    title="Favorite"
+                                />
                                 <Tag
                                     v-if="data.is_copying"
                                     value="Copying"
