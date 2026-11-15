@@ -13,10 +13,10 @@ import (
 )
 
 const createCopyRoots = `-- name: CreateCopyRoots :many
-INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, copy_requested_at)
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, copy_requested_at, hidden_at)
 SELECT src.user_id, NULLIF($1::bigint, 0), src.name,
        NULLIF(($2::text[])[array_position($3::bigint[], src.id)], ''),
-       src.content_type, src.size_bytes, src.id, NOW()
+       src.content_type, src.size_bytes, src.id, NOW(), src.hidden_at
 FROM files src
 WHERE src.user_id = $4
   AND src.id = ANY($3::bigint[])
@@ -64,7 +64,7 @@ func (q *Queries) CreateCopyRoots(ctx context.Context, arg CreateCopyRootsParams
 const createFile = `-- name: CreateFile :one
 INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
 VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at
 `
 
 type CreateFileParams struct {
@@ -101,6 +101,7 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 		&i.PurgeRequestedAt,
 		&i.CopiedFromID,
 		&i.CopyRequestedAt,
+		&i.HiddenAt,
 	)
 	return i, err
 }
@@ -108,7 +109,7 @@ func (q *Queries) CreateFile(ctx context.Context, arg CreateFileParams) (File, e
 const createFolder = `-- name: CreateFolder :one
 INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
 VALUES ($1, $2, $3, '', 0)
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at
 `
 
 type CreateFolderParams struct {
@@ -135,6 +136,7 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 		&i.PurgeRequestedAt,
 		&i.CopiedFromID,
 		&i.CopyRequestedAt,
+		&i.HiddenAt,
 	)
 	return i, err
 }
@@ -219,7 +221,7 @@ func (q *Queries) FolderExists(ctx context.Context, arg FolderExistsParams) (boo
 }
 
 const getFile = `-- name: GetFile :one
-SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at FROM files
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at FROM files
 WHERE id = $1 AND user_id = $2 AND trashed_at IS NULL
 `
 
@@ -246,6 +248,7 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (File, error) 
 		&i.PurgeRequestedAt,
 		&i.CopiedFromID,
 		&i.CopyRequestedAt,
+		&i.HiddenAt,
 	)
 	return i, err
 }
@@ -263,8 +266,8 @@ func (q *Queries) HasStoredFiles(ctx context.Context) (bool, error) {
 }
 
 const insertCopies = `-- name: InsertCopies :many
-INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id)
-SELECT p.user_id, p.id, u.name, NULLIF(u.storage_key, ''), u.content_type, u.size_bytes, u.copied_from_id
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, hidden_at)
+SELECT p.user_id, p.id, u.name, NULLIF(u.storage_key, ''), u.content_type, u.size_bytes, u.copied_from_id, src.hidden_at
 FROM (
     SELECT unnest($1::bigint[]) AS parent_id,
            unnest($2::text[]) AS name,
@@ -274,6 +277,7 @@ FROM (
            unnest($6::bigint[]) AS copied_from_id
 ) AS u
 JOIN files p ON p.id = u.parent_id
+LEFT JOIN files src ON src.id = u.copied_from_id
 WHERE p.user_id = $7
   AND p.trashed_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM files c WHERE c.copied_from_id = u.copied_from_id AND c.parent_id = p.id)
@@ -293,6 +297,7 @@ type InsertCopiesParams struct {
 // Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
 // An empty key marks a folder. A row whose copy folder is gone or in the trash is left out, and so is a row whose
 // copy is in the folder already: another run of the job added it. It returns the storage keys of the rows it added.
+// A copy keeps the hidden mark of its source.
 func (q *Queries) InsertCopies(ctx context.Context, arg InsertCopiesParams) ([]sql.NullString, error) {
 	rows, err := q.db.QueryContext(ctx, insertCopies,
 		pq.Array(arg.ParentIds),
@@ -504,7 +509,7 @@ func (q *Queries) ListGroupFolders(ctx context.Context, arg ListGroupFoldersPara
 }
 
 const listLiveItems = `-- name: ListLiveItems :many
-SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at FROM files
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at FROM files
 WHERE user_id = $1
   AND id = ANY($2::bigint[])
   AND trashed_at IS NULL
@@ -541,6 +546,7 @@ func (q *Queries) ListLiveItems(ctx context.Context, arg ListLiveItemsParams) ([
 			&i.PurgeRequestedAt,
 			&i.CopiedFromID,
 			&i.CopyRequestedAt,
+			&i.HiddenAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1180,7 +1186,7 @@ const renameFile = `-- name: RenameFile :one
 UPDATE files
 SET name = $1, updated_at = NOW()
 WHERE id = $2 AND user_id = $3 AND trashed_at IS NULL
-    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at
+    RETURNING id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at
 `
 
 type RenameFileParams struct {
@@ -1207,6 +1213,7 @@ func (q *Queries) RenameFile(ctx context.Context, arg RenameFileParams) (File, e
 		&i.PurgeRequestedAt,
 		&i.CopiedFromID,
 		&i.CopyRequestedAt,
+		&i.HiddenAt,
 	)
 	return i, err
 }
@@ -1383,6 +1390,65 @@ func (q *Queries) RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsPa
 		arg.UserID,
 	)
 	return err
+}
+
+const setHidden = `-- name: SetHidden :many
+WITH found AS (
+    SELECT i.id, i.hidden_at FROM files i
+    WHERE i.user_id = $1
+      AND i.id = ANY($2::bigint[])
+      AND i.trashed_at IS NULL
+    -- In id order, like the other locks, so two requests at once cannot deadlock.
+    ORDER BY i.id
+    FOR UPDATE
+), changed AS (
+    UPDATE files f
+    SET hidden_at = CASE WHEN $3::boolean THEN NOW() END
+    FROM found
+    WHERE f.id = found.id
+      AND (found.hidden_at IS NULL) = $3::boolean
+    RETURNING f.id
+)
+SELECT found.id, (changed.id IS NOT NULL)::boolean AS changed
+FROM found
+LEFT JOIN changed ON changed.id = found.id
+ORDER BY found.id
+`
+
+type SetHiddenParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+	Hidden bool    `json:"hidden"`
+}
+
+type SetHiddenRow struct {
+	ID      int64 `json:"id"`
+	Changed bool  `json:"changed"`
+}
+
+// Hides the user's live items in ids, or shows them again when hidden is false. An item already in that state keeps
+// it, so a hidden item keeps its first time. It returns each id it found, and whether it changed, for the audit log.
+func (q *Queries) SetHidden(ctx context.Context, arg SetHiddenParams) ([]SetHiddenRow, error) {
+	rows, err := q.db.QueryContext(ctx, setHidden, arg.UserID, pq.Array(arg.Ids), arg.Hidden)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SetHiddenRow
+	for rows.Next() {
+		var i SetHiddenRow
+		if err := rows.Scan(&i.ID, &i.Changed); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const trashChildren = `-- name: TrashChildren :execrows

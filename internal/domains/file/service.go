@@ -109,6 +109,7 @@ type FileServiceInterface interface {
 	ListActivity(ctx context.Context, userID, id int64, q ActivityQuery) (*utils.Page[*Activity], error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 	AddFavorites(ctx context.Context, userID int64, ids []int64) error
+	SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error
 	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
@@ -169,6 +170,7 @@ func toFileModel(dbFile database.File) *File {
 		CreatedAt:   dbFile.CreatedAt,
 		UpdatedAt:   dbFile.UpdatedAt,
 		IsCopying:   dbFile.CopyRequestedAt.Valid,
+		IsHidden:    dbFile.HiddenAt.Valid,
 	}
 }
 
@@ -177,7 +179,7 @@ func fileFields(f *database.File) []any {
 	return []any{
 		&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes,
 		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
-		&f.CopiedFromID, &f.CopyRequestedAt,
+		&f.CopiedFromID, &f.CopyRequestedAt, &f.HiddenAt,
 	}
 }
 
@@ -273,7 +275,7 @@ func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*uti
 	}
 
 	page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
-		Args:     []any{userID, q.ParentID, strings.TrimSpace(q.Search)},
+		Args:     []any{userID, q.ParentID, strings.TrimSpace(q.Search), q.ShowHidden},
 		Sort:     q.Sort,
 		Desc:     q.Desc,
 		Cursor:   q.Cursor,
@@ -416,6 +418,34 @@ func (s *FileService) AddFavorites(ctx context.Context, userID int64, ids []int6
 		return errItemNotFound
 	}
 	return s.queries.AddFavorites(ctx, database.AddFavoritesParams{UserID: userID, Ids: ids})
+}
+
+// SetHidden hides the items from the list, or shows them again. It is all or none, the same as Trash. An item already
+// in that state keeps it and gets no audit row. It changes no tree, so it takes no tree lock.
+func (s *FileService) SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	return utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		rows, err := q.SetHidden(ctx, database.SetHiddenParams{UserID: userID, Ids: ids, Hidden: hidden})
+		if err != nil {
+			return err
+		}
+		if len(rows) != len(ids) {
+			return errItemNotFound
+		}
+
+		var changed []int64
+		for _, row := range rows {
+			if row.Changed {
+				changed = append(changed, row.ID)
+			}
+		}
+		if len(changed) == 0 {
+			return nil
+		}
+		return q.LogItems(ctx, database.LogItemsParams{Event: string(hiddenEvents[hidden]), Extra: noExtra, UserID: userID, Ids: changed})
+	})
 }
 
 // RemoveFavorites drops the favorite mark of the items. An id that is not a favorite of the user changes nothing.
@@ -1560,7 +1590,8 @@ func (s *FileService) addZipFolder(ctx context.Context, zb *utils.ZipBuilder, us
 	cursor := ""
 	for {
 		page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
-			Args:     []any{userID, folder.id, ""},
+			// A zip keeps the hidden items, the way zip keeps dot files.
+			Args:     []any{userID, folder.id, "", true},
 			Sort:     SortByName,
 			Cursor:   cursor,
 			PageSize: zipPageSize,

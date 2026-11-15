@@ -280,10 +280,10 @@ WHERE user_id = sqlc.arg(user_id)
 -- name: CreateCopyRoots :many
 -- Adds a copy of each live item in ids to the folder, marked as copying. keys[i] is the new storage key of ids[i],
 -- empty for a folder. A parent_id of 0 means the root.
-INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, copy_requested_at)
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, copy_requested_at, hidden_at)
 SELECT src.user_id, NULLIF(sqlc.arg(parent_id)::bigint, 0), src.name,
        NULLIF((sqlc.arg(keys)::text[])[array_position(sqlc.arg(ids)::bigint[], src.id)], ''),
-       src.content_type, src.size_bytes, src.id, NOW()
+       src.content_type, src.size_bytes, src.id, NOW(), src.hidden_at
 FROM files src
 WHERE src.user_id = sqlc.arg(user_id)
   AND src.id = ANY(sqlc.arg(ids)::bigint[])
@@ -331,8 +331,9 @@ WHERE user_id = sqlc.arg(user_id)
 -- Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
 -- An empty key marks a folder. A row whose copy folder is gone or in the trash is left out, and so is a row whose
 -- copy is in the folder already: another run of the job added it. It returns the storage keys of the rows it added.
-INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id)
-SELECT p.user_id, p.id, u.name, NULLIF(u.storage_key, ''), u.content_type, u.size_bytes, u.copied_from_id
+-- A copy keeps the hidden mark of its source.
+INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes, copied_from_id, hidden_at)
+SELECT p.user_id, p.id, u.name, NULLIF(u.storage_key, ''), u.content_type, u.size_bytes, u.copied_from_id, src.hidden_at
 FROM (
     SELECT unnest(sqlc.arg(parent_ids)::bigint[]) AS parent_id,
            unnest(sqlc.arg(names)::text[]) AS name,
@@ -342,6 +343,7 @@ FROM (
            unnest(sqlc.arg(source_ids)::bigint[]) AS copied_from_id
 ) AS u
 JOIN files p ON p.id = u.parent_id
+LEFT JOIN files src ON src.id = u.copied_from_id
 WHERE p.user_id = sqlc.arg(user_id)
   AND p.trashed_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM files c WHERE c.copied_from_id = u.copied_from_id AND c.parent_id = p.id)
@@ -386,3 +388,27 @@ WHERE user_id = sqlc.arg(user_id)
   AND id = ANY(sqlc.arg(ids)::bigint[])
   AND trashed_at IS NULL
 ORDER BY id;
+
+-- name: SetHidden :many
+-- Hides the user's live items in ids, or shows them again when hidden is false. An item already in that state keeps
+-- it, so a hidden item keeps its first time. It returns each id it found, and whether it changed, for the audit log.
+WITH found AS (
+    SELECT i.id, i.hidden_at FROM files i
+    WHERE i.user_id = sqlc.arg(user_id)
+      AND i.id = ANY(sqlc.arg(ids)::bigint[])
+      AND i.trashed_at IS NULL
+    -- In id order, like the other locks, so two requests at once cannot deadlock.
+    ORDER BY i.id
+    FOR UPDATE
+), changed AS (
+    UPDATE files f
+    SET hidden_at = CASE WHEN sqlc.arg(hidden)::boolean THEN NOW() END
+    FROM found
+    WHERE f.id = found.id
+      AND (found.hidden_at IS NULL) = sqlc.arg(hidden)::boolean
+    RETURNING f.id
+)
+SELECT found.id, (changed.id IS NOT NULL)::boolean AS changed
+FROM found
+LEFT JOIN changed ON changed.id = found.id
+ORDER BY found.id;

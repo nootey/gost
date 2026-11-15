@@ -31,6 +31,8 @@ const EVENT_VIEWS: Record<ActivityEvent, EventView> = {
     restored: { icon: "pi pi-replay", text: (m) => `Restored to ${folderName(m.folder)} as ${m.name}` },
     purged: { icon: "pi pi-times-circle", text: () => "Deleted forever" },
     expired: { icon: "pi pi-clock", text: () => "Deleted forever after 30 days in the trash" },
+    hidden: { icon: "pi pi-eye-slash", text: () => "Hidden" },
+    unhidden: { icon: "pi pi-eye", text: () => "Unhidden" },
 };
 
 // item is the row the menu opened on. dir is the open folder, such as "/Photos/Cars", and "" for Home.
@@ -111,6 +113,13 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
                 <span class="truncate text-lg font-semibold tracking-tight text-fg" :title="details.name">
                     {{ details.name }}
                 </span>
+                <i
+                    v-if="details.is_hidden"
+                    class="pi pi-eye-slash shrink-0 text-xs text-fg-subtle"
+                    role="img"
+                    aria-label="Hidden"
+                    title="Hidden"
+                />
                 <i
                     v-if="details.is_favorite"
                     class="pi pi-star-fill shrink-0 text-xs text-accent"

@@ -56,6 +56,8 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files/{id}/download", suite.handler.Download)
 	suite.router.Post("/files/move", suite.handler.Move)
 	suite.router.Post("/files/copy", suite.handler.Copy)
+	suite.router.Post("/files/hide", suite.handler.Hide)
+	suite.router.Post("/files/unhide", suite.handler.Unhide)
 	suite.router.Get("/trash", suite.handler.ListTrash)
 	suite.router.Post("/trash", suite.handler.Trash)
 	suite.router.Post("/trash/restore", suite.handler.Restore)
@@ -295,6 +297,8 @@ func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
 		{"?order=asc", file.ListQuery{Sort: file.SortByDate}},
 		{"?search=%20Report%25_", file.ListQuery{Search: " Report%_", Sort: file.SortByDate, Desc: true}},
 		{"?search=" + atNameLimit, file.ListQuery{Search: atNameLimit, Sort: file.SortByDate, Desc: true}},
+		{"?show_hidden=true", file.ListQuery{Sort: file.SortByDate, Desc: true, ShowHidden: true}},
+		{"?show_hidden=false", file.ListQuery{Sort: file.SortByDate, Desc: true}},
 	}
 	for _, tc := range cases {
 		suite.mockService.EXPECT().
@@ -304,6 +308,13 @@ func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
 
 		suite.Equal(http.StatusOK, suite.list(tc.query, true).Code, tc.query)
 	}
+}
+
+func (suite *FileHandlerTestSuite) TestList_InvalidShowHidden() {
+	w := suite.list("?show_hidden=yes", true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid show_hidden", suite.errorMessage(w))
 }
 
 // Sort values are case-sensitive.
@@ -1189,6 +1200,57 @@ func (suite *FileHandlerTestSuite) TestRemoveFavorites_ServiceError() {
 	w := suite.postItems("/favorites/remove", `{"ids":[5]}`, true)
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestHide_Success() {
+	cases := []struct {
+		path    string
+		hidden  bool
+		message string
+	}{
+		{"/files/hide", true, "Hidden."},
+		{"/files/unhide", false, "Unhidden."},
+	}
+	for _, tc := range cases {
+		suite.mockService.EXPECT().SetHidden(mock.Anything, testUserID, []int64{5, 3}, tc.hidden).Return(nil).Once()
+
+		w := suite.postItems(tc.path, `{"ids":[5,3]}`, true)
+
+		suite.Equal(http.StatusOK, w.Code, tc.path)
+		var resp apperr.SuccessResponse
+		suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+		suite.Equal(tc.message, resp.Message, tc.path)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestHide_InvalidInput() {
+	for _, path := range []string{"/files/hide", "/files/unhide"} {
+		for _, body := range []string{`{"ids":[]}`, `{}`, `{"ids":[-1]}`} {
+			w := suite.postItems(path, body, true)
+
+			suite.Equal(http.StatusBadRequest, w.Code, path+" "+body)
+			suite.Equal("invalid ids", suite.errorMessage(w), path+" "+body)
+		}
+
+		w := suite.postItems(path, `not json`, true)
+		suite.Equal(http.StatusBadRequest, w.Code, path)
+		suite.Equal("invalid request body", suite.errorMessage(w), path)
+
+		w = suite.postItems(path, `{"ids":[5]}`, false)
+		suite.Equal(http.StatusUnauthorized, w.Code, path)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestHide_ServiceError() {
+	suite.mockService.EXPECT().
+		SetHidden(mock.Anything, testUserID, []int64{5}, true).
+		Return(apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.postItems("/files/hide", `{"ids":[5]}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
 }
 
 func (suite *FileHandlerTestSuite) TestTrash_Success() {

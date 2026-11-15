@@ -67,15 +67,22 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	showHidden, err := utils.QueryChoice(r, "show_hidden", "false", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.List(r.Context(), userID, ListQuery{
-		ParentID: parentID,
-		Cursor:   r.URL.Query().Get("cursor"),
-		PageSize: pageSize,
-		Search:   search,
-		Sort:     sort,
-		Desc:     order == "desc",
+		ParentID:   parentID,
+		Cursor:     r.URL.Query().Get("cursor"),
+		PageSize:   pageSize,
+		Search:     search,
+		Sort:       sort,
+		Desc:       order == "desc",
+		ShowHidden: showHidden == "true",
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)
@@ -435,6 +442,40 @@ func (h *FileHandler) RemoveFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.resp.Success(w, http.StatusOK, "Removed from favorites.")
+}
+
+func (h *FileHandler) Hide(w http.ResponseWriter, r *http.Request) {
+	h.setHidden(w, r, true, "Hidden.")
+}
+
+func (h *FileHandler) Unhide(w http.ResponseWriter, r *http.Request) {
+	h.setHidden(w, r, false, "Unhidden.")
+}
+
+func (h *FileHandler) setHidden(w http.ResponseWriter, r *http.Request, hidden bool, message string) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.SetHidden(r.Context(), userID, req.IDs, hidden); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, message)
 }
 
 func (h *FileHandler) Trash(w http.ResponseWriter, r *http.Request) {

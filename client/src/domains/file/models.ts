@@ -11,6 +11,8 @@ export interface StoredFile {
     // The list does not poll, so the user reloads the page to see the copy end.
     is_copying: boolean;
     is_favorite: boolean;
+    // True when the user hid the item. The list leaves it out unless show_hidden is on.
+    is_hidden: boolean;
 }
 
 export interface UploadResponse {
@@ -34,6 +36,7 @@ export interface RenameResponse {
 export type SortField = "name" | "size" | "type" | "date";
 
 // A null parent_id is the root. A null cursor is the first page. A null search matches every name.
+// show_hidden adds the hidden items.
 export interface ListQuery {
     parent_id: number | null;
     cursor: string | null;
@@ -41,6 +44,7 @@ export interface ListQuery {
     sort: SortField;
     order: "asc" | "desc";
     search: string | null;
+    show_hidden: boolean;
 }
 
 // An item the user deleted. parent_id is the folder it was in.
@@ -108,7 +112,17 @@ export interface DownloadResponse {
 
 // The events of an item's audit log. expired is a purge the trash sweep asked for after 30 days.
 export type ActivityEvent =
-    "uploaded" | "created" | "copied" | "renamed" | "moved" | "trashed" | "restored" | "purged" | "expired";
+    | "uploaded"
+    | "created"
+    | "copied"
+    | "renamed"
+    | "moved"
+    | "trashed"
+    | "restored"
+    | "purged"
+    | "expired"
+    | "hidden"
+    | "unhidden";
 
 // The item's name and its folder's name at the time of the event. A null folder is Home.
 // old_name comes with a rename, from (the folder the item left) with a move.

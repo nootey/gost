@@ -53,6 +53,7 @@ type Querier interface {
 	// Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
 	// An empty key marks a folder. A row whose copy folder is gone or in the trash is left out, and so is a row whose
 	// copy is in the folder already: another run of the job added it. It returns the storage keys of the rows it added.
+	// A copy keeps the hidden mark of its source.
 	InsertCopies(ctx context.Context, arg InsertCopiesParams) ([]sql.NullString, error)
 	// The folders the copy job made right under parent_ids: the next level of the job.
 	ListCopyFolders(ctx context.Context, arg ListCopyFoldersParams) ([]int64, error)
@@ -132,6 +133,9 @@ type Querier interface {
 	RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error
 	// parent_ids[i] and names[i] belong to ids[i].
 	RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error
+	// Hides the user's live items in ids, or shows them again when hidden is false. An item already in that state keeps
+	// it, so a hidden item keeps its first time. It returns each id it found, and whether it changed, for the audit log.
+	SetHidden(ctx context.Context, arg SetHiddenParams) ([]SetHiddenRow, error)
 	// Marks up to batch_size live rows right under parent_ids. Each row takes its parent's mark, and only a parent
 	// still in one of the root_ids groups counts. So after a restore of a group, nothing is left to mark under it.
 	TrashChildren(ctx context.Context, arg TrashChildrenParams) (int64, error)

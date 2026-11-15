@@ -27,14 +27,16 @@ import type { SuccessResponse } from "../../../pkg/api/api_models.ts";
 import type { ClipboardMode } from "../../../pkg/stores/clipboard_store.ts";
 import type { ItemsForm, PasteForm, SortField, StoredFile } from "../models.ts";
 
-// Add shows while any target is no favorite yet, so a mixed selection adds the rest. Remove shows when all targets are
-// favorites.
+// Hide and Add show while any target is not hidden or no favorite yet, so a mixed selection changes the rest.
+// Unhide and Remove show when all targets are hidden or favorites.
 const MENU_ITEMS: MenuItem[] = [
     { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
     { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
     { label: "Copy", icon: "pi pi-copy", shortcut: "Ctrl+C", command: copyMenuTargets },
     { label: "Download", icon: "pi pi-download", command: downloadMenuTargets },
     { label: "Details", icon: "pi pi-info-circle", command: openDetails, disabled: notOneTarget },
+    { label: "Hide", icon: "pi pi-eye-slash", command: hideMenuTargets, visible: () => !allHidden() },
+    { label: "Unhide", icon: "pi pi-eye", command: unhideMenuTargets, visible: allHidden },
     { label: "Add to favorites", icon: "pi pi-star", command: addFavorites, visible: () => !allFavorites() },
     { label: "Remove from favorites", icon: "pi pi-star-fill", command: removeFavorites, visible: allFavorites },
     { separator: true },
@@ -73,6 +75,8 @@ const sortField = ref<SortField>("date");
 const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
+// Hidden items show greyed when this is on. The later "show hidden files" setting sets its default.
+const showHidden = ref<boolean>(false);
 
 // A copying row cannot be selected, so no action reaches it before its copy job ends.
 const selection = ref<StoredFile[]>([]);
@@ -116,6 +120,7 @@ async function getData(): Promise<void> {
             sort: sortField.value,
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
             search: query || null,
+            show_hidden: showHidden.value,
         });
         if (request !== latestRequest) return;
         files.value = response.data;
@@ -165,7 +170,8 @@ function childRoute(folder: StoredFile): RouteLocationRaw {
 function rowClass(item: StoredFile): string {
     if (item.is_copying) return COPYING_ROW;
     const row = itemView(item).row;
-    return clipboardStore.isCut(item.id) ? `${row} opacity-50` : row;
+    if (clipboardStore.isCut(item.id)) return `${row} opacity-50`;
+    return item.is_hidden ? `${row} opacity-60` : row;
 }
 
 function onSelectionChange(rows: StoredFile[]): void {
@@ -220,6 +226,10 @@ function allFavorites(): boolean {
     return menuTargets.value.length > 0 && menuTargets.value.every((item) => item.is_favorite);
 }
 
+function allHidden(): boolean {
+    return menuTargets.value.length > 0 && menuTargets.value.every((item) => item.is_hidden);
+}
+
 // The targets are read before the first await, because the menu clears its target when it hides.
 async function addFavorites(): Promise<void> {
     await changeItems(fileStore.addFavorites, menuTargets.value);
@@ -227,6 +237,14 @@ async function addFavorites(): Promise<void> {
 
 async function removeFavorites(): Promise<void> {
     await changeItems(fileStore.removeFavorites, menuTargets.value);
+}
+
+async function hideMenuTargets(): Promise<void> {
+    await changeItems(fileStore.hide, menuTargets.value);
+}
+
+async function unhideMenuTargets(): Promise<void> {
+    await changeItems(fileStore.unhide, menuTargets.value);
 }
 
 // changeItems runs one action on the items, shows the server's toast and reads the page again.
@@ -362,16 +380,32 @@ defineExpose({ refresh });
                                 @update:model-value="onSearchInput"
                             />
                         </IconField>
-                        <div v-if="selection.length > 0" class="flex shrink-0 items-center gap-1">
-                            <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
-                            <Button
-                                label="Clear"
-                                icon="pi pi-times"
-                                size="small"
-                                severity="secondary"
-                                variant="text"
-                                @click="selection = []"
-                            />
+                        <div class="flex shrink-0 items-center gap-3">
+                            <div v-if="selection.length > 0" class="flex items-center gap-1">
+                                <span class="text-sm tabular-nums text-fg-muted">{{ selection.length }} selected</span>
+                                <Button
+                                    label="Clear"
+                                    icon="pi pi-times"
+                                    size="small"
+                                    severity="secondary"
+                                    variant="text"
+                                    @click="selection = []"
+                                />
+                            </div>
+                            <label
+                                for="show-hidden-switch"
+                                class="flex cursor-pointer items-center gap-2 text-sm text-fg-muted"
+                                title="Show hidden items"
+                            >
+                                <i class="pi pi-eye-slash text-sm" />
+                                <span class="hidden sm:inline">Show hidden</span>
+                                <ToggleSwitch
+                                    v-model="showHidden"
+                                    input-id="show-hidden-switch"
+                                    aria-label="Show hidden items"
+                                    @update:model-value="refresh"
+                                />
+                            </label>
                         </div>
                     </div>
                     <div
@@ -448,6 +482,13 @@ defineExpose({ refresh });
                                 <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
                                     {{ data.name }}
                                 </span>
+                                <i
+                                    v-if="data.is_hidden"
+                                    class="pi pi-eye-slash shrink-0 text-xs text-fg-subtle"
+                                    role="img"
+                                    aria-label="Hidden"
+                                    title="Hidden"
+                                />
                                 <i
                                     v-if="data.is_favorite"
                                     class="pi pi-star-fill shrink-0 text-xs text-accent"
