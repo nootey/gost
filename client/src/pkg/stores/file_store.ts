@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
 import type { Page, SuccessResponse } from "../api/api_models.ts";
 import type {
+    Activity,
+    ActivityQuery,
     DownloadList,
     DownloadResponse,
     FolderForm,
@@ -46,6 +48,18 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
+        async getItem(id: number): Promise<StoredFile> {
+            const response = await apiClient.get<StoredFile>(`${this.apiPrefix}/${id}`);
+            return response.data;
+        },
+
+        async listActivity(id: number, query: ActivityQuery): Promise<Page<Activity>> {
+            const response = await apiClient.get<Page<Activity>>(`${this.apiPrefix}/${id}/activity`, {
+                params: { ...query },
+            });
+            return response.data;
+        },
+
         async rename(id: number, form: RenameForm): Promise<RenameResponse> {
             const response = await apiClient.patch<RenameResponse>(`${this.apiPrefix}/${id}`, form);
             return response.data;
@@ -85,6 +99,16 @@ export const useFileStore = defineStore("file", {
 
         zipUrl(id: number): string {
             return apiClient.url(`${this.downloadPrefix}/${id}/file`);
+        },
+
+        async addFavorites(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>("favorites", form);
+            return response.data;
+        },
+
+        async removeFavorites(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>("favorites/remove", form);
+            return response.data;
         },
 
         async listTrash(query: TrashQuery): Promise<Page<TrashedFile>> {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gost/config"
@@ -93,6 +94,8 @@ var (
 	errZipRemoved = errors.New("the download was removed")
 )
 
+var noExtra = json.RawMessage("{}")
+
 // zipFailedMessage is what the client shows for a zip whose job failed for good.
 const zipFailedMessage = "the zip could not be built"
 
@@ -102,7 +105,11 @@ type FileServiceInterface interface {
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
+	GetItem(ctx context.Context, userID, id int64) (*File, error)
+	ListActivity(ctx context.Context, userID, id int64, q ActivityQuery) (*utils.Page[*Activity], error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
+	AddFavorites(ctx context.Context, userID int64, ids []int64) error
+	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
 	GetDownload(ctx context.Context, userID, id int64) (*Download, error)
@@ -160,6 +167,7 @@ func toFileModel(dbFile database.File) *File {
 		ContentType: dbFile.ContentType,
 		SizeBytes:   dbFile.SizeBytes,
 		CreatedAt:   dbFile.CreatedAt,
+		UpdatedAt:   dbFile.UpdatedAt,
 		IsCopying:   dbFile.CopyRequestedAt.Valid,
 	}
 }
@@ -221,7 +229,7 @@ func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name s
 		return nil, err
 	}
 
-	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, func(q *database.Queries, freeName string) (database.File, error) {
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, EventUploaded, func(q *database.Queries, freeName string) (database.File, error) {
 		return q.CreateFile(ctx, database.CreateFileParams{
 			UserID:      userID,
 			ParentID:    sql.NullInt64{Int64: parentID, Valid: parentID != 0},
@@ -245,7 +253,7 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 		return nil, err
 	}
 
-	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FolderName, func(q *database.Queries, freeName string) (database.File, error) {
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FolderName, EventCreated, func(q *database.Queries, freeName string) (database.File, error) {
 		return q.CreateFolder(ctx, database.CreateFolderParams{
 			UserID:   userID,
 			ParentID: sql.NullInt64{Int64: parentID, Valid: parentID != 0},
@@ -279,6 +287,9 @@ func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*uti
 	for i, dbFile := range page.Data {
 		files[i] = toFileModel(dbFile)
 	}
+	if err := s.markFavorites(ctx, userID, files); err != nil {
+		return nil, err
+	}
 
 	return &utils.Page[*File]{Data: files, NextCursor: page.NextCursor}, nil
 }
@@ -304,6 +315,46 @@ func (s *FileService) ResolveFolder(ctx context.Context, userID int64, names []s
 	return &FolderPath{Path: path}, nil
 }
 
+// GetItem reads one live item of the user, for its details.
+func (s *FileService) GetItem(ctx context.Context, userID, id int64) (*File, error) {
+	dbFile, err := s.queries.GetFile(ctx, database.GetFileParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errItemNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	f := toFileModel(dbFile)
+	if err := s.markFavorites(ctx, userID, []*File{f}); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// ListActivity reads one page of an item's audit log, newest first. The rows belong to the user, so an id that is not
+// the user's gives an empty page. The log stays after a purge, so it does not check that the item is live.
+func (s *FileService) ListActivity(ctx context.Context, userID, id int64, q ActivityQuery) (*utils.Page[*Activity], error) {
+	page, err := utils.FetchPage(ctx, s.db, activityList, utils.PageQuery[SortField]{
+		Args:     []any{userID, id},
+		Sort:     SortByDate,
+		Desc:     true,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, func(a *Activity) []any {
+		return []any{&a.ID, &a.Event, &a.Metadata, &a.CreatedAt}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	list := make([]*Activity, len(page.Data))
+	for i := range page.Data {
+		list[i] = &page.Data[i]
+	}
+	return &utils.Page[*Activity]{Data: list, NextCursor: page.NextCursor}, nil
+}
+
 func (s *FileService) Rename(ctx context.Context, userID, id int64, name string) (*File, error) {
 	dbFile, err := s.queries.GetFile(ctx, database.GetFileParams{ID: id, UserID: userID})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -318,7 +369,22 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 		return nil, err
 	}
 
-	dbFile, err = s.queries.RenameFile(ctx, database.RenameFileParams{ID: id, UserID: userID, Name: name})
+	oldName := dbFile.Name
+	extra, err := json.Marshal(map[string]string{"old_name": oldName})
+	if err != nil {
+		return nil, err
+	}
+	err = utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		var err error
+		if dbFile, err = q.RenameFile(ctx, database.RenameFileParams{ID: id, UserID: userID, Name: name}); err != nil {
+			return err
+		}
+		if dbFile.Name == oldName {
+			return nil
+		}
+		return q.LogItems(ctx, database.LogItemsParams{Event: string(EventRenamed), Extra: extra, UserID: userID, Ids: []int64{id}})
+	})
 	if utils.IsUniqueViolation(err, nameIndex) {
 		return nil, errNameTaken
 	}
@@ -329,7 +395,32 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 		return nil, err
 	}
 
-	return toFileModel(dbFile), nil
+	f := toFileModel(dbFile)
+	if err := s.markFavorites(ctx, userID, []*File{f}); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// AddFavorites marks the items as favorites. It is all or none, the same as Trash. An item that is a favorite already
+// stays one. It changes no item, so it takes no tree lock. A favorite stays with its item in the trash, and a purge
+// removes it.
+func (s *FileService) AddFavorites(ctx context.Context, userID int64, ids []int64) error {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	items, err := s.queries.ListLiveItems(ctx, database.ListLiveItemsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return err
+	}
+	if len(items) != len(ids) {
+		return errItemNotFound
+	}
+	return s.queries.AddFavorites(ctx, database.AddFavoritesParams{UserID: userID, Ids: ids})
+}
+
+// RemoveFavorites drops the favorite mark of the items. An id that is not a favorite of the user changes nothing.
+func (s *FileService) RemoveFavorites(ctx context.Context, userID int64, ids []int64) error {
+	return s.queries.RemoveFavorites(ctx, database.RemoveFavoritesParams{UserID: userID, Ids: ids})
 }
 
 // OpenFile opens one live file of the user for a download. A folder downloads as a zip, and a file that still copies
@@ -513,6 +604,10 @@ func (s *FileService) Move(ctx context.Context, userID, parentID int64, ids []in
 		if _, err := s.lockPasteItems(ctx, q, userID, parentID, ids, errMoveIntoItself); err != nil {
 			return err
 		}
+		// Before the move, so the log still sees the folder each item leaves.
+		if err := q.LogMoves(ctx, database.LogMovesParams{ParentID: parentID, UserID: userID, Ids: ids}); err != nil {
+			return err
+		}
 		return q.MoveItems(ctx, database.MoveItemsParams{ParentID: parentID, UserID: userID, Ids: ids})
 	})
 	if utils.IsUniqueViolation(err, nameIndex) {
@@ -562,6 +657,11 @@ func (s *FileService) Copy(ctx context.Context, userID, parentID int64, ids []in
 			return err
 		}
 		slices.Sort(rootIDs)
+		// Only the copies the user pasted get a row. The rows the job adds under them get none.
+		err = q.LogItems(ctx, database.LogItemsParams{Event: string(EventCopied), Extra: noExtra, UserID: userID, Ids: rootIDs})
+		if err != nil {
+			return err
+		}
 		_, err = s.queue.InsertTx(ctx, tx, jobs.CopyItemsArgs{UserID: userID, RootIDs: rootIDs}, nil)
 		return err
 	})
@@ -599,8 +699,10 @@ func (s *FileService) Trash(ctx context.Context, userID int64, ids []int64) erro
 				folders = append(folders, item.ID)
 			}
 		}
-		if len(folders) == 0 {
-			return nil
+		// Only the items the user deleted get a row, not the rows under them.
+		err = q.LogItems(ctx, database.LogItemsParams{Event: string(EventTrashed), Extra: noExtra, UserID: userID, Ids: ids})
+		if err != nil || len(folders) == 0 {
+			return err
 		}
 		_, err = s.queue.InsertTx(ctx, tx, jobs.TrashSubtreesArgs{UserID: userID, RootIDs: folders}, nil)
 		return err
@@ -698,7 +800,11 @@ func (s *FileService) Restore(ctx context.Context, userID int64, ids []int64) er
 				restored.Names[i] = name
 			}
 
-			return q.RestoreTrashRoots(ctx, restored)
+			if err := q.RestoreTrashRoots(ctx, restored); err != nil {
+				return err
+			}
+			// After the restore, so the row holds the name and the folder the item came back with.
+			return q.LogItems(ctx, database.LogItemsParams{Event: string(EventRestored), Extra: noExtra, UserID: userID, Ids: ids})
 		})
 		if utils.IsUniqueViolation(err, nameIndex) {
 			continue
@@ -725,6 +831,9 @@ func (s *FileService) Purge(ctx context.Context, userID int64, ids []int64) erro
 		}
 		if marked != int64(len(ids)) {
 			return errItemNotFound
+		}
+		if err := q.LogItems(ctx, database.LogItemsParams{Event: string(EventPurged), Extra: noExtra, UserID: userID, Ids: ids}); err != nil {
+			return err
 		}
 		_, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: userID, RootIDs: ids}, nil)
 		return err
@@ -1085,11 +1194,35 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	}
 
 	items := make([]*TrashedFile, len(page.Data))
+	files := make([]*File, len(page.Data))
 	for i, dbFile := range page.Data {
 		items[i] = &TrashedFile{File: *toFileModel(dbFile), TrashedAt: dbFile.TrashedAt.Time}
+		files[i] = &items[i].File
+	}
+	if err := s.markFavorites(ctx, userID, files); err != nil {
+		return nil, err
 	}
 
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
+}
+
+// markFavorites sets IsFavorite on the items with one query.
+func (s *FileService) markFavorites(ctx context.Context, userID int64, items []*File) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
+	}
+	favorites, err := s.queries.ListFavoriteIDs(ctx, database.ListFavoriteIDsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		item.IsFavorite = slices.Contains(favorites, item.ID)
+	}
+	return nil
 }
 
 // trashChildren marks the live rows right under parents, one batch per transaction, until a batch comes back short.
@@ -1161,6 +1294,10 @@ func (s *FileService) requestExpiredPurges(ctx context.Context, userID int64) er
 				BatchSize:     purgeBatchSize,
 			})
 			if err != nil || len(marked) == 0 {
+				return err
+			}
+			err = q.LogItems(ctx, database.LogItemsParams{Event: string(EventExpired), Extra: noExtra, UserID: userID, Ids: marked})
+			if err != nil {
 				return err
 			}
 			_, err = s.queue.InsertTx(ctx, tx, jobs.PurgeGroupsArgs{UserID: userID, RootIDs: marked}, nil)
@@ -1559,6 +1696,7 @@ func (s *FileService) insertWithFreeName(
 	userID, parentID int64,
 	name string,
 	kind utils.NameKind,
+	event ActivityEvent,
 	insert func(q *database.Queries, freeName string) (database.File, error),
 ) (database.File, error) {
 	base, _ := utils.SplitName(name, kind)
@@ -1588,8 +1726,10 @@ func (s *FileService) insertWithFreeName(
 				return err
 			}
 
-			dbFile, err = insert(q, freeName)
-			return err
+			if dbFile, err = insert(q, freeName); err != nil {
+				return err
+			}
+			return q.LogItems(ctx, database.LogItemsParams{Event: string(event), Extra: noExtra, UserID: userID, Ids: []int64{dbFile.ID}})
 		})
 		if utils.IsUniqueViolation(err, nameIndex) {
 			continue

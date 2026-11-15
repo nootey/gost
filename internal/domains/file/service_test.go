@@ -813,6 +813,267 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
 }
 
+// Favorites show in the list. Adding a favorite again changes nothing.
+func (s *FileServiceTestSuite) TestAddFavorites_MarksItems() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, 0, "a.txt", "a")
+	b := s.upload(userID, 0, "b.txt", "b")
+
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID, a.ID, a.ID}))
+
+	s.Equal(map[string]bool{"Docs": true, "a.txt": true, "b.txt": false}, s.favoriteMarks(userID, 0))
+
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{a.ID, b.ID}))
+
+	s.Equal(map[string]bool{"Docs": true, "a.txt": true, "b.txt": true}, s.favoriteMarks(userID, 0))
+	s.Equal(3, s.favoriteRows())
+}
+
+// One bad id undoes the rest: an unknown id, another user's item, or an item in the trash.
+func (s *FileServiceTestSuite) TestAddFavorites_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a.txt", "a")
+	trashed := s.upload(alice, 0, "trashed.txt", "t")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+	bobFile := s.upload(bob, 0, "bob.txt", "b")
+
+	for _, bad := range []int64{999, bobFile.ID, trashed.ID} {
+		err := svc.AddFavorites(context.Background(), alice, []int64{a.ID, bad})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+	s.Equal(0, s.favoriteRows())
+}
+
+// Remove drops only the user's own marks. An id that is no favorite changes nothing.
+func (s *FileServiceTestSuite) TestRemoveFavorites() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a.txt", "a")
+	b := s.upload(alice, 0, "b.txt", "b")
+	s.Require().NoError(svc.AddFavorites(context.Background(), alice, []int64{a.ID, b.ID}))
+
+	s.Require().NoError(svc.RemoveFavorites(context.Background(), bob, []int64{a.ID, b.ID}))
+	s.Require().NoError(svc.RemoveFavorites(context.Background(), alice, []int64{a.ID, 999}))
+
+	s.Equal(map[string]bool{"a.txt": false, "b.txt": true}, s.favoriteMarks(alice, 0))
+}
+
+// A favorite keeps its mark through a rename, the trash and a restore. A copy is no favorite, and a purge removes
+// the mark with the row.
+func (s *FileServiceTestSuite) TestFavorites_FollowTheItem() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	inner := s.upload(userID, docs.ID, "in.txt", "in")
+	other := s.createFolder(userID, 0, "Other")
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID, inner.ID}))
+
+	renamed, err := svc.Rename(context.Background(), userID, docs.ID, "Papers")
+	s.Require().NoError(err)
+	s.True(renamed.IsFavorite)
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, other.ID, []int64{docs.ID}))
+	s.workCopyJobs()
+	s.Equal(map[string]bool{"Papers": false}, s.favoriteMarks(userID, other.ID))
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	s.Require().NoError(err)
+	s.Require().Len(trash.Data, 1)
+	s.True(trash.Data[0].IsFavorite)
+
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{docs.ID}))
+	s.Equal(map[string]bool{"in.txt": true}, s.favoriteMarks(userID, docs.ID))
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+	s.workPurgeJobs()
+	s.Equal(0, s.favoriteRows())
+}
+
+// Upload, new folder and rename each write one audit row with the name and folder after the change. A rename to the
+// same name writes none.
+func (s *FileServiceTestSuite) TestActivity_UploadCreateAndRename() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	_, err := svc.Rename(context.Background(), userID, a.ID, "b.txt")
+	s.Require().NoError(err)
+	_, err = svc.Rename(context.Background(), userID, a.ID, "b.txt")
+	s.Require().NoError(err)
+
+	s.Equal([]map[string]any{
+		{"event": "renamed", "name": "b.txt", "folder": "Docs", "old_name": "a.txt"},
+		{"event": "uploaded", "name": "a.txt", "folder": "Docs"},
+	}, s.activity(userID, a.ID))
+	s.Equal([]map[string]any{{"event": "created", "name": "Docs", "folder": nil}}, s.activity(userID, docs.ID))
+}
+
+// A move logs the folder each item leaves and the one it goes to. A copy logs only the copies the user pasted.
+func (s *FileServiceTestSuite) TestActivity_MoveAndCopy() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	photos := s.createFolder(userID, 0, "Photos")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	inner := s.upload(userID, photos.ID, "in.txt", "i")
+	s.Require().NoError(svc.Move(context.Background(), userID, photos.ID, []int64{a.ID}))
+	s.Require().NoError(svc.Move(context.Background(), userID, 0, []int64{a.ID}))
+	s.Require().NoError(svc.Copy(context.Background(), userID, docs.ID, []int64{photos.ID}))
+	s.workCopyJobs()
+
+	s.Equal([]map[string]any{
+		{"event": "moved", "name": "a.txt", "from": "Photos", "folder": nil},
+		{"event": "moved", "name": "a.txt", "from": "Docs", "folder": "Photos"},
+		{"event": "uploaded", "name": "a.txt", "folder": "Docs"},
+	}, s.activity(userID, a.ID))
+	copyID := s.childID(userID, docs.ID, "Photos")
+	s.Equal([]map[string]any{{"event": "copied", "name": "Photos", "folder": "Docs"}}, s.activity(userID, copyID))
+	s.Empty(s.activity(userID, s.childID(userID, copyID, "in.txt")))
+	s.Len(s.activity(userID, photos.ID), 1)
+	s.Len(s.activity(userID, inner.ID), 1)
+}
+
+// Trash, restore and purge log the items the user picked, not the rows under them. A restore logs the name and folder
+// the item came back with. The log stays after the purge.
+func (s *FileServiceTestSuite) TestActivity_TrashRestoreAndPurge() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	inner := s.upload(userID, docs.ID, "in.txt", "i")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
+	s.workTrashJobs()
+	s.upload(userID, 0, "a.txt", "taken")
+	// Docs is still in the trash, so a.txt comes back to Home, where its name is taken.
+	s.Require().NoError(svc.Restore(context.Background(), userID, []int64{a.ID}))
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
+	s.workPurgeJobs()
+
+	s.Equal([]map[string]any{
+		{"event": "restored", "name": "a (1).txt", "folder": nil},
+		{"event": "trashed", "name": "a.txt", "folder": "Docs"},
+		{"event": "uploaded", "name": "a.txt", "folder": "Docs"},
+	}, s.activity(userID, a.ID))
+	s.Equal([]map[string]any{
+		{"event": "purged", "name": "Docs", "folder": nil},
+		{"event": "trashed", "name": "Docs", "folder": nil},
+		{"event": "created", "name": "Docs", "folder": nil},
+	}, s.activity(userID, docs.ID))
+	s.Len(s.activity(userID, inner.ID), 1)
+}
+
+// The trash sweep logs its purge as "expired", so the log tells it from a purge the user asked for.
+func (s *FileServiceTestSuite) TestActivity_ExpiredBySweep() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.upload(userID, 0, "a.txt", "a")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a.ID}))
+	s.moveTrashedAt(a.ID, 31*24)
+
+	s.Require().NoError(svc.SweepTrash(context.Background()))
+
+	s.Equal("expired", s.activity(userID, a.ID)[0]["event"])
+}
+
+// A change that fails writes no audit row: the row is in the same transaction.
+func (s *FileServiceTestSuite) TestActivity_FailedChangeLogsNothing() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "a.txt", "a")
+	a := s.upload(userID, 0, "a.txt", "a")
+	b := s.upload(userID, 0, "b.txt", "b")
+
+	s.Equal("a.txt already exists in this folder", s.errorMessage(svc.Move(context.Background(), userID, docs.ID, []int64{a.ID})))
+	_, err := svc.Rename(context.Background(), userID, b.ID, "a.txt")
+	s.Equal("an item with this name already exists", s.errorMessage(err))
+	s.Equal("item not found", s.errorMessage(svc.Trash(context.Background(), userID, []int64{a.ID, 999})))
+
+	s.Len(s.activity(userID, a.ID), 1)
+	s.Len(s.activity(userID, b.ID), 1)
+}
+
+// The log comes newest first, in pages. Another user's id gives an empty page.
+func (s *FileServiceTestSuite) TestListActivity_Pages() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a0.txt", "a")
+	for i := 1; i <= 11; i++ {
+		_, err := svc.Rename(context.Background(), alice, a.ID, fmt.Sprintf("a%d.txt", i))
+		s.Require().NoError(err)
+	}
+
+	var names []string
+	cursor := ""
+	pages := 0
+	for {
+		page, err := svc.ListActivity(context.Background(), alice, a.ID, file.ActivityQuery{Cursor: cursor, PageSize: 5})
+		s.Require().NoError(err)
+		pages++
+		for _, entry := range page.Data {
+			var meta map[string]any
+			s.Require().NoError(json.Unmarshal(entry.Metadata, &meta))
+			names = append(names, meta["name"].(string))
+		}
+		if page.NextCursor == nil {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	s.Equal(3, pages)
+	s.Len(names, 12)
+	s.Equal("a11.txt", names[0])
+	s.Equal("a0.txt", names[11])
+
+	page, err := svc.ListActivity(context.Background(), bob, a.ID, file.ActivityQuery{})
+	s.Require().NoError(err)
+	s.Empty(page.Data)
+
+	_, err = svc.ListActivity(context.Background(), alice, a.ID, file.ActivityQuery{Cursor: "bad"})
+	s.Equal("invalid cursor", s.errorMessage(err))
+}
+
+func (s *FileServiceTestSuite) TestGetItem() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	a := s.upload(alice, docs.ID, "a.txt", "alpha")
+	trashed := s.upload(alice, 0, "trashed.txt", "t")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+	s.Require().NoError(svc.AddFavorites(context.Background(), alice, []int64{a.ID}))
+
+	got, err := svc.GetItem(context.Background(), alice, a.ID)
+
+	s.Require().NoError(err)
+	s.Equal("a.txt", got.Name)
+	s.Equal(&docs.ID, got.ParentID)
+	s.Equal(int64(5), got.SizeBytes)
+	s.True(got.IsFavorite)
+	s.False(got.UpdatedAt.IsZero())
+
+	for _, check := range []struct{ user, id int64 }{{bob, a.ID}, {alice, trashed.ID}, {alice, 999}} {
+		_, err := svc.GetItem(context.Background(), check.user, check.id)
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, check)
+		s.Equal("item not found", msg)
+	}
+}
+
 func (s *FileServiceTestSuite) TestOpenFile_Success() {
 	userID := s.seedUser()
 	docs := s.createFolder(userID, 0, "Docs")
@@ -3514,6 +3775,46 @@ func (s *FileServiceTestSuite) downloadIDs() []int64 {
 	}
 	s.Require().NoError(rows.Err())
 	return ids
+}
+
+// activity reads an item's whole audit log, newest first. Each entry is the metadata with the event added.
+func (s *FileServiceTestSuite) activity(userID, id int64) []map[string]any {
+	page, err := s.TC.Services.FileService.ListActivity(context.Background(), userID, id, file.ActivityQuery{PageSize: 100})
+	s.Require().NoError(err)
+	entries := []map[string]any{}
+	for _, entry := range page.Data {
+		meta := map[string]any{}
+		s.Require().NoError(json.Unmarshal(entry.Metadata, &meta))
+		meta["event"] = string(entry.Event)
+		entries = append(entries, meta)
+	}
+	return entries
+}
+
+// childID finds a live item by name in a folder.
+func (s *FileServiceTestSuite) childID(userID, parentID int64, name string) int64 {
+	var id int64
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT id FROM files WHERE user_id = $1 AND COALESCE(parent_id, 0) = $2 AND name = $3 AND trashed_at IS NULL`,
+		userID, parentID, name).Scan(&id))
+	return id
+}
+
+// favoriteMarks maps each item in one folder to its favorite mark.
+func (s *FileServiceTestSuite) favoriteMarks(userID, parentID int64) map[string]bool {
+	result, err := s.TC.Services.FileService.List(context.Background(), userID, newestFirst(parentID))
+	s.Require().NoError(err)
+	marks := map[string]bool{}
+	for _, f := range result.Data {
+		marks[f.Name] = f.IsFavorite
+	}
+	return marks
+}
+
+func (s *FileServiceTestSuite) favoriteRows() int {
+	var n int
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM favorites`).Scan(&n))
+	return n
 }
 
 func (s *FileServiceTestSuite) downloadRows() int {

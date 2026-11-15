@@ -385,6 +385,58 @@ func (h *FileHandler) Copy(w http.ResponseWriter, r *http.Request) {
 	h.resp.Success(w, http.StatusOK, "Copying.")
 }
 
+func (h *FileHandler) AddFavorites(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.AddFavorites(r.Context(), userID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Added to favorites.")
+}
+
+func (h *FileHandler) RemoveFavorites(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req ItemsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	if err := utils.ValidateIDs(req.IDs, "ids"); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.RemoveFavorites(r.Context(), userID, req.IDs); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Removed from favorites.")
+}
+
 func (h *FileHandler) Trash(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {
@@ -489,6 +541,57 @@ func (h *FileHandler) ListTrash(w http.ResponseWriter, r *http.Request) {
 		PageSize: pageSize,
 		Sort:     sort,
 		Desc:     order == "desc",
+	})
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
+}
+
+// GetItem sends one live item, for its details.
+func (h *FileHandler) GetItem(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	f, err := h.service.GetItem(r.Context(), userID, id)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, f)
+}
+
+// ListActivity sends one page of an item's audit log, newest first.
+func (h *FileHandler) ListActivity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.ListActivity(r.Context(), userID, id, ActivityQuery{
+		Cursor:   r.URL.Query().Get("cursor"),
+		PageSize: pageSize,
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)

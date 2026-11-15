@@ -10,6 +10,8 @@ import (
 )
 
 type Querier interface {
+	// Marks the user's live items in ids as favorites. An item that is a favorite already stays as it is.
+	AddFavorites(ctx context.Context, arg AddFavoritesParams) error
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
 	CountBuildingDownloads(ctx context.Context, userID int64) (int64, error)
@@ -58,6 +60,8 @@ type Querier interface {
 	ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error)
 	// The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
 	ListDownloads(ctx context.Context, arg ListDownloadsParams) ([]Download, error)
+	// The items in ids that are the user's favorites.
+	ListFavoriteIDs(ctx context.Context, arg ListFavoriteIDsParams) ([]int64, error)
 	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
 	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
 	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
@@ -102,6 +106,12 @@ type Querier interface {
 	LockUserDownloads(ctx context.Context, userID int64) error
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// Adds one "file" audit row per item in ids. The metadata holds the item's name and its folder's name as they are
+	// now (a null folder is Home), merged with extra. So a caller runs it after the change.
+	LogItems(ctx context.Context, arg LogItemsParams) error
+	// Adds a "moved" audit row per item in ids. It runs before the move, so "from" is the folder each item leaves and
+	// "folder" the one it goes to. A parent_id of 0 means the root, and a null folder is Home.
+	LogMoves(ctx context.Context, arg LogMovesParams) error
 	// Marks a ready zip as downloaded the first time the user gets it.
 	MarkDownloaded(ctx context.Context, arg MarkDownloadedParams) error
 	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
@@ -109,6 +119,7 @@ type Querier interface {
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
 	// Else the parent_id foreign key blocks the delete of the folder they were in.
 	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
+	RemoveFavorites(ctx context.Context, arg RemoveFavoritesParams) error
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.
 	RequestExpiredPurge(ctx context.Context, arg RequestExpiredPurgeParams) ([]int64, error)

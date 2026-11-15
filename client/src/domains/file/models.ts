@@ -6,9 +6,11 @@ export interface StoredFile {
     content_type: string;
     size_bytes: number;
     created_at: string;
+    updated_at: string;
     // True until the copy job ends. Until then the item does not open, and it cannot be selected or get a menu.
     // The list does not poll, so the user reloads the page to see the copy end.
     is_copying: boolean;
+    is_favorite: boolean;
 }
 
 export interface UploadResponse {
@@ -102,6 +104,32 @@ export interface DownloadResponse {
     title: string;
     message: string;
     download: Download;
+}
+
+// The events of an item's audit log. expired is a purge the trash sweep asked for after 30 days.
+export type ActivityEvent =
+    "uploaded" | "created" | "copied" | "renamed" | "moved" | "trashed" | "restored" | "purged" | "expired";
+
+// The item's name and its folder's name at the time of the event. A null folder is Home.
+// old_name comes with a rename, from (the folder the item left) with a move.
+export interface ActivityMetadata {
+    name: string;
+    folder: string | null;
+    old_name?: string;
+    from?: string | null;
+}
+
+export interface Activity {
+    id: number;
+    event: ActivityEvent;
+    metadata: ActivityMetadata;
+    created_at: string;
+}
+
+// A null cursor is the first page. The log comes newest first.
+export interface ActivityQuery {
+    cursor: string | null;
+    page_size: number;
 }
 
 // A folder and its parents, root first. The root itself is not in it.
