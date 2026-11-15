@@ -4,8 +4,10 @@ import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import { useConfirm } from "primevue/useconfirm";
 import { useAuthStore } from "../stores/auth_store.ts";
+import { useDownloadStore } from "../stores/download_store.ts";
 import { useThemeStore } from "../stores/theme_store.ts";
 import BrandMark from "./BrandMark.vue";
+import DownloadsDialog from "../../domains/file/components/DownloadsDialog.vue";
 import type { MenuItem } from "primevue/menuitem";
 
 interface NavLink {
@@ -21,7 +23,9 @@ const NAV_LINKS: NavLink[] = [
 
 const authStore = useAuthStore();
 const themeStore = useThemeStore();
+const downloadStore = useDownloadStore();
 const { user } = storeToRefs(authStore);
+const { pendingCount } = storeToRefs(downloadStore);
 const confirm = useConfirm();
 const route = useRoute();
 
@@ -31,6 +35,11 @@ const darkMode = computed<boolean>({
 });
 
 const menuRef = ref<{ toggle: (event: Event) => void } | null>(null);
+const downloadsVisible = ref<boolean>(false);
+
+const downloadsLabel = computed<string>(() =>
+    pendingCount.value > 0 ? `Downloads, ${pendingCount.value} waiting` : "Downloads",
+);
 
 const menuItems: MenuItem[] = [{ label: "Sign out", icon: "pi pi-sign-out", command: signOut }];
 
@@ -85,22 +94,42 @@ function signOut(): void {
             </nav>
         </div>
 
-        <Button
-            text
-            rounded
-            severity="secondary"
-            class="gap-2 p-1 sm:pr-3"
-            aria-haspopup="true"
-            aria-controls="account-menu"
-            aria-label="Account menu"
-            @click="toggleMenu"
-        >
-            <Avatar :label="initials" shape="circle" class="bg-accent-soft text-xs font-semibold text-accent" />
-            <span class="hidden max-w-40 truncate text-sm font-medium text-fg sm:block">
-                {{ user?.display_name }}
+        <div class="flex shrink-0 items-center gap-2">
+            <span class="relative">
+                <Button
+                    icon="pi pi-download"
+                    text
+                    rounded
+                    severity="secondary"
+                    :aria-label="downloadsLabel"
+                    title="Downloads"
+                    @click="downloadsVisible = true"
+                />
+                <Badge
+                    v-if="pendingCount > 0"
+                    :value="pendingCount"
+                    size="small"
+                    class="pointer-events-none absolute -top-0.5 -right-0.5"
+                />
             </span>
-            <i class="pi pi-chevron-down hidden text-xs text-fg-muted sm:block" />
-        </Button>
+
+            <Button
+                text
+                rounded
+                severity="secondary"
+                class="gap-2 p-1 sm:pr-3"
+                aria-haspopup="true"
+                aria-controls="account-menu"
+                aria-label="Account menu"
+                @click="toggleMenu"
+            >
+                <Avatar :label="initials" shape="circle" class="bg-accent-soft text-xs font-semibold text-accent" />
+                <span class="hidden max-w-40 truncate text-sm font-medium text-fg sm:block">
+                    {{ user?.display_name }}
+                </span>
+                <i class="pi pi-chevron-down hidden text-xs text-fg-muted sm:block" />
+            </Button>
+        </div>
 
         <Menu id="account-menu" ref="menuRef" :model="menuItems" popup class="w-64">
             <template #start>
@@ -120,5 +149,7 @@ function signOut(): void {
                 </label>
             </template>
         </Menu>
+
+        <DownloadsDialog v-model:visible="downloadsVisible" />
     </div>
 </template>

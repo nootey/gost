@@ -87,6 +87,25 @@ func CopyStoredFile(dir, srcKey, dstKey string) (int64, error) {
 	return writeStoredFile(root, dstKey, src, info.Size())
 }
 
+// OpenStoredFile opens the bytes under key for reading. A missing file gives ErrNoStoredFile.
+// The file stays open after the dir closes, so the caller closes only the file.
+func OpenStoredFile(dir, key string) (*os.File, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open upload dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	f, err := root.Open(key)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrNoStoredFile
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stored file: %w", err)
+	}
+	return f, nil
+}
+
 // writeStoredFile writes src under key through a temp file, so a file over maxBytes, or one that fails mid-write,
 // is never kept under a real key. Each write has its own temp file, and the rename replaces key in one step.
 func writeStoredFile(root *os.Root, key string, src io.Reader, maxBytes int64) (int64, error) {

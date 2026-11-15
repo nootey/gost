@@ -98,6 +98,8 @@ const apiClient = {
     patch: <T = any>(path: string, body?: unknown, options?: RequestOptions) =>
         request<T>("PATCH", path, body, options ?? {}),
     delete: <T = any>(path: string, options?: RequestOptions) => request<T>("DELETE", path, undefined, options ?? {}),
+    // The address of an API path for the browser to load by itself, such as a download link.
+    url: (path: string, params?: Record<string, unknown>): string => buildUrl(path, params),
 };
 
 export default apiClient;

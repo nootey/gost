@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
 import type { Page, SuccessResponse } from "../api/api_models.ts";
 import type {
+    DownloadList,
+    DownloadResponse,
     FolderForm,
     FolderPath,
     FolderResponse,
@@ -22,6 +24,7 @@ export const useFileStore = defineStore("file", {
         apiPrefix: "files",
         folderPrefix: "folders",
         trashPrefix: "trash",
+        downloadPrefix: "downloads",
     }),
     actions: {
         async list(query: ListQuery): Promise<Page<StoredFile>> {
@@ -57,6 +60,31 @@ export const useFileStore = defineStore("file", {
         async copy(form: PasteForm): Promise<SuccessResponse> {
             const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/copy`, form);
             return response.data;
+        },
+
+        // A link, not a request: the browser streams the file to disk and shows its own progress.
+        downloadUrl(id: number): string {
+            return apiClient.url(`${this.apiPrefix}/${id}/download`);
+        },
+
+        // The answer comes once the zip job is in place. The download store waits for the zip.
+        async requestZip(form: ItemsForm): Promise<DownloadResponse> {
+            const response = await apiClient.post<DownloadResponse>(this.downloadPrefix, form);
+            return response.data;
+        },
+
+        async listDownloads(): Promise<DownloadList> {
+            const response = await apiClient.get<DownloadList>(this.downloadPrefix);
+            return response.data;
+        },
+
+        async removeDownload(id: number): Promise<SuccessResponse> {
+            const response = await apiClient.delete<SuccessResponse>(`${this.downloadPrefix}/${id}`);
+            return response.data;
+        },
+
+        zipUrl(id: number): string {
+            return apiClient.url(`${this.downloadPrefix}/${id}/file`);
         },
 
         async listTrash(query: TrashQuery): Promise<Page<TrashedFile>> {

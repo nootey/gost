@@ -12,9 +12,11 @@ import (
 type Querier interface {
 	AssignPermissionToRole(ctx context.Context, arg AssignPermissionToRoleParams) error
 	ConfirmUserEmail(ctx context.Context, id int64) error
+	CountBuildingDownloads(ctx context.Context, userID int64) (int64, error)
 	// Adds a copy of each live item in ids to the folder, marked as copying. keys[i] is the new storage key of ids[i],
 	// empty for a folder. A parent_id of 0 means the root.
 	CreateCopyRoots(ctx context.Context, arg CreateCopyRootsParams) ([]int64, error)
+	CreateDownload(ctx context.Context, arg CreateDownloadParams) (Download, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error)
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
@@ -22,13 +24,23 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// Deletes a file copy root whose source has no bytes left to copy.
 	DeleteCopyRoot(ctx context.Context, arg DeleteCopyRootParams) error
+	// Deletes one download of the user and returns the key of its zip, null while it builds or when it failed.
+	DeleteDownload(ctx context.Context, arg DeleteDownloadParams) (sql.NullString, error)
+	// Deletes up to batch_size downloads older than retention_hours: a ready zip from when it got ready, any other from
+	// when it was asked for. A row still building that old lost its job for good. It returns the keys of their zips.
+	DeleteExpiredDownloads(ctx context.Context, arg DeleteExpiredDownloadsParams) ([]DeleteExpiredDownloadsRow, error)
 	// Deletes the rows in ids. A row outside the root_ids groups stays.
 	DeletePurgeRows(ctx context.Context, arg DeletePurgeRowsParams) (int64, error)
+	// Marks a zip that is still building as failed, so the client stops waiting for it.
+	FailDownload(ctx context.Context, arg FailDownloadParams) error
 	// Clears the copying mark, so the copy roots work like any other item.
 	FinishCopies(ctx context.Context, arg FinishCopiesParams) error
+	// Marks a zip ready. No row changes when the zip failed or its row is gone, and the caller then removes the zip.
+	FinishDownload(ctx context.Context, arg FinishDownloadParams) (int64, error)
 	// A folder that still copies does not count: nothing goes into it until the copy job ends.
 	FolderExists(ctx context.Context, arg FolderExistsParams) (bool, error)
 	GetDefaultRole(ctx context.Context) (Role, error)
+	GetDownload(ctx context.Context, arg GetDownloadParams) (Download, error)
 	GetFile(ctx context.Context, arg GetFileParams) (File, error)
 	GetPermissionByName(ctx context.Context, name string) (Permission, error)
 	GetRoleByName(ctx context.Context, name string) (Role, error)
@@ -44,12 +56,16 @@ type Querier interface {
 	ListCopyFolders(ctx context.Context, arg ListCopyFoldersParams) ([]int64, error)
 	// The copy roots in ids that still copy, with the storage key of their source. A root the job finished is not in it.
 	ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error)
+	// The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
+	ListDownloads(ctx context.Context, arg ListDownloadsParams) ([]Download, error)
 	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
 	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
 	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
 	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
 	// It skips the group roots, because the job starts from them.
 	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)
+	// The live items in ids, without locks. A zip request checks them, and the zip job reads them again when it starts.
+	ListLiveItems(ctx context.Context, arg ListLiveItemsParams) ([]File, error)
 	ListNamesByParentAndPrefix(ctx context.Context, arg ListNamesByParentAndPrefixParams) ([]string, error)
 	// The same as ListNamesByParentAndPrefix, for many folders at once. A name that matches another folder's prefix is still taken.
 	ListNamesByParentsAndPrefixes(ctx context.Context, arg ListNamesByParentsAndPrefixesParams) ([]ListNamesByParentsAndPrefixesRow, error)
@@ -75,12 +91,19 @@ type Querier interface {
 	// Up to batch_size live rows right under the sources of the copy folders in copy_ids that have no copy in them yet.
 	// A copy folder in the trash gets nothing more. A copy that is not done yet is left out, and so are the rows in skip_ids.
 	ListUncopiedChildren(ctx context.Context, arg ListUncopiedChildrenParams) ([]ListUncopiedChildrenRow, error)
+	// The names in keys that no download has as its zip.
+	ListUnknownZipKeys(ctx context.Context, keys []string) ([]string, error)
 	// The users with items in the trash longer than retention_days that are not marked for a permanent delete yet.
 	ListUsersWithExpiredTrash(ctx context.Context, retentionDays int32) ([]int64, error)
 	// Locks the live items in ids, so a rename cannot change a name before a move or a copy checks it.
 	LockLiveItems(ctx context.Context, arg LockLiveItemsParams) ([]LockLiveItemsRow, error)
+	// Makes one user's zip requests run one at a time, so two at once cannot both pass the limit on building zips.
+	// FOR NO KEY UPDATE does not block the foreign key checks of rows that point at the user.
+	LockUserDownloads(ctx context.Context, userID int64) error
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// Marks a ready zip as downloaded the first time the user gets it.
+	MarkDownloaded(ctx context.Context, arg MarkDownloadedParams) error
 	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
 	MoveItems(ctx context.Context, arg MoveItemsParams) error
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.

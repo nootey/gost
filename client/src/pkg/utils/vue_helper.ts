@@ -16,6 +16,8 @@ const ICON_BY_GROUP: Partial<Record<string, string>> = {
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
+const RELATIVE_FORMAT = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
 const vueHelper = {
     formatBytes(bytes: number): string {
         if (bytes < 1024) return `${bytes} B`;
@@ -39,6 +41,13 @@ const vueHelper = {
 
     formatDate(iso: string): string {
         return DATE_FORMAT.format(new Date(iso));
+    },
+
+    // formatTimeLeft says how far off a time is, such as "in 23 hours". Under an hour it counts minutes.
+    formatTimeLeft(iso: string): string {
+        const minutes = Math.max(0, Math.round((new Date(iso).getTime() - Date.now()) / 60_000));
+        if (minutes < 60) return RELATIVE_FORMAT.format(minutes, "minute");
+        return RELATIVE_FORMAT.format(Math.round(minutes / 60), "hour");
     },
 
     baseNameLength(name: string, isFolder: boolean): number {

@@ -3,6 +3,7 @@ package file
 import (
 	"gost/internal/apperr"
 	"gost/internal/utils"
+	"io"
 	"time"
 )
 
@@ -124,6 +125,54 @@ type RenameResponse struct {
 
 type ItemsRequest struct {
 	IDs []int64 `json:"ids"`
+}
+
+// FileContent is one file's bytes, open for a download. The caller closes Content.
+// ETag is the storage key: the bytes under a key never change, because a copy writes new keys.
+type FileContent struct {
+	Name        string
+	ContentType string
+	ModTime     time.Time
+	ETag        string
+	Content     io.ReadSeekCloser
+}
+
+// DownloadState is where a zip download is: building, ready or failed.
+type DownloadState string
+
+const (
+	DownloadBuilding DownloadState = "building"
+	DownloadReady    DownloadState = "ready"
+	DownloadFailed   DownloadState = "failed"
+)
+
+// Download is a zip of a folder or many items. Error says why a failed zip failed. ExpiresAt is when the sweep
+// removes it. Downloaded is true once the user got the ready zip.
+type Download struct {
+	ID         int64         `json:"id"`
+	Name       string        `json:"name"`
+	State      DownloadState `json:"state"`
+	Error      string        `json:"error,omitempty"`
+	SizeBytes  int64         `json:"size_bytes"`
+	CreatedAt  time.Time     `json:"created_at"`
+	ExpiresAt  time.Time     `json:"expires_at"`
+	Downloaded bool          `json:"downloaded"`
+}
+
+// zipFolder is a folder the zip job still has to read, with its path in the zip.
+type zipFolder struct {
+	id   int64
+	path string
+}
+
+type DownloadResponse struct {
+	apperr.SuccessResponse
+	Download *Download `json:"download"`
+}
+
+// DownloadList is the user's newest downloads, newest first.
+type DownloadList struct {
+	Downloads []*Download `json:"downloads"`
 }
 
 // PasteRequest moves or copies the items into one folder. A missing or null ParentID means the root.

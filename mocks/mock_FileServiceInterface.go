@@ -198,6 +198,80 @@ func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx 
 	return _c
 }
 
+// GetDownload provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) GetDownload(ctx context.Context, userID int64, id int64) (*file.Download, error) {
+	ret := _mock.Called(ctx, userID, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDownload")
+	}
+
+	var r0 *file.Download
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.Download, error)); ok {
+		return returnFunc(ctx, userID, id)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.Download); ok {
+		r0 = returnFunc(ctx, userID, id)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.Download)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+		r1 = returnFunc(ctx, userID, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_GetDownload_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDownload'
+type MockFileServiceInterface_GetDownload_Call struct {
+	*mock.Call
+}
+
+// GetDownload is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - id int64
+func (_e *MockFileServiceInterface_Expecter) GetDownload(ctx any, userID any, id any) *MockFileServiceInterface_GetDownload_Call {
+	return &MockFileServiceInterface_GetDownload_Call{Call: _e.mock.On("GetDownload", ctx, userID, id)}
+}
+
+func (_c *MockFileServiceInterface_GetDownload_Call) Run(run func(ctx context.Context, userID int64, id int64)) *MockFileServiceInterface_GetDownload_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_GetDownload_Call) Return(download *file.Download, err error) *MockFileServiceInterface_GetDownload_Call {
+	_c.Call.Return(download, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_GetDownload_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) (*file.Download, error)) *MockFileServiceInterface_GetDownload_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // List provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) List(ctx context.Context, userID int64, q file.ListQuery) (*utils.Page[*file.File], error) {
 	ret := _mock.Called(ctx, userID, q)
@@ -268,6 +342,74 @@ func (_c *MockFileServiceInterface_List_Call) Return(page *utils.Page[*file.File
 }
 
 func (_c *MockFileServiceInterface_List_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.ListQuery) (*utils.Page[*file.File], error)) *MockFileServiceInterface_List_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListDownloads provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) ListDownloads(ctx context.Context, userID int64) ([]*file.Download, error) {
+	ret := _mock.Called(ctx, userID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDownloads")
+	}
+
+	var r0 []*file.Download
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([]*file.Download, error)); ok {
+		return returnFunc(ctx, userID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) []*file.Download); ok {
+		r0 = returnFunc(ctx, userID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*file.Download)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, userID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_ListDownloads_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDownloads'
+type MockFileServiceInterface_ListDownloads_Call struct {
+	*mock.Call
+}
+
+// ListDownloads is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+func (_e *MockFileServiceInterface_Expecter) ListDownloads(ctx any, userID any) *MockFileServiceInterface_ListDownloads_Call {
+	return &MockFileServiceInterface_ListDownloads_Call{Call: _e.mock.On("ListDownloads", ctx, userID)}
+}
+
+func (_c *MockFileServiceInterface_ListDownloads_Call) Run(run func(ctx context.Context, userID int64)) *MockFileServiceInterface_ListDownloads_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListDownloads_Call) Return(downloads []*file.Download, err error) *MockFileServiceInterface_ListDownloads_Call {
+	_c.Call.Return(downloads, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListDownloads_Call) RunAndReturn(run func(ctx context.Context, userID int64) ([]*file.Download, error)) *MockFileServiceInterface_ListDownloads_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -415,6 +557,154 @@ func (_c *MockFileServiceInterface_Move_Call) RunAndReturn(run func(ctx context.
 	return _c
 }
 
+// OpenFile provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) OpenFile(ctx context.Context, userID int64, id int64) (*file.FileContent, error) {
+	ret := _mock.Called(ctx, userID, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenFile")
+	}
+
+	var r0 *file.FileContent
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.FileContent, error)); ok {
+		return returnFunc(ctx, userID, id)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.FileContent); ok {
+		r0 = returnFunc(ctx, userID, id)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.FileContent)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+		r1 = returnFunc(ctx, userID, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_OpenFile_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenFile'
+type MockFileServiceInterface_OpenFile_Call struct {
+	*mock.Call
+}
+
+// OpenFile is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - id int64
+func (_e *MockFileServiceInterface_Expecter) OpenFile(ctx any, userID any, id any) *MockFileServiceInterface_OpenFile_Call {
+	return &MockFileServiceInterface_OpenFile_Call{Call: _e.mock.On("OpenFile", ctx, userID, id)}
+}
+
+func (_c *MockFileServiceInterface_OpenFile_Call) Run(run func(ctx context.Context, userID int64, id int64)) *MockFileServiceInterface_OpenFile_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenFile_Call) Return(fileContent *file.FileContent, err error) *MockFileServiceInterface_OpenFile_Call {
+	_c.Call.Return(fileContent, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenFile_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) (*file.FileContent, error)) *MockFileServiceInterface_OpenFile_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// OpenZip provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) OpenZip(ctx context.Context, userID int64, id int64) (*file.FileContent, error) {
+	ret := _mock.Called(ctx, userID, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenZip")
+	}
+
+	var r0 *file.FileContent
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.FileContent, error)); ok {
+		return returnFunc(ctx, userID, id)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.FileContent); ok {
+		r0 = returnFunc(ctx, userID, id)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.FileContent)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+		r1 = returnFunc(ctx, userID, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_OpenZip_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenZip'
+type MockFileServiceInterface_OpenZip_Call struct {
+	*mock.Call
+}
+
+// OpenZip is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - id int64
+func (_e *MockFileServiceInterface_Expecter) OpenZip(ctx any, userID any, id any) *MockFileServiceInterface_OpenZip_Call {
+	return &MockFileServiceInterface_OpenZip_Call{Call: _e.mock.On("OpenZip", ctx, userID, id)}
+}
+
+func (_c *MockFileServiceInterface_OpenZip_Call) Run(run func(ctx context.Context, userID int64, id int64)) *MockFileServiceInterface_OpenZip_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenZip_Call) Return(fileContent *file.FileContent, err error) *MockFileServiceInterface_OpenZip_Call {
+	_c.Call.Return(fileContent, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenZip_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) (*file.FileContent, error)) *MockFileServiceInterface_OpenZip_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Purge provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) Purge(ctx context.Context, userID int64, ids []int64) error {
 	ret := _mock.Called(ctx, userID, ids)
@@ -474,6 +764,69 @@ func (_c *MockFileServiceInterface_Purge_Call) Return(err error) *MockFileServic
 }
 
 func (_c *MockFileServiceInterface_Purge_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_Purge_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RemoveDownload provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) RemoveDownload(ctx context.Context, userID int64, id int64) error {
+	ret := _mock.Called(ctx, userID, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RemoveDownload")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) error); ok {
+		r0 = returnFunc(ctx, userID, id)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_RemoveDownload_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RemoveDownload'
+type MockFileServiceInterface_RemoveDownload_Call struct {
+	*mock.Call
+}
+
+// RemoveDownload is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - id int64
+func (_e *MockFileServiceInterface_Expecter) RemoveDownload(ctx any, userID any, id any) *MockFileServiceInterface_RemoveDownload_Call {
+	return &MockFileServiceInterface_RemoveDownload_Call{Call: _e.mock.On("RemoveDownload", ctx, userID, id)}
+}
+
+func (_c *MockFileServiceInterface_RemoveDownload_Call) Run(run func(ctx context.Context, userID int64, id int64)) *MockFileServiceInterface_RemoveDownload_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RemoveDownload_Call) Return(err error) *MockFileServiceInterface_RemoveDownload_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RemoveDownload_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) error) *MockFileServiceInterface_RemoveDownload_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -554,6 +907,80 @@ func (_c *MockFileServiceInterface_Rename_Call) Return(file1 *file.File, err err
 }
 
 func (_c *MockFileServiceInterface_Rename_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64, name string) (*file.File, error)) *MockFileServiceInterface_Rename_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RequestZip provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) RequestZip(ctx context.Context, userID int64, ids []int64) (*file.Download, error) {
+	ret := _mock.Called(ctx, userID, ids)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RequestZip")
+	}
+
+	var r0 *file.Download
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64) (*file.Download, error)); ok {
+		return returnFunc(ctx, userID, ids)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64) *file.Download); ok {
+		r0 = returnFunc(ctx, userID, ids)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.Download)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, []int64) error); ok {
+		r1 = returnFunc(ctx, userID, ids)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_RequestZip_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RequestZip'
+type MockFileServiceInterface_RequestZip_Call struct {
+	*mock.Call
+}
+
+// RequestZip is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - ids []int64
+func (_e *MockFileServiceInterface_Expecter) RequestZip(ctx any, userID any, ids any) *MockFileServiceInterface_RequestZip_Call {
+	return &MockFileServiceInterface_RequestZip_Call{Call: _e.mock.On("RequestZip", ctx, userID, ids)}
+}
+
+func (_c *MockFileServiceInterface_RequestZip_Call) Run(run func(ctx context.Context, userID int64, ids []int64)) *MockFileServiceInterface_RequestZip_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []int64
+		if args[2] != nil {
+			arg2 = args[2].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RequestZip_Call) Return(download *file.Download, err error) *MockFileServiceInterface_RequestZip_Call {
+	_c.Call.Return(download, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_RequestZip_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) (*file.Download, error)) *MockFileServiceInterface_RequestZip_Call {
 	_c.Call.Return(run)
 	return _c
 }

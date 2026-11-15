@@ -3,6 +3,7 @@
 package file_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"database/sql"
@@ -14,7 +15,9 @@ import (
 	"gost/internal/database"
 	"gost/internal/domains/file"
 	"gost/internal/jobs"
+	"gost/internal/utils"
 	"gost/tests/integration"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -22,10 +25,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -806,6 +811,597 @@ func (s *FileServiceTestSuite) TestRename_NotFound() {
 	result, err := s.TC.Services.FileService.List(context.Background(), bob, newestFirst(0))
 	s.Require().NoError(err)
 	s.Equal([]string{"Bob", "bob.txt"}, fileNames(result.Data))
+}
+
+func (s *FileServiceTestSuite) TestOpenFile_Success() {
+	userID := s.seedUser()
+	docs := s.createFolder(userID, 0, "Docs")
+	f := s.upload(userID, docs.ID, "notes.txt", "hello world")
+
+	content, err := s.TC.Services.FileService.OpenFile(context.Background(), userID, f.ID)
+
+	s.Require().NoError(err)
+	defer func() { _ = content.Content.Close() }()
+	s.Equal("notes.txt", content.Name)
+	s.Equal("text/plain; charset=utf-8", content.ContentType)
+	s.Equal(`"`+s.storageKey(f.ID)+`"`, content.ETag)
+	s.WithinDuration(f.CreatedAt, content.ModTime, time.Second)
+	body, err := io.ReadAll(content.Content)
+	s.Require().NoError(err)
+	s.Equal("hello world", string(body))
+}
+
+// Another user's file and a file in the trash look the same as an unknown id.
+func (s *FileServiceTestSuite) TestOpenFile_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	bobFile := s.upload(bob, 0, "bob.txt", "bob")
+	trashed := s.upload(alice, 0, "old.txt", "old")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+
+	for _, id := range []int64{999, bobFile.ID, trashed.ID} {
+		_, err := svc.OpenFile(context.Background(), alice, id)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("item not found", msg)
+	}
+}
+
+func (s *FileServiceTestSuite) TestOpenFile_Folder() {
+	userID := s.seedUser()
+	docs := s.createFolder(userID, 0, "Docs")
+
+	_, err := s.TC.Services.FileService.OpenFile(context.Background(), userID, docs.ID)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("a folder downloads as a zip", msg)
+}
+
+// A copy root has no bytes until the job writes them. After the job, it downloads like any file.
+func (s *FileServiceTestSuite) TestOpenFile_Copying() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(userID, 0, "Archive")
+	f := s.upload(userID, 0, "notes.txt", "hello world")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{f.ID}))
+	copyID := s.copiesOf(f.ID)[0]
+
+	_, err := svc.OpenFile(context.Background(), userID, copyID)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("notes.txt is still copying", msg)
+
+	s.workCopyJobs()
+	content, err := svc.OpenFile(context.Background(), userID, copyID)
+	s.Require().NoError(err)
+	defer func() { _ = content.Content.Close() }()
+	body, err := io.ReadAll(content.Content)
+	s.Require().NoError(err)
+	s.Equal("hello world", string(body))
+}
+
+func (s *FileServiceTestSuite) TestOpenFile_NoBytes() {
+	userID := s.seedUser()
+	id := s.seedFile(userID, "lost.txt")
+
+	_, err := s.TC.Services.FileService.OpenFile(context.Background(), userID, id)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("file not found on disk", msg)
+	s.Len(s.logs("a file has no bytes on disk"), 1)
+}
+
+func (s *FileServiceTestSuite) TestRequestZip_AddsDownloadAndJob() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID, docs.ID})
+
+	s.Require().NoError(err)
+	s.Equal("Docs.zip", dl.Name)
+	s.Equal(file.DownloadBuilding, dl.State)
+	s.Equal([]jobs.BuildZipArgs{{UserID: userID, DownloadID: dl.ID}}, s.zipJobs())
+	var queue string
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT queue FROM river_job WHERE kind = 'build_zip'`).Scan(&queue))
+	s.Equal(jobs.QueueDownloads, queue)
+
+	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
+	s.Require().NoError(err)
+	s.Equal(dl, got)
+}
+
+func (s *FileServiceTestSuite) TestRequestZip_Names() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	other := s.createFolder(userID, 0, "Other")
+	a := s.upload(userID, docs.ID, "a.txt", "a")
+	b := s.upload(userID, docs.ID, "b.txt", "b")
+	c := s.upload(userID, other.ID, "c.txt", "c")
+	home := s.upload(userID, 0, "home.txt", "h")
+
+	cases := []struct {
+		ids  []int64
+		name string
+	}{
+		{[]int64{docs.ID}, "Docs.zip"},
+		{[]int64{a.ID}, "a.txt.zip"},
+		{[]int64{a.ID, b.ID}, "Docs.zip"},
+		{[]int64{docs.ID, home.ID}, "Home.zip"},
+		{[]int64{a.ID, c.ID}, "Download.zip"},
+	}
+	for _, tc := range cases {
+		dl, err := svc.RequestZip(context.Background(), userID, tc.ids)
+
+		s.Require().NoError(err)
+		s.Equal(tc.name, dl.Name, tc.ids)
+		s.endDownload(dl.ID)
+	}
+}
+
+// Another user's item and an item in the trash look the same as an unknown id. Nothing is added.
+func (s *FileServiceTestSuite) TestRequestZip_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	mine := s.upload(alice, 0, "mine.txt", "m")
+	bobFile := s.upload(bob, 0, "bob.txt", "b")
+	trashed := s.upload(alice, 0, "old.txt", "o")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+
+	for _, id := range []int64{999, bobFile.ID, trashed.ID} {
+		_, err := svc.RequestZip(context.Background(), alice, []int64{mine.ID, id})
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("item not found", msg)
+	}
+	s.Equal(0, s.downloadRows())
+	s.Empty(s.zipJobs())
+}
+
+func (s *FileServiceTestSuite) TestRequestZip_Copying() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	archive := s.createFolder(userID, 0, "Archive")
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{docs.ID}))
+
+	_, err := svc.RequestZip(context.Background(), userID, []int64{s.copiesOf(docs.ID)[0]})
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("Docs is still copying", msg)
+	s.Equal(0, s.downloadRows())
+}
+
+// A ready or failed zip no longer counts. Each user has their own limit.
+func (s *FileServiceTestSuite) TestRequestZip_LimitPerUser() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	aliceDocs := s.createFolder(alice, 0, "Docs")
+	bobDocs := s.createFolder(bob, 0, "Docs")
+	var first int64
+	for i := range 3 {
+		dl, err := svc.RequestZip(context.Background(), alice, []int64{aliceDocs.ID})
+		s.Require().NoError(err)
+		if i == 0 {
+			first = dl.ID
+		}
+	}
+
+	_, err := svc.RequestZip(context.Background(), alice, []int64{aliceDocs.ID})
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("wait for your other downloads to finish", msg)
+
+	_, err = svc.RequestZip(context.Background(), bob, []int64{bobDocs.ID})
+	s.Require().NoError(err)
+
+	s.Require().NoError(svc.FailZip(context.Background(), alice, first))
+	_, err = svc.RequestZip(context.Background(), alice, []int64{aliceDocs.ID})
+	s.Require().NoError(err)
+}
+
+// Many requests at once wait for each other on the user lock, so only the limit of them gets in.
+func (s *FileServiceTestSuite) TestRequestZip_LimitHoldsUnderRace() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+
+	errs := make([]error, 10)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Go(func() { _, errs[i] = svc.RequestZip(context.Background(), userID, []int64{docs.ID}) })
+	}
+	wg.Wait()
+
+	var passed int
+	for _, err := range errs {
+		if err == nil {
+			passed++
+			continue
+		}
+		s.Equal("wait for your other downloads to finish", s.errorMessage(err))
+	}
+	s.Equal(3, passed)
+	s.Equal(3, s.downloadRows())
+}
+
+func (s *FileServiceTestSuite) TestBuildZip_FoldersAndFiles() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	sub := s.createFolder(userID, docs.ID, "Sub")
+	s.createFolder(userID, docs.ID, "Empty")
+	s.upload(userID, docs.ID, "a.txt", "alpha")
+	s.upload(userID, sub.ID, "b.txt", "beta")
+	c := s.upload(userID, 0, "c.txt", "gamma")
+	s.upload(userID, 0, "left-out.txt", "x")
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID, c.ID})
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
+	s.Require().NoError(err)
+	s.Equal(file.DownloadReady, got.State)
+	s.Equal([]string{
+		"Docs/", "Docs/Empty/", "Docs/Sub/", "Docs/Sub/b.txt=beta", "Docs/a.txt=alpha", "c.txt=gamma",
+	}, s.zipEntries(userID, dl.ID))
+	s.Len(s.zipFiles(), 1)
+	s.Equal([]map[string]any{{
+		"user_id": userID, "download_id": dl.ID, "files": int64(3), "folders": int64(3), "bytes": got.SizeBytes,
+	}}, s.logs("built a zip"))
+}
+
+// Each folder reads in pages, so a folder with more rows than a page, and a level with more folders than a page,
+// still go in whole.
+func (s *FileServiceTestSuite) TestBuildZip_ManyPagesAndLevels() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	big := s.createFolder(userID, 0, "Big")
+	for _, insert := range []string{
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT $1, $2, 'f' || i || '.txt', md5(random()::text), 'text/plain', 1 FROM generate_series(1, 260) i`,
+		`INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
+		SELECT $1, $2, 'Sub ' || i, '', 0 FROM generate_series(1, 120) i`,
+		`INSERT INTO files (user_id, parent_id, name, storage_key, content_type, size_bytes)
+		SELECT user_id, id, 'in.txt', md5(random()::text), 'text/plain', 1 FROM files
+		WHERE user_id = $1 AND parent_id = $2 AND storage_key IS NULL`,
+	} {
+		_, err := s.TC.DB.ExecContext(context.Background(), insert, userID, big.ID)
+		s.Require().NoError(err)
+	}
+	s.writeSeededBytes(userID)
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{big.ID})
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	entries := s.zipEntries(userID, dl.ID)
+	s.Len(entries, 1+260+120+120)
+	s.Contains(entries, "Big/f260.txt=f260.txt")
+	s.Contains(entries, "Big/Sub 120/in.txt=in.txt")
+	s.Equal(int64(380), s.logs("built a zip")[0]["files"])
+	s.Equal(int64(121), s.logs("built a zip")[0]["folders"])
+}
+
+// A copy that is not done yet is left out with all under it. A file with no bytes on disk is logged and left out.
+func (s *FileServiceTestSuite) TestBuildZip_LeavesOutCopyingAndLostFiles() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "a.txt", "alpha")
+	photos := s.createFolder(userID, 0, "Photos")
+	s.upload(userID, photos.ID, "p.jpg", "p")
+	s.Require().NoError(svc.Copy(context.Background(), userID, docs.ID, []int64{photos.ID}))
+	lost := s.seedFile(userID, "lost.txt")
+	s.Require().NoError(svc.Move(context.Background(), userID, docs.ID, []int64{lost}))
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	s.Equal([]string{"Docs/", "Docs/a.txt=alpha"}, s.zipEntries(userID, dl.ID))
+	s.Equal([]map[string]any{{"user_id": userID, "file_id": lost}}, s.logs("left a file with no bytes out of a zip"))
+}
+
+// Names in one folder are unique, but items from two folders can share one. The second gets a free name.
+func (s *FileServiceTestSuite) TestBuildZip_SameNameFromTwoFolders() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	other := s.createFolder(userID, 0, "Other")
+	first := s.upload(userID, docs.ID, "a.txt", "one")
+	second := s.upload(userID, other.ID, "a.txt", "two")
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{first.ID, second.ID})
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	s.Equal("Download.zip", dl.Name)
+	s.Equal([]string{"a (1).txt=two", "a.txt=one"}, s.zipEntries(userID, dl.ID))
+}
+
+// The test cap is 1 MB. The zip fails at once, because another run would stop at the same place.
+func (s *FileServiceTestSuite) TestBuildZip_OverTheSizeCap() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	for _, name := range []string{"a.bin", "b.bin"} {
+		_, err := svc.Upload(context.Background(), userID, docs.ID, name, bytes.NewReader(bytes.Repeat([]byte("x"), 600<<10)))
+		s.Require().NoError(err)
+	}
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
+	s.Require().NoError(err)
+	s.Equal(file.DownloadFailed, got.State)
+	s.Equal("the zip is larger than the 1 MB limit", got.Error)
+	s.Empty(s.zipFiles())
+	s.Len(s.logs("stopped a zip over the size cap"), 1)
+}
+
+// River gives up after the last attempt, so the worker marks the zip failed and the client stops waiting.
+// The run context is over by then, and the mark still goes in.
+func (s *FileServiceTestSuite) TestBuildZip_FailsAfterLastAttempt() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	worker := jobs.NewBuildZipWorker(svc)
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	run := func(attempt int) error {
+		return worker.Work(stopped, &river.Job[jobs.BuildZipArgs]{
+			JobRow: &rivertype.JobRow{Attempt: attempt, MaxAttempts: 3},
+			Args:   jobs.BuildZipArgs{UserID: userID, DownloadID: dl.ID},
+		})
+	}
+
+	s.Require().Error(run(2))
+	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
+	s.Require().NoError(err)
+	s.Equal(file.DownloadBuilding, got.State)
+
+	s.Require().Error(run(3))
+	got, err = svc.GetDownload(context.Background(), userID, dl.ID)
+	s.Require().NoError(err)
+	s.Equal(file.DownloadFailed, got.State)
+	s.Equal("the zip could not be built", got.Error)
+}
+
+// A failed or deleted download gets no zip.
+func (s *FileServiceTestSuite) TestBuildZip_SkipsFailedAndGoneDownloads() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	failed, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	gone, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.Require().NoError(svc.FailZip(context.Background(), userID, failed.ID))
+	_, err = s.TC.DB.ExecContext(context.Background(), `DELETE FROM downloads WHERE id = $1`, gone.ID)
+	s.Require().NoError(err)
+
+	s.workZipJobs()
+
+	got, err := svc.GetDownload(context.Background(), userID, failed.ID)
+	s.Require().NoError(err)
+	s.Equal(file.DownloadFailed, got.State)
+	s.Equal("the zip could not be built", got.Error)
+	s.Empty(s.zipFiles())
+	s.Empty(s.logs("built a zip"))
+}
+
+func (s *FileServiceTestSuite) TestOpenZip() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	s.upload(alice, docs.ID, "a.txt", "alpha")
+	dl, err := svc.RequestZip(context.Background(), alice, []int64{docs.ID})
+	s.Require().NoError(err)
+
+	_, err = svc.OpenZip(context.Background(), alice, dl.ID)
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusConflict, status)
+	s.Equal("the zip is not ready yet", msg)
+
+	s.workZipJobs()
+	got, err := svc.GetDownload(context.Background(), alice, dl.ID)
+	s.Require().NoError(err)
+	s.False(got.Downloaded)
+
+	content, err := svc.OpenZip(context.Background(), alice, dl.ID)
+	s.Require().NoError(err)
+	s.Require().NoError(content.Content.Close())
+	key := s.zipFiles()[0]
+	s.Equal("Docs.zip", content.Name)
+	s.Equal("application/zip", content.ContentType)
+	s.Equal(`"`+key+`"`, content.ETag)
+	got, err = svc.GetDownload(context.Background(), alice, dl.ID)
+	s.Require().NoError(err)
+	s.True(got.Downloaded)
+
+	for _, id := range []int64{dl.ID, 999} {
+		_, err = svc.OpenZip(context.Background(), bob, id)
+		status, msg = apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("download not found", msg)
+		_, err = svc.GetDownload(context.Background(), bob, id)
+		s.Equal("download not found", s.errorMessage(err))
+	}
+
+	s.Require().NoError(os.Remove(filepath.Join(s.TC.UploadDir, utils.ZipDir, key)))
+	_, err = svc.OpenZip(context.Background(), alice, dl.ID)
+	status, msg = apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("file not found on disk", msg)
+	s.Len(s.logs("a zip has no bytes on disk"), 1)
+}
+
+// The list holds the user's own downloads, newest first. A ready zip expires a day after it got ready, any other row
+// a day after the request.
+func (s *FileServiceTestSuite) TestListDownloads() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	s.upload(alice, docs.ID, "a.txt", "alpha")
+	ready, err := svc.RequestZip(context.Background(), alice, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.workZipJobs()
+	building, err := svc.RequestZip(context.Background(), alice, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.ageDownload(ready.ID, 5, 3)
+	s.ageDownload(building.ID, 2, 0)
+	_, err = svc.RequestZip(context.Background(), bob, []int64{s.createFolder(bob, 0, "Bob").ID})
+	s.Require().NoError(err)
+
+	list, err := svc.ListDownloads(context.Background(), alice)
+
+	s.Require().NoError(err)
+	s.Require().Len(list, 2)
+	s.Equal(building.ID, list[0].ID)
+	s.Equal(file.DownloadBuilding, list[0].State)
+	s.WithinDuration(list[0].CreatedAt.Add(24*time.Hour), list[0].ExpiresAt, 0)
+	s.Equal(ready.ID, list[1].ID)
+	s.Equal(file.DownloadReady, list[1].State)
+	s.Equal("Docs.zip", list[1].Name)
+	s.Positive(list[1].SizeBytes)
+	var readyAt time.Time
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT ready_at FROM downloads WHERE id = $1`, ready.ID).Scan(&readyAt))
+	s.WithinDuration(readyAt.Add(24*time.Hour), list[1].ExpiresAt, 0)
+	s.False(list[1].Downloaded)
+}
+
+// The list has no pages. It shows the 50 newest rows.
+func (s *FileServiceTestSuite) TestListDownloads_Newest50() {
+	userID := s.seedUser()
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		INSERT INTO downloads (user_id, name, item_ids, error)
+		SELECT $1, 'Docs ' || i || '.zip', '{1}', 'failed' FROM generate_series(1, 55) i`, userID)
+	s.Require().NoError(err)
+
+	list, err := s.TC.Services.FileService.ListDownloads(context.Background(), userID)
+
+	s.Require().NoError(err)
+	s.Require().Len(list, 50)
+	s.Equal("Docs 55.zip", list[0].Name)
+	s.Equal("Docs 6.zip", list[49].Name)
+}
+
+// Remove deletes the row and its zip. A building row has no zip yet, and its place under the limit frees at once.
+func (s *FileServiceTestSuite) TestRemoveDownload() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	s.upload(alice, docs.ID, "a.txt", "alpha")
+	request := func() int64 {
+		dl, err := svc.RequestZip(context.Background(), alice, []int64{docs.ID})
+		s.Require().NoError(err)
+		return dl.ID
+	}
+	ready := request()
+	s.workZipJobs()
+	building := []int64{request(), request(), request()}
+
+	for _, id := range []int64{ready, 999} {
+		err := svc.RemoveDownload(context.Background(), bob, id)
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("download not found", msg)
+	}
+	s.Len(s.zipFiles(), 1)
+
+	s.Require().NoError(svc.RemoveDownload(context.Background(), alice, ready))
+	s.Require().NoError(svc.RemoveDownload(context.Background(), alice, building[0]))
+
+	s.Equal(building[1:], s.downloadIDs())
+	s.Empty(s.zipFiles())
+	s.Equal("download not found", s.errorMessage(svc.RemoveDownload(context.Background(), alice, ready)))
+	request()
+}
+
+// A zip that does not go is logged. Its row is gone, so the sweep removes the zip later.
+func (s *FileServiceTestSuite) TestRemoveDownload_ZipThatDoesNotGo() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "a.txt", "alpha")
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.workZipJobs()
+	// A dir that is not empty cannot go with a remove.
+	path := filepath.Join(s.TC.UploadDir, utils.ZipDir, s.zipFiles()[0])
+	s.Require().NoError(os.Remove(path))
+	s.Require().NoError(os.Mkdir(path, 0o750))
+	s.Require().NoError(os.WriteFile(filepath.Join(path, "x"), []byte("x"), 0o640))
+
+	s.Require().NoError(svc.RemoveDownload(context.Background(), userID, dl.ID))
+
+	s.Empty(s.downloadIDs())
+	logs := s.logs("a removed download kept its zip")
+	s.Require().Len(logs, 1)
+	s.Equal(userID, logs[0]["user_id"])
+	s.Equal(dl.ID, logs[0]["download_id"])
+}
+
+// The user removes a download while its zip builds. The job reads its row again at most once a second, stops, and
+// keeps no zip. A named pipe holds the job inside a file until the row is gone and that second is over.
+func (s *FileServiceTestSuite) TestBuildZip_StopsWhenRemoved() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	slow := s.upload(userID, docs.ID, "slow.bin", "x")
+	pipe := filepath.Join(s.TC.UploadDir, s.storageKey(slow.ID))
+	s.Require().NoError(os.Remove(pipe))
+	s.Require().NoError(syscall.Mkfifo(pipe, 0o640))
+	s.T().Cleanup(func() {
+		_ = os.Remove(pipe)
+		_ = os.RemoveAll(filepath.Join(s.TC.UploadDir, utils.ZipDir))
+	})
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+
+	result := make(chan error, 1)
+	go func() {
+		result <- jobs.NewBuildZipWorker(svc).Work(context.Background(), &river.Job[jobs.BuildZipArgs]{
+			JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3},
+			Args:   jobs.BuildZipArgs{UserID: userID, DownloadID: dl.ID},
+		})
+	}()
+	// The open returns once the job opened the pipe to read it.
+	writer, err := os.OpenFile(pipe, os.O_WRONLY, 0)
+	s.Require().NoError(err)
+	defer func() { _ = writer.Close() }()
+	s.Require().NoError(svc.RemoveDownload(context.Background(), userID, dl.ID))
+	time.Sleep(1100 * time.Millisecond)
+	_, err = writer.Write([]byte("x"))
+	s.Require().NoError(err)
+	s.Require().NoError(writer.Close())
+
+	s.Require().NoError(<-result)
+	s.Empty(s.zipFiles())
+	s.Equal([]map[string]any{{"user_id": userID, "download_id": dl.ID}}, s.logs("stopped a zip whose download was removed"))
+	s.Empty(s.logs("built a zip"))
 }
 
 // A folder takes the rows under it along. Only the moved items get a new updated_at.
@@ -2469,6 +3065,97 @@ func (s *FileServiceTestSuite) TestSweepOrphans_RemovesOldFilesWithNoRow() {
 	s.Equal(map[string]any{orphan: int64(len("orphan")), temp: int64(len("orphan"))}, removed)
 }
 
+// The orphan sweep reads only the top of the upload dir, so it never removes a zip.
+func (s *FileServiceTestSuite) TestSweepOrphans_SkipsZipDir() {
+	userID := s.seedUser()
+	s.upload(userID, 0, "live.txt", "l")
+	stray := s.writeZipFile(fmt.Sprintf("%032x", 1), 25)
+
+	s.Require().NoError(s.TC.Services.FileService.SweepOrphans(context.Background()))
+
+	s.Equal([]string{stray}, s.zipFiles())
+	s.Empty(s.logs("removed an orphan file"))
+}
+
+// A ready zip goes 24 hours after it got ready. Any other download goes 24 hours after it was asked for: a failed one,
+// and one still building, whose job is gone for good.
+func (s *FileServiceTestSuite) TestSweepDownloads_RemovesExpired() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "a.txt", "a")
+	request := func() int64 {
+		dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+		s.Require().NoError(err)
+		return dl.ID
+	}
+	old, recent := request(), request()
+	s.workZipJobs()
+	failed, stuck, building := request(), request(), request()
+	s.Require().NoError(svc.FailZip(context.Background(), userID, failed))
+	oldKey, recentKey := s.downloadZipKey(old), s.downloadZipKey(recent)
+	s.ageDownload(old, 26, 25)
+	s.ageDownload(recent, 30, 23)
+	s.ageDownload(failed, 25, 0)
+	s.ageDownload(stuck, 25, 0)
+
+	s.Require().NoError(svc.SweepDownloads(context.Background()))
+
+	s.Equal([]int64{recent, building}, s.downloadIDs())
+	s.Equal([]string{recentKey}, s.zipFiles())
+	s.NotEqual(oldKey, recentKey)
+	logs := s.logs("removed expired downloads")
+	s.Require().Len(logs, 1)
+	s.ElementsMatch([]any{old, failed, stuck}, logs[0]["download_ids"])
+	s.Equal(int64(1), logs[0]["zips"])
+}
+
+func (s *FileServiceTestSuite) TestSweepDownloads_ManyBatches() {
+	userID := s.seedUser()
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		INSERT INTO downloads (user_id, name, item_ids, created_at)
+		SELECT $1, 'Docs.zip', '{1}', NOW() - INTERVAL '25 hours' FROM generate_series(1, 2500)`, userID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.TC.Services.FileService.SweepDownloads(context.Background()))
+
+	s.Equal(0, s.downloadRows())
+	s.Len(s.logs("removed expired downloads"), 3)
+}
+
+// A file in the zip dir with no row goes after 24 hours, and so does the temp file of a stopped build. A zip with a
+// row, a newer file and a name not in key form stay.
+func (s *FileServiceTestSuite) TestSweepDownloads_RemovesStrayFiles() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	s.upload(userID, docs.ID, "a.txt", "a")
+	_, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.workZipJobs()
+	key := s.zipFiles()[0]
+	s.ageZipFile(key, 25)
+	stray := s.writeZipFile(fmt.Sprintf("%032x", 1), 25)
+	temp := s.writeZipFile(fmt.Sprintf(".upload-%032x", 2), 25)
+	kept := []string{key, s.writeZipFile(fmt.Sprintf("%032x", 3), 23), s.writeZipFile("notes.txt", 25)}
+
+	s.Require().NoError(svc.SweepDownloads(context.Background()))
+
+	s.ElementsMatch(kept, s.zipFiles())
+	removed := map[string]any{}
+	for _, fields := range s.logs("removed a stray zip file") {
+		removed[fields["name"].(string)] = fields["size_bytes"]
+	}
+	s.Equal(map[string]any{stray: int64(len("stray")), temp: int64(len("stray"))}, removed)
+}
+
+// The zip dir comes with the first zip, so a sweep before it finds nothing to do.
+func (s *FileServiceTestSuite) TestSweepDownloads_NoZipDir() {
+	s.Require().NoError(os.RemoveAll(filepath.Join(s.TC.UploadDir, utils.ZipDir)))
+
+	s.Require().NoError(s.TC.Services.FileService.SweepDownloads(context.Background()))
+}
+
 // No row has bytes, so the app may point at a new database by mistake. The sweep keeps every file.
 func (s *FileServiceTestSuite) TestSweepOrphans_SkipsWhenNoRowHasBytes() {
 	userID := s.seedUser()
@@ -2686,10 +3373,14 @@ func queuedJobs[T river.JobArgs](s *FileServiceTestSuite) []T {
 }
 
 // workJobs runs the waiting jobs of one kind through the worker, the way River does, then removes them.
+// Each run is a first attempt.
 func workJobs[T river.JobArgs](s *FileServiceTestSuite, worker river.Worker[T]) {
 	var kind T
 	for _, args := range queuedJobs[T](s) {
-		s.Require().NoError(worker.Work(context.Background(), &river.Job[T]{Args: args}))
+		s.Require().NoError(worker.Work(context.Background(), &river.Job[T]{
+			JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3},
+			Args:   args,
+		}))
 	}
 	_, err := s.TC.DB.ExecContext(context.Background(), `DELETE FROM river_job WHERE kind = $1`, kind.Kind())
 	s.Require().NoError(err)
@@ -2717,6 +3408,118 @@ func (s *FileServiceTestSuite) copyJobs() []jobs.CopyItemsArgs {
 
 func (s *FileServiceTestSuite) workCopyJobs() {
 	workJobs[jobs.CopyItemsArgs](s, jobs.NewCopyItemsWorker(s.TC.Services.FileService))
+}
+
+func (s *FileServiceTestSuite) zipJobs() []jobs.BuildZipArgs {
+	return queuedJobs[jobs.BuildZipArgs](s)
+}
+
+// workZipJobs builds the waiting zips. The zip dir goes when the test ends, so later tests start with none.
+func (s *FileServiceTestSuite) workZipJobs() {
+	s.T().Cleanup(func() { _ = os.RemoveAll(filepath.Join(s.TC.UploadDir, utils.ZipDir)) })
+	workJobs[jobs.BuildZipArgs](s, jobs.NewBuildZipWorker(s.TC.Services.FileService))
+}
+
+// zipEntries reads a ready zip: "path/" for a folder and "path=content" for a file, in byte order.
+// Every entry must use Store.
+func (s *FileServiceTestSuite) zipEntries(userID, downloadID int64) []string {
+	content, err := s.TC.Services.FileService.OpenZip(context.Background(), userID, downloadID)
+	s.Require().NoError(err)
+	defer func() { _ = content.Content.Close() }()
+	raw, err := io.ReadAll(content.Content)
+	s.Require().NoError(err)
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	s.Require().NoError(err)
+
+	entries := []string{}
+	for _, f := range zr.File {
+		s.Equal(zip.Store, f.Method, f.Name)
+		if strings.HasSuffix(f.Name, "/") {
+			entries = append(entries, f.Name)
+			continue
+		}
+		rc, err := f.Open()
+		s.Require().NoError(err)
+		body, err := io.ReadAll(rc)
+		s.Require().NoError(err)
+		s.Require().NoError(rc.Close())
+		entries = append(entries, f.Name+"="+string(body))
+	}
+	slices.Sort(entries)
+	return entries
+}
+
+// zipFiles lists the files in the zip dir, temp files too.
+func (s *FileServiceTestSuite) zipFiles() []string {
+	entries, err := os.ReadDir(filepath.Join(s.TC.UploadDir, utils.ZipDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	s.Require().NoError(err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// endDownload marks a download failed, so it no longer counts toward the limit on building zips.
+func (s *FileServiceTestSuite) endDownload(id int64) {
+	_, err := s.TC.DB.ExecContext(context.Background(), `UPDATE downloads SET error = 'ended by the test' WHERE id = $1`, id)
+	s.Require().NoError(err)
+}
+
+// writeZipFile writes a file into the zip dir and moves its modified time back by hoursAgo. The zip dir goes when the
+// test ends.
+func (s *FileServiceTestSuite) writeZipFile(name string, hoursAgo int) string {
+	dir := filepath.Join(s.TC.UploadDir, utils.ZipDir)
+	s.Require().NoError(os.MkdirAll(dir, 0o750))
+	s.T().Cleanup(func() { _ = os.RemoveAll(dir) })
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, name), []byte("stray"), 0o640))
+	s.ageZipFile(name, hoursAgo)
+	return name
+}
+
+func (s *FileServiceTestSuite) ageZipFile(name string, hoursAgo int) {
+	past := time.Now().Add(-time.Duration(hoursAgo) * time.Hour)
+	s.Require().NoError(os.Chtimes(filepath.Join(s.TC.UploadDir, utils.ZipDir, name), past, past))
+}
+
+// ageDownload sets created_at and, on a ready download, ready_at to that many hours ago.
+func (s *FileServiceTestSuite) ageDownload(id int64, createdHoursAgo, readyHoursAgo int) {
+	_, err := s.TC.DB.ExecContext(context.Background(), `
+		UPDATE downloads
+		SET created_at = NOW() - make_interval(hours => $1),
+		    ready_at = CASE WHEN ready_at IS NULL THEN NULL ELSE NOW() - make_interval(hours => $2) END
+		WHERE id = $3`, createdHoursAgo, readyHoursAgo, id)
+	s.Require().NoError(err)
+}
+
+func (s *FileServiceTestSuite) downloadZipKey(id int64) string {
+	var key string
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT storage_key FROM downloads WHERE id = $1`, id).Scan(&key))
+	return key
+}
+
+func (s *FileServiceTestSuite) downloadIDs() []int64 {
+	rows, err := s.TC.DB.QueryContext(context.Background(), `SELECT id FROM downloads ORDER BY id`)
+	s.Require().NoError(err)
+	defer func() { _ = rows.Close() }()
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		s.Require().NoError(rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	s.Require().NoError(rows.Err())
+	return ids
+}
+
+func (s *FileServiceTestSuite) downloadRows() int {
+	var n int
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM downloads`).Scan(&n))
+	return n
 }
 
 func (s *FileServiceTestSuite) upload(userID, parentID int64, name, content string) *file.File {

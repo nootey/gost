@@ -12,7 +12,10 @@ import (
 	"gost/internal/jobs"
 	"gost/internal/utils"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -53,6 +56,26 @@ const copyBatchSize = 100
 // copyRetryHours is how long a copy root waits for its copy job before the sweep adds the job again.
 const copyRetryHours = 24
 
+// maxBuildingZips caps the zips one user can have building at once, so a user cannot fill the zip queue or the disk.
+const maxBuildingZips = 3
+
+// zipPageSize is the rows the zip job reads from a folder per query. It is the largest page the list allows.
+const zipPageSize = 100
+
+// zipRetentionHours is how long a download stays: a ready zip from when it got ready, any other from when it was asked
+// for. A file in the zip dir with no row is removed after the same time.
+const zipRetentionHours = 24
+
+// zipSweepBatchSize caps the downloads one statement of the download sweep deletes, and the zip files one query checks.
+const zipSweepBatchSize = 1000
+
+// downloadListSize is the rows the downloads list shows. The sweep keeps the list to one day, so it has no pages.
+const downloadListSize = 50
+
+// zipCheckInterval is how often the zip job reads its row again. A removed download stops its job by then, so it
+// does not hold the one zip worker. The read is one lookup by key.
+const zipCheckInterval = time.Second
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -61,7 +84,17 @@ var (
 	errMoveIntoItself = apperr.New(apperr.KindValidation, "a folder cannot move into itself or its own subfolder")
 	errCopyIntoItself = apperr.New(apperr.KindValidation, "a folder cannot be copied into itself or its own subfolder")
 	errSameFolder     = apperr.New(apperr.KindValidation, "the items are already in this folder")
+	errFolderDownload = apperr.New(apperr.KindValidation, "a folder downloads as a zip")
+	errNoBytes        = apperr.New(apperr.KindNotFound, "file not found on disk")
+	errDownloadGone   = apperr.New(apperr.KindNotFound, "download not found")
+	errTooManyZips    = apperr.New(apperr.KindConflict, "wait for your other downloads to finish")
+	errZipNotReady    = apperr.New(apperr.KindConflict, "the zip is not ready yet")
+	// errZipRemoved stops a zip job whose download the user removed.
+	errZipRemoved = errors.New("the download was removed")
 )
+
+// zipFailedMessage is what the client shows for a zip whose job failed for good.
+const zipFailedMessage = "the zip could not be built"
 
 // A parentID of 0 means the root folder.
 type FileServiceInterface interface {
@@ -70,6 +103,12 @@ type FileServiceInterface interface {
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
+	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
+	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
+	GetDownload(ctx context.Context, userID, id int64) (*Download, error)
+	ListDownloads(ctx context.Context, userID int64) ([]*Download, error)
+	RemoveDownload(ctx context.Context, userID, id int64) error
+	OpenZip(ctx context.Context, userID, id int64) (*FileContent, error)
 	Move(ctx context.Context, userID, parentID int64, ids []int64) error
 	Copy(ctx context.Context, userID, parentID int64, ids []int64) error
 	Trash(ctx context.Context, userID int64, ids []int64) error
@@ -81,20 +120,29 @@ type FileServiceInterface interface {
 var _ FileServiceInterface = (*FileService)(nil)
 
 type FileService struct {
-	queries *database.Queries
-	db      *sql.DB
-	queue   jobs.InserterInterface
-	cfg     config.UploadConfig
-	logger  *zap.Logger
+	queries  *database.Queries
+	db       *sql.DB
+	queue    jobs.InserterInterface
+	cfg      config.UploadConfig
+	download config.DownloadConfig
+	logger   *zap.Logger
 }
 
-func NewFileService(queries *database.Queries, db *sql.DB, queue jobs.InserterInterface, cfg config.UploadConfig, logger *zap.Logger) *FileService {
+func NewFileService(
+	queries *database.Queries,
+	db *sql.DB,
+	queue jobs.InserterInterface,
+	cfg config.UploadConfig,
+	download config.DownloadConfig,
+	logger *zap.Logger,
+) *FileService {
 	return &FileService{
-		queries: queries,
-		db:      db,
-		queue:   queue,
-		cfg:     cfg,
-		logger:  logger,
+		queries:  queries,
+		db:       db,
+		queue:    queue,
+		cfg:      cfg,
+		download: download,
+		logger:   logger,
 	}
 }
 
@@ -122,6 +170,28 @@ func fileFields(f *database.File) []any {
 		&f.ID, &f.UserID, &f.Name, &f.StorageKey, &f.ContentType, &f.SizeBytes,
 		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
 		&f.CopiedFromID, &f.CopyRequestedAt,
+	}
+}
+
+func toDownloadModel(dl database.Download) *Download {
+	// The sweep removes a ready zip a day after it got ready, any other row a day after the request.
+	state, from := DownloadBuilding, dl.CreatedAt
+	switch {
+	case dl.ReadyAt.Valid:
+		state, from = DownloadReady, dl.ReadyAt.Time
+	case dl.Error.Valid:
+		state = DownloadFailed
+	}
+
+	return &Download{
+		ID:         dl.ID,
+		Name:       dl.Name,
+		State:      state,
+		Error:      dl.Error.String,
+		SizeBytes:  dl.SizeBytes,
+		CreatedAt:  dl.CreatedAt,
+		ExpiresAt:  from.Add(zipRetentionHours * time.Hour),
+		Downloaded: dl.DownloadedAt.Valid,
 	}
 }
 
@@ -260,6 +330,173 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 	}
 
 	return toFileModel(dbFile), nil
+}
+
+// OpenFile opens one live file of the user for a download. A folder downloads as a zip, and a file that still copies
+// may not have its bytes yet.
+func (s *FileService) OpenFile(ctx context.Context, userID, id int64) (*FileContent, error) {
+	dbFile, err := s.queries.GetFile(ctx, database.GetFileParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errItemNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !dbFile.StorageKey.Valid {
+		return nil, errFolderDownload
+	}
+	if dbFile.CopyRequestedAt.Valid {
+		return nil, apperr.New(apperr.KindConflict, dbFile.Name+" is still copying")
+	}
+
+	f, err := utils.OpenStoredFile(s.cfg.Dir, dbFile.StorageKey.String)
+	if errors.Is(err, utils.ErrNoStoredFile) {
+		s.logger.Warn("a file has no bytes on disk", zap.Int64("user_id", userID), zap.Int64("file_id", id))
+		return nil, errNoBytes
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &FileContent{
+		Name:        dbFile.Name,
+		ContentType: dbFile.ContentType,
+		ModTime:     dbFile.CreatedAt,
+		ETag:        `"` + dbFile.StorageKey.String + `"`,
+		Content:     f,
+	}, nil
+}
+
+// RequestZip adds a zip download of the items and its build job. It is all or none, the same as Trash. It changes no
+// item, so it takes no tree lock, and it reads the items before the transaction. The user lock keeps two requests at
+// once from both passing the limit on building zips.
+func (s *FileService) RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error) {
+	ids = slices.Compact(slices.Sorted(slices.Values(ids)))
+
+	items, err := s.queries.ListLiveItems(ctx, database.ListLiveItemsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) != len(ids) {
+		return nil, errItemNotFound
+	}
+	for _, item := range items {
+		if item.CopyRequestedAt.Valid {
+			return nil, apperr.New(apperr.KindConflict, item.Name+" is still copying")
+		}
+	}
+	name, err := s.zipName(ctx, userID, items)
+	if err != nil {
+		return nil, err
+	}
+
+	var dl database.Download
+	err = utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		q := s.queries.WithTx(tx)
+		if err := q.LockUserDownloads(ctx, userID); err != nil {
+			return err
+		}
+
+		building, err := q.CountBuildingDownloads(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if building >= maxBuildingZips {
+			return errTooManyZips
+		}
+
+		dl, err = q.CreateDownload(ctx, database.CreateDownloadParams{UserID: userID, Name: name, ItemIds: ids})
+		if err != nil {
+			return err
+		}
+		_, err = s.queue.InsertTx(ctx, tx, jobs.BuildZipArgs{UserID: userID, DownloadID: dl.ID}, nil)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return toDownloadModel(dl), nil
+}
+
+func (s *FileService) GetDownload(ctx context.Context, userID, id int64) (*Download, error) {
+	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errDownloadGone
+	}
+	if err != nil {
+		return nil, err
+	}
+	return toDownloadModel(dl), nil
+}
+
+func (s *FileService) ListDownloads(ctx context.Context, userID int64) ([]*Download, error) {
+	rows, err := s.queries.ListDownloads(ctx, database.ListDownloadsParams{UserID: userID, RowLimit: downloadListSize})
+	if err != nil {
+		return nil, err
+	}
+	list := make([]*Download, len(rows))
+	for i, row := range rows {
+		list[i] = toDownloadModel(row)
+	}
+	return list, nil
+}
+
+// RemoveDownload deletes a download, then its zip, the same order as the sweep, so a client never gets a ready row
+// whose zip is gone. A zip that does not go is logged, and the sweep removes it later. A job that still builds the
+// zip stops at its next check. A browser that downloads the zip right now still gets all of it, because Linux keeps an
+// open file readable after a remove.
+func (s *FileService) RemoveDownload(ctx context.Context, userID, id int64) error {
+	key, err := s.queries.DeleteDownload(ctx, database.DeleteDownloadParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errDownloadGone
+	}
+	if err != nil || !key.Valid {
+		return err
+	}
+
+	if err := utils.RemoveStoredFile(filepath.Join(s.cfg.Dir, utils.ZipDir), key.String); err != nil {
+		s.logger.Warn("a removed download kept its zip", zap.Int64("user_id", userID), zap.Int64("download_id", id),
+			zap.Error(err))
+	}
+	return nil
+}
+
+// OpenZip opens a ready zip of the user for a download and marks the zip downloaded. The ETag is the zip's key,
+// because a zip never changes.
+func (s *FileService) OpenZip(ctx context.Context, userID, id int64) (*FileContent, error) {
+	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errDownloadGone
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !dl.ReadyAt.Valid {
+		return nil, errZipNotReady
+	}
+
+	f, err := utils.OpenStoredFile(filepath.Join(s.cfg.Dir, utils.ZipDir), dl.StorageKey.String)
+	if errors.Is(err, utils.ErrNoStoredFile) {
+		s.logger.Warn("a zip has no bytes on disk", zap.Int64("user_id", userID), zap.Int64("download_id", id))
+		return nil, errNoBytes
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !dl.DownloadedAt.Valid {
+		if err := s.queries.MarkDownloaded(ctx, database.MarkDownloadedParams{ID: id, UserID: userID}); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
+
+	return &FileContent{
+		Name:        dl.Name,
+		ContentType: "application/zip",
+		ModTime:     dl.ReadyAt.Time,
+		ETag:        `"` + dl.StorageKey.String + `"`,
+		Content:     f,
+	}, nil
 }
 
 // Move is all or none, the same as Trash. A name in use in the target fails the move: it does not auto-rename.
@@ -597,6 +834,82 @@ func (s *FileService) CopyItems(ctx context.Context, userID int64, rootIDs []int
 	return nil
 }
 
+// BuildZip builds the zip of a download: the selected items, then the folders under them, level by level. The job only
+// reads, one short statement at a time, so it takes no tree lock. A rename or move during the build can change what
+// the zip holds: each folder goes in as the job finds it, the same as copy. A run after a failure starts again,
+// because a zip cannot go on from a half-written file. The job reads its row again every zipCheckInterval, and stops
+// when the user removed the download.
+func (s *FileService) BuildZip(ctx context.Context, userID, downloadID int64) error {
+	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil || dl.ReadyAt.Valid || dl.Error.Valid {
+		return err
+	}
+
+	zb, err := utils.NewZipBuilder(s.cfg.Dir, s.download.MaxZipMB<<20)
+	if err != nil {
+		return err
+	}
+	defer zb.Abort()
+	zb.CheckEvery(zipCheckInterval, func() error {
+		_, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
+		if errors.Is(err, sql.ErrNoRows) {
+			return errZipRemoved
+		}
+		return err
+	})
+
+	files, folders, err := s.writeZip(ctx, zb, userID, dl.ItemIds)
+	if errors.Is(err, errZipRemoved) {
+		s.logger.Info("stopped a zip whose download was removed", zap.Int64("user_id", userID),
+			zap.Int64("download_id", downloadID))
+		return nil
+	}
+	if errors.Is(err, utils.ErrZipTooLarge) {
+		// Another run would stop at the same place, so the zip fails now.
+		s.logger.Info("stopped a zip over the size cap", zap.Int64("user_id", userID), zap.Int64("download_id", downloadID))
+		return s.queries.FailDownload(ctx, database.FailDownloadParams{
+			Error:  sql.NullString{String: fmt.Sprintf("the zip is larger than the %d MB limit", s.download.MaxZipMB), Valid: true},
+			ID:     downloadID,
+			UserID: userID,
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	key, size, err := zb.Finish()
+	if err != nil {
+		return err
+	}
+	marked, err := s.queries.FinishDownload(ctx, database.FinishDownloadParams{
+		StorageKey: sql.NullString{String: key, Valid: true},
+		SizeBytes:  size,
+		ID:         downloadID,
+		UserID:     userID,
+	})
+	if err != nil || marked == 0 {
+		// The row is gone or failed meanwhile, or the update failed. No one can get this zip.
+		_ = utils.RemoveStoredFile(filepath.Join(s.cfg.Dir, utils.ZipDir), key)
+		return err
+	}
+
+	s.logger.Info("built a zip", zap.Int64("user_id", userID), zap.Int64("download_id", downloadID),
+		zap.Int64("files", files), zap.Int64("folders", folders), zap.Int64("bytes", size))
+	return nil
+}
+
+// FailZip marks a download that is still building as failed. The zip job calls it after its last attempt.
+func (s *FileService) FailZip(ctx context.Context, userID, downloadID int64) error {
+	return s.queries.FailDownload(ctx, database.FailDownloadParams{
+		Error:  sql.NullString{String: zipFailedMessage, Valid: true},
+		ID:     downloadID,
+		UserID: userID,
+	})
+}
+
 // SweepTrash marks the items in the trash longer than trashRetentionDays for a permanent delete and adds their purge jobs.
 // It also adds the purge job again for groups marked long ago, so a job River gave up on does not hide them forever.
 func (s *FileService) SweepTrash(ctx context.Context) error {
@@ -660,6 +973,68 @@ func (s *FileService) SweepCopies(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SweepDownloads removes the downloads older than zipRetentionHours, then the files in the zip dir that no row points
+// to, such as the temp file of a build the app stopped. It deletes the rows before their zips, so a client never gets
+// a ready row whose zip is gone. A zip that does not go has no row then, and a later sweep removes it.
+func (s *FileService) SweepDownloads(ctx context.Context) error {
+	zipDir := filepath.Join(s.cfg.Dir, utils.ZipDir)
+	for {
+		expired, err := s.queries.DeleteExpiredDownloads(ctx, database.DeleteExpiredDownloadsParams{
+			RetentionHours: zipRetentionHours,
+			BatchSize:      zipSweepBatchSize,
+		})
+		if err != nil {
+			return err
+		}
+
+		ids := make([]int64, len(expired))
+		var zips int64
+		for i, row := range expired {
+			ids[i] = row.ID
+			if !row.StorageKey.Valid {
+				continue
+			}
+			if err := utils.RemoveStoredFile(zipDir, row.StorageKey.String); err != nil {
+				return fmt.Errorf("failed to remove zip: %w", err)
+			}
+			zips++
+		}
+		if len(expired) > 0 {
+			s.logger.Info("removed expired downloads", zap.Int64s("download_ids", ids), zap.Int64("zips", zips))
+		}
+		if len(expired) < zipSweepBatchSize {
+			break
+		}
+	}
+
+	cutoff := time.Now().Add(-zipRetentionHours * time.Hour)
+	err := utils.ListStoredFiles(zipDir, cutoff, zipSweepBatchSize, func(files []utils.StoredFile) error {
+		byName := make(map[string]utils.StoredFile, len(files))
+		names := make([]string, len(files))
+		for i, f := range files {
+			byName[f.Name] = f
+			names[i] = f.Name
+		}
+		strays, err := s.queries.ListUnknownZipKeys(ctx, names)
+		if err != nil {
+			return err
+		}
+		for _, name := range strays {
+			if err := utils.RemoveStoredFile(zipDir, name); err != nil {
+				return fmt.Errorf("failed to remove stray zip file: %w", err)
+			}
+			s.logger.Info("removed a stray zip file", zap.String("name", name),
+				zap.Int64("size_bytes", byName[name].Size), zap.Time("modified_at", byName[name].ModTime))
+		}
+		return nil
+	})
+	// The zip dir comes with the first zip.
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // SweepOrphans removes the files in the upload dir that no row points to, such as the bytes of an upload that never got its row.
@@ -987,6 +1362,133 @@ func (s *FileService) insertCopies(ctx context.Context, add database.InsertCopie
 		return err
 	})
 	return added, err
+}
+
+// zipName names a zip after its one item, else after the folder the items are in. Items from more than one folder
+// (only through the API), or a folder gone since, give "Download.zip".
+func (s *FileService) zipName(ctx context.Context, userID int64, items []database.File) (string, error) {
+	if len(items) == 1 {
+		return items[0].Name + ".zip", nil
+	}
+	parentID := items[0].ParentID
+	for _, item := range items[1:] {
+		if item.ParentID != parentID {
+			return "Download.zip", nil
+		}
+	}
+	if !parentID.Valid {
+		return "Home.zip", nil
+	}
+
+	parent, err := s.queries.GetFile(ctx, database.GetFileParams{ID: parentID.Int64, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return "Download.zip", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return parent.Name + ".zip", nil
+}
+
+// writeZip writes the live items in ids, then the folders under them one level at a time. It returns the count of
+// files and of folders it wrote.
+func (s *FileService) writeZip(ctx context.Context, zb *utils.ZipBuilder, userID int64, ids []int64) (int64, int64, error) {
+	items, err := s.queries.ListLiveItems(ctx, database.ListLiveItemsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var files, folders int64
+	level, err := s.addZipEntries(ctx, zb, userID, "", items, make(map[string]bool), &files)
+	for len(level) > 0 && err == nil {
+		folders += int64(len(level))
+		var next []zipFolder
+		for _, folder := range level {
+			var found []zipFolder
+			if found, err = s.addZipFolder(ctx, zb, userID, folder, &files); err != nil {
+				break
+			}
+			next = append(next, found...)
+		}
+		level = next
+	}
+	return files, folders, err
+}
+
+// addZipFolder writes the rows of one folder through the list query, a page at a time, so no query reads a whole big
+// folder. It returns the folders in it.
+func (s *FileService) addZipFolder(ctx context.Context, zb *utils.ZipBuilder, userID int64, folder zipFolder, files *int64) ([]zipFolder, error) {
+	var found []zipFolder
+	taken := make(map[string]bool)
+	cursor := ""
+	for {
+		page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
+			Args:     []any{userID, folder.id, ""},
+			Sort:     SortByName,
+			Cursor:   cursor,
+			PageSize: zipPageSize,
+		}, fileFields)
+		if err != nil {
+			return nil, err
+		}
+		more, err := s.addZipEntries(ctx, zb, userID, folder.path+"/", page.Data, taken, files)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, more...)
+		if page.NextCursor == nil {
+			return found, nil
+		}
+		cursor = *page.NextCursor
+	}
+}
+
+// addZipEntries writes rows into the zip folder at prefix and returns the folders among them. taken holds the names
+// the zip has in that folder. Names in one folder are unique, but a rename during the build can repeat one, and the
+// repeat gets a free name. A copying item is left out with all under it. A file with no bytes is logged and left out.
+func (s *FileService) addZipEntries(
+	ctx context.Context,
+	zb *utils.ZipBuilder,
+	userID int64,
+	prefix string,
+	rows []database.File,
+	taken map[string]bool,
+	files *int64,
+) ([]zipFolder, error) {
+	var found []zipFolder
+	for _, row := range rows {
+		if row.CopyRequestedAt.Valid {
+			continue
+		}
+		isFolder := !row.StorageKey.Valid
+		name := row.Name
+		if taken[name] {
+			var err error
+			if name, err = utils.FreeName(name, utils.NameKindOf(isFolder), slices.Collect(maps.Keys(taken))); err != nil {
+				return nil, err
+			}
+		}
+		taken[name] = true
+		path := prefix + name
+
+		if isFolder {
+			if err := zb.AddFolder(path, row.CreatedAt); err != nil {
+				return nil, err
+			}
+			found = append(found, zipFolder{id: row.ID, path: path})
+			continue
+		}
+		_, err := zb.AddStoredFile(ctx, path, row.StorageKey.String, row.CreatedAt)
+		if errors.Is(err, utils.ErrNoStoredFile) {
+			s.logger.Warn("left a file with no bytes out of a zip", zap.Int64("user_id", userID), zap.Int64("file_id", row.ID))
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		*files++
+	}
+	return found, nil
 }
 
 // lockPasteItems runs the checks that Move and Copy share, after the tree lock: the items are live, the target is a

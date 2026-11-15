@@ -164,3 +164,12 @@ Uploads are stored on local disk. The database keeps the owner, name, size and t
 | `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. Docker mounts the `uploads` named volume here. |
 | `UPLOAD_MAX_SIZE_MB` | `50` | Largest file the API accepts. |
 | `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request. |
+
+### File downloads
+
+One file downloads as it is. A folder or many items download as one zip. A background job builds the zip, and the app keeps it for 24 hours.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOWNLOAD_TIMEOUT_SECONDS` | `3600` | Time limit for one download request. |
+| `DOWNLOAD_MAX_ZIP_MB` | `10240` | Largest zip the app builds. |

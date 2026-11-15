@@ -2,9 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useClipboardStore } from "../../../pkg/stores/clipboard_store.ts";
+import { useDownloadStore } from "../../../pkg/stores/download_store.ts";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
+import { startDownload } from "../../../pkg/utils/download_link.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
 import { itemView } from "../../../pkg/utils/item_view.ts";
 import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
@@ -29,6 +31,7 @@ const MENU_ITEMS: MenuItem[] = [
     { label: "Rename", icon: "pi pi-pencil", command: openRename, disabled: notOneTarget },
     { label: "Cut", icon: "pi pi-file-export", shortcut: "Ctrl+X", command: cutMenuTargets },
     { label: "Copy", icon: "pi pi-copy", shortcut: "Ctrl+C", command: copyMenuTargets },
+    { label: "Download", icon: "pi pi-download", command: downloadMenuTargets },
     { separator: true },
     { label: "Delete", icon: "pi pi-trash", danger: true, command: moveToTrash },
 ];
@@ -47,6 +50,7 @@ const props = defineProps<{ folderId: number | null; dir: string }>();
 
 const fileStore = useFileStore();
 const clipboardStore = useClipboardStore();
+const downloadStore = useDownloadStore();
 const toastStore = useToastStore();
 const router = useRouter();
 
@@ -184,6 +188,24 @@ async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<vo
 
 function notOneTarget(): boolean {
     return menuTargets.value.length !== 1;
+}
+
+// One file is a plain download. A folder or many items come as a zip that a job builds. The zip waits in the downloads
+// list in the header. The items are read before the first await, because the menu clears its target when it hides.
+async function downloadMenuTargets(): Promise<void> {
+    const items = menuTargets.value;
+    if (items.length === 0) return;
+    if (items.length === 1 && !items[0].is_folder) {
+        startDownload(fileStore.downloadUrl(items[0].id));
+        return;
+    }
+    try {
+        const response = await fileStore.requestZip({ ids: items.map((item) => item.id) });
+        downloadStore.add(response.download);
+        toastStore.successResponseToast(response);
+    } catch (error) {
+        toastStore.errorResponseToast(error);
+    }
 }
 
 function openRename(): void {
