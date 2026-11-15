@@ -101,6 +101,16 @@ export const useFileStore = defineStore("file", {
             return apiClient.url(`${this.downloadPrefix}/${id}/file`);
         },
 
+        async hide(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/hide`, form);
+            return response.data;
+        },
+
+        async unhide(form: ItemsForm): Promise<SuccessResponse> {
+            const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/unhide`, form);
+            return response.data;
+        },
+
         async addFavorites(form: ItemsForm): Promise<SuccessResponse> {
             const response = await apiClient.post<SuccessResponse>("favorites", form);
             return response.data;

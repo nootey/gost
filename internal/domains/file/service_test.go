@@ -1074,6 +1074,97 @@ func (s *FileServiceTestSuite) TestGetItem() {
 	}
 }
 
+// A hidden item leaves the list and the search, unless the list asks for hidden items. Unhide brings it back. Each
+// change writes one audit row, and a second hide changes nothing.
+func (s *FileServiceTestSuite) TestSetHidden_HidesAndShows() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	a := s.upload(userID, 0, "a.txt", "a")
+	s.upload(userID, 0, "b.txt", "b")
+
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{docs.ID, a.ID}, true))
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{a.ID}, true))
+
+	shown, err := svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"b.txt"}, fileNames(shown.Data))
+	q := newestFirst(0)
+	q.Search = "a."
+	found, err := svc.List(context.Background(), userID, q)
+	s.Require().NoError(err)
+	s.Empty(found.Data)
+	q = newestFirst(0)
+	q.ShowHidden = true
+	all, err := svc.List(context.Background(), userID, q)
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{"Docs": true, "a.txt": true, "b.txt": false}, hiddenMarks(all.Data))
+
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{a.ID}, false))
+
+	shown, err = svc.List(context.Background(), userID, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"b.txt", "a.txt"}, fileNames(shown.Data))
+	s.Equal([]map[string]any{
+		{"event": "unhidden", "name": "a.txt", "folder": nil},
+		{"event": "hidden", "name": "a.txt", "folder": nil},
+		{"event": "uploaded", "name": "a.txt", "folder": nil},
+	}, s.activity(userID, a.ID))
+}
+
+// One bad id undoes the rest: an unknown id, another user's item, or an item in the trash.
+func (s *FileServiceTestSuite) TestSetHidden_AllOrNone() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	a := s.upload(alice, 0, "a.txt", "a")
+	trashed := s.upload(alice, 0, "trashed.txt", "t")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+	bobFile := s.upload(bob, 0, "bob.txt", "b")
+
+	for _, bad := range []int64{999, bobFile.ID, trashed.ID} {
+		err := svc.SetHidden(context.Background(), alice, []int64{a.ID, bad}, true)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, bad)
+		s.Equal("item not found", msg)
+	}
+	shown, err := svc.List(context.Background(), alice, newestFirst(0))
+	s.Require().NoError(err)
+	s.Equal([]string{"a.txt"}, fileNames(shown.Data))
+	s.Len(s.activity(alice, a.ID), 1)
+}
+
+// A zip keeps hidden items, and a copy keeps the hidden mark, for the pasted item and the rows under it.
+func (s *FileServiceTestSuite) TestSetHidden_ZipAndCopyKeepHiddenItems() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	other := s.createFolder(userID, 0, "Other")
+	h := s.upload(userID, docs.ID, "h.txt", "hidden")
+	s.upload(userID, docs.ID, "v.txt", "shown")
+	secret := s.upload(userID, 0, "secret.txt", "s")
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{h.ID, secret.ID}, true))
+
+	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
+	s.Require().NoError(err)
+	s.workZipJobs()
+	s.Equal([]string{"Docs/", "Docs/h.txt=hidden", "Docs/v.txt=shown"}, s.zipEntries(userID, dl.ID))
+
+	s.Require().NoError(svc.Copy(context.Background(), userID, other.ID, []int64{docs.ID, secret.ID}))
+	s.workCopyJobs()
+	q := newestFirst(other.ID)
+	q.ShowHidden = true
+	copies, err := svc.List(context.Background(), userID, q)
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{"Docs": false, "secret.txt": true}, hiddenMarks(copies.Data))
+	q = newestFirst(s.childID(userID, other.ID, "Docs"))
+	q.ShowHidden = true
+	inner, err := svc.List(context.Background(), userID, q)
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{"h.txt": true, "v.txt": false}, hiddenMarks(inner.Data))
+}
+
 func (s *FileServiceTestSuite) TestOpenFile_Success() {
 	userID := s.seedUser()
 	docs := s.createFolder(userID, 0, "Docs")
@@ -3807,6 +3898,14 @@ func (s *FileServiceTestSuite) favoriteMarks(userID, parentID int64) map[string]
 	marks := map[string]bool{}
 	for _, f := range result.Data {
 		marks[f.Name] = f.IsFavorite
+	}
+	return marks
+}
+
+func hiddenMarks(files []*file.File) map[string]bool {
+	marks := map[string]bool{}
+	for _, f := range files {
+		marks[f.Name] = f.IsHidden
 	}
 	return marks
 }

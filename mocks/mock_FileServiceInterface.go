@@ -1402,6 +1402,75 @@ func (_c *MockFileServiceInterface_Restore_Call) RunAndReturn(run func(ctx conte
 	return _c
 }
 
+// SetHidden provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error {
+	ret := _mock.Called(ctx, userID, ids, hidden)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetHidden")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, []int64, bool) error); ok {
+		r0 = returnFunc(ctx, userID, ids, hidden)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_SetHidden_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetHidden'
+type MockFileServiceInterface_SetHidden_Call struct {
+	*mock.Call
+}
+
+// SetHidden is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - ids []int64
+//   - hidden bool
+func (_e *MockFileServiceInterface_Expecter) SetHidden(ctx any, userID any, ids any, hidden any) *MockFileServiceInterface_SetHidden_Call {
+	return &MockFileServiceInterface_SetHidden_Call{Call: _e.mock.On("SetHidden", ctx, userID, ids, hidden)}
+}
+
+func (_c *MockFileServiceInterface_SetHidden_Call) Run(run func(ctx context.Context, userID int64, ids []int64, hidden bool)) *MockFileServiceInterface_SetHidden_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 []int64
+		if args[2] != nil {
+			arg2 = args[2].([]int64)
+		}
+		var arg3 bool
+		if args[3] != nil {
+			arg3 = args[3].(bool)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_SetHidden_Call) Return(err error) *MockFileServiceInterface_SetHidden_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_SetHidden_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64, hidden bool) error) *MockFileServiceInterface_SetHidden_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Trash provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) Trash(ctx context.Context, userID int64, ids []int64) error {
 	ret := _mock.Called(ctx, userID, ids)

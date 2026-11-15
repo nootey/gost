@@ -104,6 +104,7 @@ type File struct {
 	PurgeRequestedAt sql.NullTime   `json:"purge_requested_at"`
 	CopiedFromID     sql.NullInt64  `json:"copied_from_id"`
 	CopyRequestedAt  sql.NullTime   `json:"copy_requested_at"`
+	HiddenAt         sql.NullTime   `json:"hidden_at"`
 }
 
 type Permission struct {

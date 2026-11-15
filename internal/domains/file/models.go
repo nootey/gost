@@ -20,6 +20,8 @@ type File struct {
 	// IsCopying is true until the copy job ends. Until then, nothing can go into the item, and it cannot be deleted or copied.
 	IsCopying  bool `json:"is_copying"`
 	IsFavorite bool `json:"is_favorite"`
+	// IsHidden is true when the user hid the item. The list leaves it out unless it asks for hidden items.
+	IsHidden bool `json:"is_hidden"`
 }
 
 // SortField is a column the list sorts by. The values match the list query.
@@ -36,13 +38,15 @@ const (
 // Postgres turns "(storage_key IS NULL) = false" into "storage_key IS NOT NULL", and the index does not match that. IS FALSE stays as it is.
 var foldersFirst = []string{"(storage_key IS NULL) IS TRUE", "(storage_key IS NULL) IS FALSE"}
 
-// fileList lists one folder. The args are the user id, the folder id (0 for the root) and the search.
-// Select * must match fileFields.
+// fileList lists one folder. The args are the user id, the folder id (0 for the root), the search, and whether to show
+// hidden items. Select * must match fileFields.
 var fileList = utils.KeysetList[SortField]{
 	Select: "*",
 	From:   "files",
-	// trashed_at IS NULL must stay as it is, so the list indexes match.
-	Where: "user_id = $1 AND COALESCE(parent_id, 0) = $2::bigint AND trashed_at IS NULL AND strpos(lower(name), lower($3::text)) > 0",
+	// trashed_at IS NULL must stay as it is, so the list indexes match. Hidden items are few, so the hidden check
+	// filters rows the index found and needs no index of its own.
+	Where: "user_id = $1 AND COALESCE(parent_id, 0) = $2::bigint AND trashed_at IS NULL AND strpos(lower(name), lower($3::text)) > 0" +
+		" AND ($4::boolean OR hidden_at IS NULL)",
 	Sorts: map[SortField][]string{
 		SortByName: {"lower(name)", "id"},
 		SortBySize: {"size_bytes", "lower(name)", "id"},
@@ -69,13 +73,15 @@ var trashList = utils.KeysetList[SortField]{
 }
 
 // ListQuery picks one page of a folder. A ParentID of 0 means the root. An empty Search matches every name.
+// ShowHidden adds the hidden items.
 type ListQuery struct {
-	ParentID int64
-	Cursor   string
-	PageSize int
-	Search   string
-	Sort     SortField
-	Desc     bool
+	ParentID   int64
+	Cursor     string
+	PageSize   int
+	Search     string
+	Sort       SortField
+	Desc       bool
+	ShowHidden bool
 }
 
 // TrashQuery picks one page of the trash. The date sort is the time of the delete.
@@ -197,8 +203,13 @@ const (
 	EventRestored ActivityEvent = "restored"
 	EventPurged   ActivityEvent = "purged"
 	// EventExpired is a purge the trash sweep asked for after the retention days.
-	EventExpired ActivityEvent = "expired"
+	EventExpired  ActivityEvent = "expired"
+	EventHidden   ActivityEvent = "hidden"
+	EventUnhidden ActivityEvent = "unhidden"
 )
+
+// hiddenEvents is the audit event of a hide (true) or an unhide (false).
+var hiddenEvents = map[bool]ActivityEvent{true: EventHidden, false: EventUnhidden}
 
 // activityList lists one record's audit log, newest first. The args are the user id and the item id.
 var activityList = utils.KeysetList[SortField]{
