@@ -1264,8 +1264,7 @@ func (s *FileServiceTestSuite) TestRequestZip_AddsDownloadAndJob() {
 		`SELECT queue FROM river_job WHERE kind = 'build_zip'`).Scan(&queue))
 	s.Equal(jobs.QueueDownloads, queue)
 
-	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
-	s.Require().NoError(err)
+	got := s.download(userID, dl.ID)
 	s.Equal(dl, got)
 }
 
@@ -1404,8 +1403,7 @@ func (s *FileServiceTestSuite) TestBuildZip_FoldersAndFiles() {
 
 	s.workZipJobs()
 
-	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
-	s.Require().NoError(err)
+	got := s.download(userID, dl.ID)
 	s.Equal(file.DownloadReady, got.State)
 	s.Equal([]string{
 		"Docs/", "Docs/Empty/", "Docs/Sub/", "Docs/Sub/b.txt=beta", "Docs/a.txt=alpha", "c.txt=gamma",
@@ -1499,8 +1497,7 @@ func (s *FileServiceTestSuite) TestBuildZip_OverTheSizeCap() {
 
 	s.workZipJobs()
 
-	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
-	s.Require().NoError(err)
+	got := s.download(userID, dl.ID)
 	s.Equal(file.DownloadFailed, got.State)
 	s.Equal("the zip is larger than the 1 MB limit", got.Error)
 	s.Empty(s.zipFiles())
@@ -1526,13 +1523,11 @@ func (s *FileServiceTestSuite) TestBuildZip_FailsAfterLastAttempt() {
 	}
 
 	s.Require().Error(run(2))
-	got, err := svc.GetDownload(context.Background(), userID, dl.ID)
-	s.Require().NoError(err)
+	got := s.download(userID, dl.ID)
 	s.Equal(file.DownloadBuilding, got.State)
 
 	s.Require().Error(run(3))
-	got, err = svc.GetDownload(context.Background(), userID, dl.ID)
-	s.Require().NoError(err)
+	got = s.download(userID, dl.ID)
 	s.Equal(file.DownloadFailed, got.State)
 	s.Equal("the zip could not be built", got.Error)
 }
@@ -1552,8 +1547,7 @@ func (s *FileServiceTestSuite) TestBuildZip_SkipsFailedAndGoneDownloads() {
 
 	s.workZipJobs()
 
-	got, err := svc.GetDownload(context.Background(), userID, failed.ID)
-	s.Require().NoError(err)
+	got := s.download(userID, failed.ID)
 	s.Equal(file.DownloadFailed, got.State)
 	s.Equal("the zip could not be built", got.Error)
 	s.Empty(s.zipFiles())
@@ -1575,8 +1569,7 @@ func (s *FileServiceTestSuite) TestOpenZip() {
 	s.Equal("the zip is not ready yet", msg)
 
 	s.workZipJobs()
-	got, err := svc.GetDownload(context.Background(), alice, dl.ID)
-	s.Require().NoError(err)
+	got := s.download(alice, dl.ID)
 	s.False(got.Downloaded)
 
 	content, err := svc.OpenZip(context.Background(), alice, dl.ID)
@@ -1586,8 +1579,7 @@ func (s *FileServiceTestSuite) TestOpenZip() {
 	s.Equal("Docs.zip", content.Name)
 	s.Equal("application/zip", content.ContentType)
 	s.Equal(`"`+key+`"`, content.ETag)
-	got, err = svc.GetDownload(context.Background(), alice, dl.ID)
-	s.Require().NoError(err)
+	got = s.download(alice, dl.ID)
 	s.True(got.Downloaded)
 
 	for _, id := range []int64{dl.ID, 999} {
@@ -1595,8 +1587,6 @@ func (s *FileServiceTestSuite) TestOpenZip() {
 		status, msg = apperr.Resolve(err)
 		s.Equal(http.StatusNotFound, status, id)
 		s.Equal("download not found", msg)
-		_, err = svc.GetDownload(context.Background(), bob, id)
-		s.Equal("download not found", s.errorMessage(err))
 	}
 
 	s.Require().NoError(os.Remove(filepath.Join(s.TC.UploadDir, utils.ZipDir, key)))
@@ -1716,8 +1706,8 @@ func (s *FileServiceTestSuite) TestRemoveDownload_ZipThatDoesNotGo() {
 	s.Equal(dl.ID, logs[0]["download_id"])
 }
 
-// The user removes a download while its zip builds. The job reads its row again at most once a second, stops, and
-// keeps no zip. A named pipe holds the job inside a file until the row is gone and that second is over.
+// The user removes a download while its zip builds. The tests check the row before each entry and each chunk, so the
+// job stops at its next check and keeps no zip. A named pipe holds the job inside a file until the row is gone.
 func (s *FileServiceTestSuite) TestBuildZip_StopsWhenRemoved() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
@@ -1745,9 +1735,8 @@ func (s *FileServiceTestSuite) TestBuildZip_StopsWhenRemoved() {
 	s.Require().NoError(err)
 	defer func() { _ = writer.Close() }()
 	s.Require().NoError(svc.RemoveDownload(context.Background(), userID, dl.ID))
-	time.Sleep(1100 * time.Millisecond)
-	_, err = writer.Write([]byte("x"))
-	s.Require().NoError(err)
+	// The job reads again after the write. If its check already saw the remove, it closed the pipe and the write fails.
+	_, _ = writer.Write([]byte("x"))
 	s.Require().NoError(writer.Close())
 
 	s.Require().NoError(<-result)
@@ -3852,6 +3841,19 @@ func (s *FileServiceTestSuite) downloadZipKey(id int64) string {
 	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
 		`SELECT storage_key FROM downloads WHERE id = $1`, id).Scan(&key))
 	return key
+}
+
+// download finds one download in the user's list, the same way the client reads it.
+func (s *FileServiceTestSuite) download(userID, id int64) *file.Download {
+	list, err := s.TC.Services.FileService.ListDownloads(context.Background(), userID)
+	s.Require().NoError(err)
+	for _, dl := range list {
+		if dl.ID == id {
+			return dl
+		}
+	}
+	s.FailNow("the download is not in the list", id)
+	return nil
 }
 
 func (s *FileServiceTestSuite) downloadIDs() []int64 {

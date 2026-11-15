@@ -197,28 +197,6 @@ func (h *FileHandler) RequestZip(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *FileHandler) GetDownload(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.GetUserID(r)
-	if !ok {
-		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
-		return
-	}
-
-	id, err := utils.URLParamID(r, "id")
-	if err != nil {
-		h.resp.Error(w, r, err)
-		return
-	}
-
-	dl, err := h.service.GetDownload(r.Context(), userID, id)
-	if err != nil {
-		h.resp.Error(w, r, err)
-		return
-	}
-
-	h.resp.JSON(w, http.StatusOK, dl)
-}
-
 func (h *FileHandler) ListDownloads(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

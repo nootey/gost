@@ -64,7 +64,6 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/trash/purge", suite.handler.Purge)
 	suite.router.Post("/downloads", suite.handler.RequestZip)
 	suite.router.Get("/downloads", suite.handler.ListDownloads)
-	suite.router.Get("/downloads/{id}", suite.handler.GetDownload)
 	suite.router.Delete("/downloads/{id}", suite.handler.RemoveDownload)
 	suite.router.Get("/downloads/{id}/file", suite.handler.DownloadZip)
 }
@@ -734,46 +733,6 @@ func (suite *FileHandlerTestSuite) TestRequestZip_ServiceError() {
 
 	suite.Equal(http.StatusConflict, w.Code)
 	suite.Equal("wait for your other downloads to finish", suite.errorMessage(w))
-}
-
-func (suite *FileHandlerTestSuite) TestGetDownload_Success() {
-	suite.mockService.EXPECT().
-		GetDownload(mock.Anything, testUserID, int64(9)).
-		Return(&file.Download{ID: 9, Name: "Docs.zip", State: file.DownloadFailed, Error: "the zip could not be built"}, nil).
-		Once()
-
-	w := suite.getPath("/downloads/9", true)
-
-	suite.Equal(http.StatusOK, w.Code)
-	var resp file.Download
-	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
-	suite.Equal(file.DownloadFailed, resp.State)
-	suite.Equal("the zip could not be built", resp.Error)
-}
-
-func (suite *FileHandlerTestSuite) TestGetDownload_InvalidID() {
-	w := suite.getPath("/downloads/abc", true)
-
-	suite.Equal(http.StatusBadRequest, w.Code)
-	suite.Equal("invalid id", suite.errorMessage(w))
-}
-
-func (suite *FileHandlerTestSuite) TestGetDownload_Unauthenticated() {
-	w := suite.getPath("/downloads/9", false)
-
-	suite.Equal(http.StatusUnauthorized, w.Code)
-}
-
-func (suite *FileHandlerTestSuite) TestGetDownload_ServiceError() {
-	suite.mockService.EXPECT().
-		GetDownload(mock.Anything, testUserID, int64(9)).
-		Return(nil, apperr.New(apperr.KindNotFound, "download not found")).
-		Once()
-
-	w := suite.getPath("/downloads/9", true)
-
-	suite.Equal(http.StatusNotFound, w.Code)
-	suite.Equal("download not found", suite.errorMessage(w))
 }
 
 func (suite *FileHandlerTestSuite) TestListDownloads_Success() {

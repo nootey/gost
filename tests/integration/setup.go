@@ -154,6 +154,7 @@ func testConfig() *config.Config {
 	cfg.Upload.TimeoutSeconds = 60
 	cfg.Download.TimeoutSeconds = 60
 	cfg.Download.MaxZipMB = 1
+	cfg.Download.ZipCheckSeconds = 0
 	return cfg
 }
 
