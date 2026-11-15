@@ -96,6 +96,9 @@ type DownloadConfig struct {
 	TimeoutSeconds int `mapstructure:"timeout_seconds" validate:"gt=0"`
 	// MaxZipMB caps one zip of a folder or many items. A zip takes as much disk space again as the files in it.
 	MaxZipMB int64 `mapstructure:"max_zip_mb" validate:"gt=0"`
+	// ZipCheckSeconds is how often a zip job checks that its download still exists, so a removed download stops its
+	// job. 0 checks before each entry and each chunk.
+	ZipCheckSeconds int `mapstructure:"zip_check_seconds" validate:"gte=0"`
 }
 
 var cfg *Config
@@ -150,6 +153,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("download.timeout_seconds", 3600)
 	v.SetDefault("download.max_zip_mb", 10240)
+	v.SetDefault("download.zip_check_seconds", 1)
 }
 
 func Load() error {

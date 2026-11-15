@@ -173,3 +173,4 @@ One file downloads as it is. A folder or many items download as one zip. A backg
 |----------|---------|-------------|
 | `DOWNLOAD_TIMEOUT_SECONDS` | `3600` | Time limit for one download request. |
 | `DOWNLOAD_MAX_ZIP_MB` | `10240` | Largest zip the app builds. |
+| `DOWNLOAD_ZIP_CHECK_SECONDS` | `1` | How often a zip job checks that its download still exists. |

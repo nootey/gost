@@ -19,6 +19,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("UPLOAD_MAX_SIZE_MB", "10")
 	t.Setenv("DOWNLOAD_TIMEOUT_SECONDS", "120")
 	t.Setenv("DOWNLOAD_MAX_ZIP_MB", "500")
+	t.Setenv("DOWNLOAD_ZIP_CHECK_SECONDS", "5")
 
 	if err := Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -46,8 +47,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	if c.Upload.Dir != "/data/uploads" || c.Upload.MaxSizeMB != 10 {
 		t.Errorf("Upload = %+v, want dir /data/uploads max 10 MB", c.Upload)
 	}
-	if c.Download.TimeoutSeconds != 120 || c.Download.MaxZipMB != 500 {
-		t.Errorf("Download = %+v, want timeout 120s max zip 500 MB", c.Download)
+	if c.Download.TimeoutSeconds != 120 || c.Download.MaxZipMB != 500 || c.Download.ZipCheckSeconds != 5 {
+		t.Errorf("Download = %+v, want timeout 120s max zip 500 MB zip check 5s", c.Download)
 	}
 	want := []string{"https://a.example", "https://b.example"}
 	if len(c.Cors.AllowedOrigins) != len(want) {
@@ -81,8 +82,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Upload.Dir != "./storage/uploads" || c.Upload.MaxSizeMB != 50 || c.Upload.TimeoutSeconds != 300 {
 		t.Errorf("Upload = %+v, want dir ./storage/uploads max 50 MB timeout 300s", c.Upload)
 	}
-	if c.Download.TimeoutSeconds != 3600 || c.Download.MaxZipMB != 10240 {
-		t.Errorf("Download = %+v, want timeout 3600s max zip 10240 MB", c.Download)
+	if c.Download.TimeoutSeconds != 3600 || c.Download.MaxZipMB != 10240 || c.Download.ZipCheckSeconds != 1 {
+		t.Errorf("Download = %+v, want timeout 3600s max zip 10240 MB zip check 1s", c.Download)
 	}
 }
 

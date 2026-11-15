@@ -73,10 +73,6 @@ const zipSweepBatchSize = 1000
 // downloadListSize is the rows the downloads list shows. The sweep keeps the list to one day, so it has no pages.
 const downloadListSize = 50
 
-// zipCheckInterval is how often the zip job reads its row again. A removed download stops its job by then, so it
-// does not hold the one zip worker. The read is one lookup by key.
-const zipCheckInterval = time.Second
-
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -113,7 +109,6 @@ type FileServiceInterface interface {
 	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
-	GetDownload(ctx context.Context, userID, id int64) (*Download, error)
 	ListDownloads(ctx context.Context, userID int64) ([]*Download, error)
 	RemoveDownload(ctx context.Context, userID, id int64) error
 	OpenZip(ctx context.Context, userID, id int64) (*FileContent, error)
@@ -533,17 +528,6 @@ func (s *FileService) RequestZip(ctx context.Context, userID int64, ids []int64)
 		_, err = s.queue.InsertTx(ctx, tx, jobs.BuildZipArgs{UserID: userID, DownloadID: dl.ID}, nil)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return toDownloadModel(dl), nil
-}
-
-func (s *FileService) GetDownload(ctx context.Context, userID, id int64) (*Download, error) {
-	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: id, UserID: userID})
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errDownloadGone
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -976,8 +960,8 @@ func (s *FileService) CopyItems(ctx context.Context, userID int64, rootIDs []int
 // BuildZip builds the zip of a download: the selected items, then the folders under them, level by level. The job only
 // reads, one short statement at a time, so it takes no tree lock. A rename or move during the build can change what
 // the zip holds: each folder goes in as the job finds it, the same as copy. A run after a failure starts again,
-// because a zip cannot go on from a half-written file. The job reads its row again every zipCheckInterval, and stops
-// when the user removed the download.
+// because a zip cannot go on from a half-written file. The job reads its row again every ZipCheckSeconds, and stops
+// when the user removed the download, so a removed download does not hold the one zip worker.
 func (s *FileService) BuildZip(ctx context.Context, userID, downloadID int64) error {
 	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -992,7 +976,7 @@ func (s *FileService) BuildZip(ctx context.Context, userID, downloadID int64) er
 		return err
 	}
 	defer zb.Abort()
-	zb.CheckEvery(zipCheckInterval, func() error {
+	zb.CheckEvery(time.Duration(s.download.ZipCheckSeconds)*time.Second, func() error {
 		_, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
 		if errors.Is(err, sql.ErrNoRows) {
 			return errZipRemoved

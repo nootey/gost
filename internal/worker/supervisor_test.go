@@ -3,9 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -20,8 +20,11 @@ func (s *svc) Run(ctx context.Context) error { return s.run(ctx) }
 
 func TestSupervisorStopsAllOnContextCancel(t *testing.T) {
 	var stopped int32
+	var started sync.WaitGroup
+	started.Add(2)
 
 	blockUntilCancel := func(ctx context.Context) error {
+		started.Done()
 		<-ctx.Done()
 		atomic.AddInt32(&stopped, 1)
 		return nil
@@ -33,7 +36,7 @@ func TestSupervisorStopsAllOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		started.Wait()
 		cancel()
 	}()
 
