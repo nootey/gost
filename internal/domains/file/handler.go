@@ -158,7 +158,8 @@ func (h *FileHandler) DownloadZip(w http.ResponseWriter, r *http.Request) {
 	h.serveContent(w, r, h.service.OpenZip)
 }
 
-// RequestZip answers once the download row and its job are in place. The client asks GetDownload until the zip is ready.
+// RequestZip answers once the download row and its job are in place. The client reads the downloads list until the zip
+// is ready.
 func (h *FileHandler) RequestZip(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {
@@ -209,6 +210,43 @@ func (h *FileHandler) GetDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.resp.JSON(w, http.StatusOK, dl)
+}
+
+func (h *FileHandler) ListDownloads(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	list, err := h.service.ListDownloads(r.Context(), userID)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, DownloadList{Downloads: list})
+}
+
+func (h *FileHandler) RemoveDownload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	id, err := utils.URLParamID(r, "id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	if err := h.service.RemoveDownload(r.Context(), userID, id); err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.Success(w, http.StatusOK, "Removed.")
 }
 
 // serveContent sends the bytes open returns for the id in the URL. ServeContent answers range requests and the

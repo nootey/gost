@@ -190,8 +190,8 @@ function notOneTarget(): boolean {
     return menuTargets.value.length !== 1;
 }
 
-// One file is a plain download. A folder or many items come as a zip that a job builds, and the download store waits
-// for it. The items are read before the first await, because the menu clears its target when it hides.
+// One file is a plain download. A folder or many items come as a zip that a job builds. The zip waits in the downloads
+// list in the header. The items are read before the first await, because the menu clears its target when it hides.
 async function downloadMenuTargets(): Promise<void> {
     const items = menuTargets.value;
     if (items.length === 0) return;
@@ -201,7 +201,7 @@ async function downloadMenuTargets(): Promise<void> {
     }
     try {
         const response = await fileStore.requestZip({ ids: items.map((item) => item.id) });
-        downloadStore.wait(response.download.id);
+        downloadStore.add(response.download);
         toastStore.successResponseToast(response);
     } catch (error) {
         toastStore.errorResponseToast(error);

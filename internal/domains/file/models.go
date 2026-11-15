@@ -146,14 +146,17 @@ const (
 	DownloadFailed   DownloadState = "failed"
 )
 
-// Download is a zip of a folder or many items. Error says why a failed zip failed.
+// Download is a zip of a folder or many items. Error says why a failed zip failed. ExpiresAt is when the sweep
+// removes it. Downloaded is true once the user got the ready zip.
 type Download struct {
-	ID        int64         `json:"id"`
-	Name      string        `json:"name"`
-	State     DownloadState `json:"state"`
-	Error     string        `json:"error,omitempty"`
-	SizeBytes int64         `json:"size_bytes"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID         int64         `json:"id"`
+	Name       string        `json:"name"`
+	State      DownloadState `json:"state"`
+	Error      string        `json:"error,omitempty"`
+	SizeBytes  int64         `json:"size_bytes"`
+	CreatedAt  time.Time     `json:"created_at"`
+	ExpiresAt  time.Time     `json:"expires_at"`
+	Downloaded bool          `json:"downloaded"`
 }
 
 // zipFolder is a folder the zip job still has to read, with its path in the zip.
@@ -165,6 +168,11 @@ type zipFolder struct {
 type DownloadResponse struct {
 	apperr.SuccessResponse
 	Download *Download `json:"download"`
+}
+
+// DownloadList is the user's newest downloads, newest first.
+type DownloadList struct {
+	Downloads []*Download `json:"downloads"`
 }
 
 // PasteRequest moves or copies the items into one folder. A missing or null ParentID means the root.

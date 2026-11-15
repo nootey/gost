@@ -24,6 +24,8 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// Deletes a file copy root whose source has no bytes left to copy.
 	DeleteCopyRoot(ctx context.Context, arg DeleteCopyRootParams) error
+	// Deletes one download of the user and returns the key of its zip, null while it builds or when it failed.
+	DeleteDownload(ctx context.Context, arg DeleteDownloadParams) (sql.NullString, error)
 	// Deletes up to batch_size downloads older than retention_hours: a ready zip from when it got ready, any other from
 	// when it was asked for. A row still building that old lost its job for good. It returns the keys of their zips.
 	DeleteExpiredDownloads(ctx context.Context, arg DeleteExpiredDownloadsParams) ([]DeleteExpiredDownloadsRow, error)
@@ -54,6 +56,8 @@ type Querier interface {
 	ListCopyFolders(ctx context.Context, arg ListCopyFoldersParams) ([]int64, error)
 	// The copy roots in ids that still copy, with the storage key of their source. A root the job finished is not in it.
 	ListCopyRoots(ctx context.Context, arg ListCopyRootsParams) ([]ListCopyRootsRow, error)
+	// The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
+	ListDownloads(ctx context.Context, arg ListDownloadsParams) ([]Download, error)
 	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
 	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
 	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
@@ -98,6 +102,8 @@ type Querier interface {
 	LockUserDownloads(ctx context.Context, userID int64) error
 	// Makes one user's tree changes run one at a time. Each transaction that changes the tree runs it first.
 	LockUserTree(ctx context.Context, userID int64) error
+	// Marks a ready zip as downloaded the first time the user gets it.
+	MarkDownloaded(ctx context.Context, arg MarkDownloadedParams) error
 	// A parent_id of 0 means the root. The rows under a folder keep their parent_id, so they move with it.
 	MoveItems(ctx context.Context, arg MoveItemsParams) error
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.

@@ -20,6 +20,28 @@ VALUES (sqlc.arg(user_id), sqlc.arg(name), sqlc.arg(item_ids)::bigint[])
 SELECT * FROM downloads
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
 
+-- name: ListDownloads :many
+-- The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
+SELECT * FROM downloads
+WHERE user_id = sqlc.arg(user_id)
+ORDER BY id DESC
+LIMIT sqlc.arg(row_limit);
+
+-- name: DeleteDownload :one
+-- Deletes one download of the user and returns the key of its zip, null while it builds or when it failed.
+DELETE FROM downloads
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id)
+RETURNING storage_key;
+
+-- name: MarkDownloaded :exec
+-- Marks a ready zip as downloaded the first time the user gets it.
+UPDATE downloads
+SET downloaded_at = NOW()
+WHERE id = sqlc.arg(id)
+  AND user_id = sqlc.arg(user_id)
+  AND ready_at IS NOT NULL
+  AND downloaded_at IS NULL;
+
 -- name: FinishDownload :execrows
 -- Marks a zip ready. No row changes when the zip failed or its row is gone, and the caller then removes the zip.
 UPDATE downloads

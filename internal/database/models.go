@@ -61,15 +61,16 @@ func (ns NullRiverJobState) Value() (driver.Value, error) {
 }
 
 type Download struct {
-	ID         int64          `json:"id"`
-	UserID     int64          `json:"user_id"`
-	Name       string         `json:"name"`
-	ItemIds    []int64        `json:"item_ids"`
-	StorageKey sql.NullString `json:"storage_key"`
-	SizeBytes  int64          `json:"size_bytes"`
-	Error      sql.NullString `json:"error"`
-	CreatedAt  time.Time      `json:"created_at"`
-	ReadyAt    sql.NullTime   `json:"ready_at"`
+	ID           int64          `json:"id"`
+	UserID       int64          `json:"user_id"`
+	Name         string         `json:"name"`
+	ItemIds      []int64        `json:"item_ids"`
+	StorageKey   sql.NullString `json:"storage_key"`
+	SizeBytes    int64          `json:"size_bytes"`
+	Error        sql.NullString `json:"error"`
+	CreatedAt    time.Time      `json:"created_at"`
+	ReadyAt      sql.NullTime   `json:"ready_at"`
+	DownloadedAt sql.NullTime   `json:"downloaded_at"`
 }
 
 type File struct {

@@ -69,6 +69,13 @@ const zipRetentionHours = 24
 // zipSweepBatchSize caps the downloads one statement of the download sweep deletes, and the zip files one query checks.
 const zipSweepBatchSize = 1000
 
+// downloadListSize is the rows the downloads list shows. The sweep keeps the list to one day, so it has no pages.
+const downloadListSize = 50
+
+// zipCheckInterval is how often the zip job reads its row again. A removed download stops its job by then, so it
+// does not hold the one zip worker. The read is one lookup by key.
+const zipCheckInterval = time.Second
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -82,6 +89,8 @@ var (
 	errDownloadGone   = apperr.New(apperr.KindNotFound, "download not found")
 	errTooManyZips    = apperr.New(apperr.KindConflict, "wait for your other downloads to finish")
 	errZipNotReady    = apperr.New(apperr.KindConflict, "the zip is not ready yet")
+	// errZipRemoved stops a zip job whose download the user removed.
+	errZipRemoved = errors.New("the download was removed")
 )
 
 // zipFailedMessage is what the client shows for a zip whose job failed for good.
@@ -97,6 +106,8 @@ type FileServiceInterface interface {
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
 	GetDownload(ctx context.Context, userID, id int64) (*Download, error)
+	ListDownloads(ctx context.Context, userID int64) ([]*Download, error)
+	RemoveDownload(ctx context.Context, userID, id int64) error
 	OpenZip(ctx context.Context, userID, id int64) (*FileContent, error)
 	Move(ctx context.Context, userID, parentID int64, ids []int64) error
 	Copy(ctx context.Context, userID, parentID int64, ids []int64) error
@@ -163,21 +174,24 @@ func fileFields(f *database.File) []any {
 }
 
 func toDownloadModel(dl database.Download) *Download {
-	state := DownloadBuilding
+	// The sweep removes a ready zip a day after it got ready, any other row a day after the request.
+	state, from := DownloadBuilding, dl.CreatedAt
 	switch {
 	case dl.ReadyAt.Valid:
-		state = DownloadReady
+		state, from = DownloadReady, dl.ReadyAt.Time
 	case dl.Error.Valid:
 		state = DownloadFailed
 	}
 
 	return &Download{
-		ID:        dl.ID,
-		Name:      dl.Name,
-		State:     state,
-		Error:     dl.Error.String,
-		SizeBytes: dl.SizeBytes,
-		CreatedAt: dl.CreatedAt,
+		ID:         dl.ID,
+		Name:       dl.Name,
+		State:      state,
+		Error:      dl.Error.String,
+		SizeBytes:  dl.SizeBytes,
+		CreatedAt:  dl.CreatedAt,
+		ExpiresAt:  from.Add(zipRetentionHours * time.Hour),
+		Downloaded: dl.DownloadedAt.Valid,
 	}
 }
 
@@ -415,7 +429,40 @@ func (s *FileService) GetDownload(ctx context.Context, userID, id int64) (*Downl
 	return toDownloadModel(dl), nil
 }
 
-// OpenZip opens a ready zip of the user for a download. The ETag is the zip's key, because a zip never changes.
+func (s *FileService) ListDownloads(ctx context.Context, userID int64) ([]*Download, error) {
+	rows, err := s.queries.ListDownloads(ctx, database.ListDownloadsParams{UserID: userID, RowLimit: downloadListSize})
+	if err != nil {
+		return nil, err
+	}
+	list := make([]*Download, len(rows))
+	for i, row := range rows {
+		list[i] = toDownloadModel(row)
+	}
+	return list, nil
+}
+
+// RemoveDownload deletes a download, then its zip, the same order as the sweep, so a client never gets a ready row
+// whose zip is gone. A zip that does not go is logged, and the sweep removes it later. A job that still builds the
+// zip stops at its next check. A browser that downloads the zip right now still gets all of it, because Linux keeps an
+// open file readable after a remove.
+func (s *FileService) RemoveDownload(ctx context.Context, userID, id int64) error {
+	key, err := s.queries.DeleteDownload(ctx, database.DeleteDownloadParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errDownloadGone
+	}
+	if err != nil || !key.Valid {
+		return err
+	}
+
+	if err := utils.RemoveStoredFile(filepath.Join(s.cfg.Dir, utils.ZipDir), key.String); err != nil {
+		s.logger.Warn("a removed download kept its zip", zap.Int64("user_id", userID), zap.Int64("download_id", id),
+			zap.Error(err))
+	}
+	return nil
+}
+
+// OpenZip opens a ready zip of the user for a download and marks the zip downloaded. The ETag is the zip's key,
+// because a zip never changes.
 func (s *FileService) OpenZip(ctx context.Context, userID, id int64) (*FileContent, error) {
 	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: id, UserID: userID})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -435,6 +482,12 @@ func (s *FileService) OpenZip(ctx context.Context, userID, id int64) (*FileConte
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !dl.DownloadedAt.Valid {
+		if err := s.queries.MarkDownloaded(ctx, database.MarkDownloadedParams{ID: id, UserID: userID}); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
 	}
 
 	return &FileContent{
@@ -784,7 +837,8 @@ func (s *FileService) CopyItems(ctx context.Context, userID int64, rootIDs []int
 // BuildZip builds the zip of a download: the selected items, then the folders under them, level by level. The job only
 // reads, one short statement at a time, so it takes no tree lock. A rename or move during the build can change what
 // the zip holds: each folder goes in as the job finds it, the same as copy. A run after a failure starts again,
-// because a zip cannot go on from a half-written file.
+// because a zip cannot go on from a half-written file. The job reads its row again every zipCheckInterval, and stops
+// when the user removed the download.
 func (s *FileService) BuildZip(ctx context.Context, userID, downloadID int64) error {
 	dl, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -799,8 +853,20 @@ func (s *FileService) BuildZip(ctx context.Context, userID, downloadID int64) er
 		return err
 	}
 	defer zb.Abort()
+	zb.CheckEvery(zipCheckInterval, func() error {
+		_, err := s.queries.GetDownload(ctx, database.GetDownloadParams{ID: downloadID, UserID: userID})
+		if errors.Is(err, sql.ErrNoRows) {
+			return errZipRemoved
+		}
+		return err
+	})
 
 	files, folders, err := s.writeZip(ctx, zb, userID, dl.ItemIds)
+	if errors.Is(err, errZipRemoved) {
+		s.logger.Info("stopped a zip whose download was removed", zap.Int64("user_id", userID),
+			zap.Int64("download_id", downloadID))
+		return nil
+	}
 	if errors.Is(err, utils.ErrZipTooLarge) {
 		// Another run would stop at the same place, so the zip fails now.
 		s.logger.Info("stopped a zip over the size cap", zap.Int64("user_id", userID), zap.Int64("download_id", downloadID))

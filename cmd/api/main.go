@@ -229,8 +229,10 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Post("/trash", h.File.Trash)
 				r.Post("/trash/restore", h.File.Restore)
 				r.Post("/trash/purge", h.File.Purge)
+				r.Get("/downloads", h.File.ListDownloads)
 				r.Post("/downloads", h.File.RequestZip)
 				r.Get("/downloads/{id}", h.File.GetDownload)
+				r.Delete("/downloads/{id}", h.File.RemoveDownload)
 				// Mount more protected handlers as needed
 			})
 		})

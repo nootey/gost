@@ -29,7 +29,7 @@ func (q *Queries) CountBuildingDownloads(ctx context.Context, userID int64) (int
 const createDownload = `-- name: CreateDownload :one
 INSERT INTO downloads (user_id, name, item_ids)
 VALUES ($1, $2, $3::bigint[])
-    RETURNING id, user_id, name, item_ids, storage_key, size_bytes, error, created_at, ready_at
+    RETURNING id, user_id, name, item_ids, storage_key, size_bytes, error, created_at, ready_at, downloaded_at
 `
 
 type CreateDownloadParams struct {
@@ -51,8 +51,28 @@ func (q *Queries) CreateDownload(ctx context.Context, arg CreateDownloadParams) 
 		&i.Error,
 		&i.CreatedAt,
 		&i.ReadyAt,
+		&i.DownloadedAt,
 	)
 	return i, err
+}
+
+const deleteDownload = `-- name: DeleteDownload :one
+DELETE FROM downloads
+WHERE id = $1 AND user_id = $2
+RETURNING storage_key
+`
+
+type DeleteDownloadParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+// Deletes one download of the user and returns the key of its zip, null while it builds or when it failed.
+func (q *Queries) DeleteDownload(ctx context.Context, arg DeleteDownloadParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, deleteDownload, arg.ID, arg.UserID)
+	var storage_key sql.NullString
+	err := row.Scan(&storage_key)
+	return storage_key, err
 }
 
 const deleteExpiredDownloads = `-- name: DeleteExpiredDownloads :many
@@ -155,7 +175,7 @@ func (q *Queries) FinishDownload(ctx context.Context, arg FinishDownloadParams) 
 }
 
 const getDownload = `-- name: GetDownload :one
-SELECT id, user_id, name, item_ids, storage_key, size_bytes, error, created_at, ready_at FROM downloads
+SELECT id, user_id, name, item_ids, storage_key, size_bytes, error, created_at, ready_at, downloaded_at FROM downloads
 WHERE id = $1 AND user_id = $2
 `
 
@@ -177,8 +197,56 @@ func (q *Queries) GetDownload(ctx context.Context, arg GetDownloadParams) (Downl
 		&i.Error,
 		&i.CreatedAt,
 		&i.ReadyAt,
+		&i.DownloadedAt,
 	)
 	return i, err
+}
+
+const listDownloads = `-- name: ListDownloads :many
+SELECT id, user_id, name, item_ids, storage_key, size_bytes, error, created_at, ready_at, downloaded_at FROM downloads
+WHERE user_id = $1
+ORDER BY id DESC
+LIMIT $2
+`
+
+type ListDownloadsParams struct {
+	UserID   int64 `json:"user_id"`
+	RowLimit int32 `json:"row_limit"`
+}
+
+// The user's newest downloads. The sweep keeps the list to one day, so it has no pages.
+func (q *Queries) ListDownloads(ctx context.Context, arg ListDownloadsParams) ([]Download, error) {
+	rows, err := q.db.QueryContext(ctx, listDownloads, arg.UserID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Download
+	for rows.Next() {
+		var i Download
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			pq.Array(&i.ItemIds),
+			&i.StorageKey,
+			&i.SizeBytes,
+			&i.Error,
+			&i.CreatedAt,
+			&i.ReadyAt,
+			&i.DownloadedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listUnknownZipKeys = `-- name: ListUnknownZipKeys :many
@@ -220,5 +288,25 @@ FOR NO KEY UPDATE
 // FOR NO KEY UPDATE does not block the foreign key checks of rows that point at the user.
 func (q *Queries) LockUserDownloads(ctx context.Context, userID int64) error {
 	_, err := q.db.ExecContext(ctx, lockUserDownloads, userID)
+	return err
+}
+
+const markDownloaded = `-- name: MarkDownloaded :exec
+UPDATE downloads
+SET downloaded_at = NOW()
+WHERE id = $1
+  AND user_id = $2
+  AND ready_at IS NOT NULL
+  AND downloaded_at IS NULL
+`
+
+type MarkDownloadedParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+// Marks a ready zip as downloaded the first time the user gets it.
+func (q *Queries) MarkDownloaded(ctx context.Context, arg MarkDownloadedParams) error {
+	_, err := q.db.ExecContext(ctx, markDownloaded, arg.ID, arg.UserID)
 	return err
 }

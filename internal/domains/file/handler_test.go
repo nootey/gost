@@ -57,7 +57,9 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Post("/trash/restore", suite.handler.Restore)
 	suite.router.Post("/trash/purge", suite.handler.Purge)
 	suite.router.Post("/downloads", suite.handler.RequestZip)
+	suite.router.Get("/downloads", suite.handler.ListDownloads)
 	suite.router.Get("/downloads/{id}", suite.handler.GetDownload)
+	suite.router.Delete("/downloads/{id}", suite.handler.RemoveDownload)
 	suite.router.Get("/downloads/{id}/file", suite.handler.DownloadZip)
 }
 
@@ -754,6 +756,99 @@ func (suite *FileHandlerTestSuite) TestGetDownload_ServiceError() {
 		Once()
 
 	w := suite.getPath("/downloads/9", true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("download not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestListDownloads_Success() {
+	expires := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	suite.mockService.EXPECT().
+		ListDownloads(mock.Anything, testUserID).
+		Return([]*file.Download{
+			{ID: 9, Name: "Docs.zip", State: file.DownloadReady, SizeBytes: 120, ExpiresAt: expires, Downloaded: true},
+			{ID: 8, Name: "Home.zip", State: file.DownloadBuilding, ExpiresAt: expires},
+		}, nil).
+		Once()
+
+	w := suite.getPath("/downloads", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp file.DownloadList
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Downloads, 2)
+	suite.Equal(int64(9), resp.Downloads[0].ID)
+	suite.Equal(file.DownloadReady, resp.Downloads[0].State)
+	suite.True(resp.Downloads[0].Downloaded)
+	suite.Equal(expires, resp.Downloads[0].ExpiresAt)
+	suite.Equal(file.DownloadBuilding, resp.Downloads[1].State)
+}
+
+// An empty list is an empty array, not null, so the client needs no check.
+func (suite *FileHandlerTestSuite) TestListDownloads_Empty() {
+	suite.mockService.EXPECT().ListDownloads(mock.Anything, testUserID).Return([]*file.Download{}, nil).Once()
+
+	w := suite.getPath("/downloads", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.JSONEq(`{"downloads":[]}`, w.Body.String())
+}
+
+func (suite *FileHandlerTestSuite) TestListDownloads_Unauthenticated() {
+	w := suite.getPath("/downloads", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestListDownloads_ServiceError() {
+	suite.mockService.EXPECT().ListDownloads(mock.Anything, testUserID).Return(nil, assert.AnError).Once()
+
+	w := suite.getPath("/downloads", true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) deletePath(path string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveDownload_Success() {
+	suite.mockService.EXPECT().RemoveDownload(mock.Anything, testUserID, int64(9)).Return(nil).Once()
+
+	w := suite.deletePath("/downloads/9", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp apperr.SuccessResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("Removed.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveDownload_InvalidID() {
+	w := suite.deletePath("/downloads/abc", true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid id", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveDownload_Unauthenticated() {
+	w := suite.deletePath("/downloads/9", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestRemoveDownload_ServiceError() {
+	suite.mockService.EXPECT().
+		RemoveDownload(mock.Anything, testUserID, int64(9)).
+		Return(apperr.New(apperr.KindNotFound, "download not found")).
+		Once()
+
+	w := suite.deletePath("/downloads/9", true)
 
 	suite.Equal(http.StatusNotFound, w.Code)
 	suite.Equal("download not found", suite.errorMessage(w))

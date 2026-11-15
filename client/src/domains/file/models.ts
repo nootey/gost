@@ -81,7 +81,8 @@ export interface PathEntry {
 // building until the zip job ends, then ready or failed. error says why a failed zip failed.
 export type DownloadState = "building" | "ready" | "failed";
 
-// A zip of a folder or many items. A job builds it, and the download store waits for it.
+// A zip of a folder or many items. A job builds it, and the downloads list in the header shows it. expires_at is
+// when the server removes it. downloaded is true once the user got the ready zip.
 export interface Download {
     id: number;
     name: string;
@@ -89,6 +90,12 @@ export interface Download {
     error?: string;
     size_bytes: number;
     created_at: string;
+    expires_at: string;
+    downloaded: boolean;
+}
+
+export interface DownloadList {
+    downloads: Download[];
 }
 
 export interface DownloadResponse {

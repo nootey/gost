@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
 import type { Page, SuccessResponse } from "../api/api_models.ts";
 import type {
-    Download,
+    DownloadList,
     DownloadResponse,
     FolderForm,
     FolderPath,
@@ -73,8 +73,13 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
-        async getDownload(id: number): Promise<Download> {
-            const response = await apiClient.get<Download>(`${this.downloadPrefix}/${id}`);
+        async listDownloads(): Promise<DownloadList> {
+            const response = await apiClient.get<DownloadList>(this.downloadPrefix);
+            return response.data;
+        },
+
+        async removeDownload(id: number): Promise<SuccessResponse> {
+            const response = await apiClient.delete<SuccessResponse>(`${this.downloadPrefix}/${id}`);
             return response.data;
         },
 

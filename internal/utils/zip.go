@@ -33,6 +33,10 @@ type ZipBuilder struct {
 	maxBytes int64
 	size     int64
 	done     bool
+
+	check      func() error
+	checkEvery time.Duration
+	checkedAt  time.Time
 }
 
 // NewZipBuilder starts a zip of the files in the upload dir. maxBytes caps the bytes of the files in it.
@@ -66,8 +70,25 @@ func NewZipBuilder(dir string, maxBytes int64) (*ZipBuilder, error) {
 	return b, nil
 }
 
+// CheckEvery makes the builder run check before each entry and while it copies a file, at most once per interval.
+// An error from check stops the zip with that error. The first check comes one interval after this call.
+func (b *ZipBuilder) CheckEvery(interval time.Duration, check func() error) {
+	b.check, b.checkEvery, b.checkedAt = check, interval, time.Now()
+}
+
+func (b *ZipBuilder) runCheck() error {
+	if b.check == nil || time.Since(b.checkedAt) < b.checkEvery {
+		return nil
+	}
+	b.checkedAt = time.Now()
+	return b.check()
+}
+
 // AddFolder adds an entry for a folder, so an empty folder stays in the zip. path has no trailing slash.
 func (b *ZipBuilder) AddFolder(path string, modTime time.Time) error {
+	if err := b.runCheck(); err != nil {
+		return err
+	}
 	_, err := b.zw.CreateHeader(&zip.FileHeader{Name: path + "/", Method: zip.Store, Modified: modTime})
 	return err
 }
@@ -76,6 +97,9 @@ func (b *ZipBuilder) AddFolder(path string, modTime time.Time) error {
 // A file that would take the zip past its cap gives ErrZipTooLarge before any of its bytes go in.
 // The copy stops when ctx ends, so a big file does not hold up a stop of the app.
 func (b *ZipBuilder) AddStoredFile(ctx context.Context, path, key string, modTime time.Time) (int64, error) {
+	if err := b.runCheck(); err != nil {
+		return 0, err
+	}
 	src, err := b.uploads.Open(key)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, ErrNoStoredFile
@@ -97,7 +121,7 @@ func (b *ZipBuilder) AddStoredFile(ctx context.Context, path, key string, modTim
 	if err != nil {
 		return 0, err
 	}
-	n, err := io.CopyBuffer(w, ctxReader{ctx: ctx, r: src}, b.buf)
+	n, err := io.CopyBuffer(w, zipReader{ctx: ctx, b: b, r: src}, b.buf)
 	b.size += n
 	if err != nil {
 		return n, fmt.Errorf("failed to write zip: %w", err)
@@ -146,15 +170,19 @@ func (b *ZipBuilder) closeRoots() {
 	_ = b.uploads.Close()
 }
 
-// ctxReader fails a read once ctx ends.
-type ctxReader struct {
+// zipReader fails a read once ctx ends or the builder's check fails.
+type zipReader struct {
 	ctx context.Context
+	b   *ZipBuilder
 	r   io.Reader
 }
 
-func (c ctxReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+func (z zipReader) Read(p []byte) (int, error) {
+	if err := z.ctx.Err(); err != nil {
 		return 0, err
 	}
-	return c.r.Read(p)
+	if err := z.b.runCheck(); err != nil {
+		return 0, err
+	}
+	return z.r.Read(p)
 }

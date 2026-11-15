@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import { useAuthStore } from "./pkg/stores/auth_store.ts";
@@ -14,7 +14,7 @@ const route = useRoute();
 
 themeStore.initializeTheme();
 
-const { isAuthenticated, isInitialized } = storeToRefs(authStore);
+const { isAuthenticated, isInitialized, user } = storeToRefs(authStore);
 
 const requiresAuthView = computed<boolean>(() => route.matched.some((r) => r.meta.requiresAuth));
 const hideNavigation = computed<boolean>(() => route.matched.some((r) => r.meta.hideNavigation));
@@ -22,12 +22,18 @@ const showShell = computed<boolean>(() => isAuthenticated.value && isInitialized
 
 const SHELL_WIDTH = "mx-auto w-full px-4 lg:w-3/4";
 
-// The zips asked for before a reload are still on the way, so the wait goes on.
+// The downloads list belongs to the signed-in user. It loads when a user signs in or the page loads, and it clears on
+// logout.
+watch(
+    () => user.value?.id,
+    (id) => {
+        if (id === undefined) downloadStore.clear();
+        else void downloadStore.load();
+    },
+);
+
 onMounted(async () => {
-    if (isAuthenticated.value) {
-        await authStore.init();
-        downloadStore.resume();
-    }
+    if (isAuthenticated.value) await authStore.init();
 });
 </script>
 
