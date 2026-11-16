@@ -219,6 +219,23 @@ func (h *FileHandler) ListDownloads(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusOK, DownloadList{Downloads: list})
 }
 
+// ListRecents sends the user's newest added or changed files, newest first.
+func (h *FileHandler) ListRecents(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	list, err := h.service.ListRecents(r.Context(), userID)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, RecentList{Files: list})
+}
+
 func (h *FileHandler) RemoveDownload(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {
@@ -735,6 +752,29 @@ func (h *FileHandler) ListActivity(w http.ResponseWriter, r *http.Request) {
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.ListActivity(r.Context(), userID, id, ActivityQuery{
+		Cursor:   r.URL.Query().Get("cursor"),
+		PageSize: pageSize,
+	})
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
+}
+
+// ListUserActivity sends one page of the audit log of all the user's items, newest first. Every user sees their own
+// log, whatever their role.
+func (h *FileHandler) ListUserActivity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.ListUserActivity(r.Context(), userID, ActivityQuery{
 		Cursor:   r.URL.Query().Get("cursor"),
 		PageSize: pageSize,
 	})

@@ -5,36 +5,13 @@ import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { itemView } from "../../../pkg/utils/item_view.ts";
 import { useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
+import { EVENT_VIEWS, eventText } from "../../../pkg/utils/activity_view.ts";
+import { dirLabel } from "../../../pkg/utils/folder_route.ts";
 import ItemIcon from "./ItemIcon.vue";
 import type { DataTablePageEvent } from "primevue/datatable";
-import type { Activity, ActivityEvent, ActivityMetadata, StoredFile } from "../models.ts";
-
-interface EventView {
-    icon: string;
-    text: (metadata: ActivityMetadata) => string;
-}
+import type { Activity, StoredFile } from "../models.ts";
 
 const PAGE_SIZE = 10;
-
-const HOME = "Home";
-
-function folderName(folder: string | null | undefined): string {
-    return folder ?? HOME;
-}
-
-const EVENT_VIEWS: Record<ActivityEvent, EventView> = {
-    uploaded: { icon: "pi pi-upload", text: (m) => `Uploaded to ${folderName(m.folder)}` },
-    created: { icon: "pi pi-plus", text: (m) => `Created in ${folderName(m.folder)}` },
-    copied: { icon: "pi pi-copy", text: (m) => `Copied into ${folderName(m.folder)}` },
-    renamed: { icon: "pi pi-pencil", text: (m) => `Renamed from ${m.old_name ?? ""} to ${m.name}` },
-    moved: { icon: "pi pi-file-export", text: (m) => `Moved from ${folderName(m.from)} to ${folderName(m.folder)}` },
-    trashed: { icon: "pi pi-trash", text: () => "Moved to the trash" },
-    restored: { icon: "pi pi-replay", text: (m) => `Restored to ${folderName(m.folder)} as ${m.name}` },
-    purged: { icon: "pi pi-times-circle", text: () => "Deleted forever" },
-    expired: { icon: "pi pi-clock", text: () => "Deleted forever after 30 days in the trash" },
-    hidden: { icon: "pi pi-eye-slash", text: () => "Hidden" },
-    unhidden: { icon: "pi pi-eye", text: () => "Unhidden" },
-};
 
 // item is the row the menu opened on. dir is the open folder, such as "/Photos/Cars", and "" for Home.
 const props = defineProps<{ item: StoredFile | null; dir: string }>();
@@ -50,7 +27,7 @@ const loading = ref<boolean>(false);
 const { nextCursor, cursor, first, total, turn, reset } = useCursorPager(PAGE_SIZE);
 
 const view = computed(() => (details.value ? itemView(details.value) : null));
-const location = computed<string>(() => [HOME, ...props.dir.split("/").filter(Boolean)].join(" / "));
+const location = computed<string>(() => dirLabel(props.dir));
 const pagerTotal = computed<number>(() => total(activity.value.length));
 
 // Only the newest request may write the log, so a slow old page cannot replace a new one.
@@ -77,10 +54,6 @@ async function loadActivity(id: number): Promise<void> {
     } finally {
         if (request === latestRequest) loading.value = false;
     }
-}
-
-function eventText(entry: Activity): string {
-    return EVENT_VIEWS[entry.event].text(entry.metadata);
 }
 
 async function onShow(): Promise<void> {

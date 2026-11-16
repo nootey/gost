@@ -434,6 +434,18 @@ SET copy_requested_at = NULL
 WHERE user_id = sqlc.arg(user_id)
   AND id = ANY(sqlc.arg(ids)::bigint[]);
 
+-- name: ListRecentFiles :many
+-- The user's newest added or changed files, from all folders: an upload, a new file, a copy, a rename, a move or a
+-- restore. Folders and hidden files stay out. Like the favorites, the hidden check looks at the file only, not at the
+-- folders above it. storage_key IS NOT NULL and trashed_at IS NULL must stay as they are, so the recent index matches.
+SELECT * FROM files
+WHERE user_id = sqlc.arg(user_id)
+  AND storage_key IS NOT NULL
+  AND trashed_at IS NULL
+  AND hidden_at IS NULL
+ORDER BY updated_at DESC, id DESC
+LIMIT sqlc.arg(row_limit);
+
 -- name: ListLiveItems :many
 -- The live items in ids, without locks. A zip request checks them, and the zip job reads them again when it starts.
 SELECT * FROM files

@@ -92,6 +92,10 @@ type Querier interface {
 	ListPurgeLeaves(ctx context.Context, arg ListPurgeLeavesParams) ([]ListPurgeLeavesRow, error)
 	// The items in ids that are marked for a permanent delete. A root the job already deleted is not in it.
 	ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) ([]int64, error)
+	// The user's newest added or changed files, from all folders: an upload, a new file, a copy, a rename, a move or a
+	// restore. Folders and hidden files stay out. Like the favorites, the hidden check looks at the file only, not at the
+	// folders above it. storage_key IS NOT NULL and trashed_at IS NULL must stay as they are, so the recent index matches.
+	ListRecentFiles(ctx context.Context, arg ListRecentFilesParams) ([]File, error)
 	// The copy roots marked more than retry_hours ago, per user. Their copy job can have failed for good.
 	ListStaleCopies(ctx context.Context, retryHours int32) ([]ListStaleCopiesRow, error)
 	// The items marked for a permanent delete more than retry_hours ago, per user. Their purge job can have failed for good.

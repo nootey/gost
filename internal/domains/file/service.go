@@ -78,6 +78,9 @@ const zipSweepBatchSize = 1000
 // downloadListSize is the rows the downloads list shows. The sweep keeps the list to one day, so it has no pages.
 const downloadListSize = 50
 
+// recentListSize is the files the recents page shows.
+const recentListSize = 10
+
 // thumbnailEdge is the long edge of a thumbnail in pixels. It is sharp in the list's icon box on a 2x screen, with room
 // for a bigger view later.
 const thumbnailEdge = 256
@@ -127,11 +130,13 @@ type FileServiceInterface interface {
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	GetItem(ctx context.Context, userID, id int64) (*File, error)
 	ListActivity(ctx context.Context, userID, id int64, q ActivityQuery) (*utils.Page[*Activity], error)
+	ListUserActivity(ctx context.Context, userID int64, q ActivityQuery) (*utils.Page[*Activity], error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 	AddFavorites(ctx context.Context, userID int64, ids []int64) error
 	SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error
 	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	ListFavorites(ctx context.Context, userID int64, q FavoriteQuery) (*utils.Page[*Favorite], error)
+	ListRecents(ctx context.Context, userID int64) ([]*RecentFile, error)
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	OpenThumbnail(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
@@ -205,6 +210,11 @@ func fileFields(f *database.File) []any {
 		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
 		&f.CopiedFromID, &f.CopyRequestedAt, &f.HiddenAt,
 	}
+}
+
+// activityFields follows the select list of the activity lists.
+func activityFields(a *Activity) []any {
+	return []any{&a.ID, &a.Event, &a.Metadata, &a.CreatedAt}
 }
 
 func toDownloadModel(dl database.Download) *Download {
@@ -487,18 +497,27 @@ func (s *FileService) ListActivity(ctx context.Context, userID, id int64, q Acti
 		Desc:     true,
 		Cursor:   q.Cursor,
 		PageSize: q.PageSize,
-	}, func(a *Activity) []any {
-		return []any{&a.ID, &a.Event, &a.Metadata, &a.CreatedAt}
-	})
+	}, activityFields)
 	if err != nil {
 		return nil, err
 	}
+	return utils.PointerPage(page), nil
+}
 
-	list := make([]*Activity, len(page.Data))
-	for i := range page.Data {
-		list[i] = &page.Data[i]
+// ListUserActivity reads one page of the audit log of all the user's items, newest first. Each event names its item
+// as it was then, so an event of a deleted item still reads well.
+func (s *FileService) ListUserActivity(ctx context.Context, userID int64, q ActivityQuery) (*utils.Page[*Activity], error) {
+	page, err := utils.FetchPage(ctx, s.db, userActivityList, utils.PageQuery[SortField]{
+		Args:     []any{userID},
+		Sort:     SortByDate,
+		Desc:     true,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, activityFields)
+	if err != nil {
+		return nil, err
 	}
-	return &utils.Page[*Activity]{Data: list, NextCursor: page.NextCursor}, nil
+	return utils.PointerPage(page), nil
 }
 
 func (s *FileService) Rename(ctx context.Context, userID, id int64, name string) (*File, error) {
@@ -614,20 +633,9 @@ func (s *FileService) ListFavorites(ctx context.Context, userID int64, q Favorit
 		return nil, err
 	}
 
-	// An item in the root has no folder, and its id 0 is in no path.
-	folderIDs := make([]int64, len(page.Data))
-	for i, dbFile := range page.Data {
-		folderIDs[i] = dbFile.ParentID.Int64
-	}
-	paths := map[int64][]string{0: {}}
-	if len(folderIDs) > 0 {
-		rows, err := s.queries.ListFolderPaths(ctx, database.ListFolderPathsParams{UserID: userID, Ids: folderIDs})
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			paths[row.FolderID] = row.Names
-		}
+	paths, err := s.folderPaths(ctx, userID, page.Data)
+	if err != nil {
+		return nil, err
 	}
 
 	items := make([]*Favorite, len(page.Data))
@@ -642,6 +650,31 @@ func (s *FileService) ListFavorites(ctx context.Context, userID int64, q Favorit
 	}
 
 	return &utils.Page[*Favorite]{Data: items, NextCursor: page.NextCursor}, nil
+}
+
+// ListRecents reads the user's newest added or changed files from all folders, newest first. Each file comes with the
+// path of its folder, so the client can open the file there.
+func (s *FileService) ListRecents(ctx context.Context, userID int64) ([]*RecentFile, error) {
+	rows, err := s.queries.ListRecentFiles(ctx, database.ListRecentFilesParams{UserID: userID, RowLimit: recentListSize})
+	if err != nil {
+		return nil, err
+	}
+
+	paths, err := s.folderPaths(ctx, userID, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	list := make([]*RecentFile, len(rows))
+	files := make([]*File, len(rows))
+	for i, row := range rows {
+		list[i] = &RecentFile{File: *toFileModel(row), Path: paths[row.ParentID.Int64]}
+		files[i] = &list[i].File
+	}
+	if err := s.markFavorites(ctx, userID, files); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // OpenFile opens one live file of the user for a download. A folder downloads as a zip, and a file that still copies
@@ -1516,6 +1549,28 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	}
 
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
+}
+
+// folderPaths reads the path of each row's folder with one query, by the folder id. A row in the root has no folder,
+// and its id 0 maps to an empty path.
+func (s *FileService) folderPaths(ctx context.Context, userID int64, rows []database.File) (map[int64][]string, error) {
+	paths := map[int64][]string{0: {}}
+	if len(rows) == 0 {
+		return paths, nil
+	}
+
+	folderIDs := make([]int64, len(rows))
+	for i, row := range rows {
+		folderIDs[i] = row.ParentID.Int64
+	}
+	found, err := s.queries.ListFolderPaths(ctx, database.ListFolderPathsParams{UserID: userID, Ids: folderIDs})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range found {
+		paths[row.FolderID] = row.Names
+	}
+	return paths, nil
 }
 
 // markFavorites sets IsFavorite on the items with one query.

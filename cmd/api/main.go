@@ -238,6 +238,8 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Get("/favorites", h.File.ListFavorites)
 				r.Post("/favorites", h.File.AddFavorites)
 				r.Post("/favorites/remove", h.File.RemoveFavorites)
+				r.Get("/recents", h.File.ListRecents)
+				r.Get("/activity", h.File.ListUserActivity)
 				r.Post("/folders", h.File.CreateFolder)
 				r.Post("/folders/tree", h.File.CreateFolderTree)
 				r.Get("/folders/resolve", h.File.ResolveFolder)
