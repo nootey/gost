@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"gost/internal/apperr"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -80,4 +81,48 @@ func FreeName(name string, kind NameKind, taken []string) (string, error) {
 			return candidate, nil
 		}
 	}
+}
+
+// TreeFolder is one folder of a folder tree given as paths, such as "Photos/2024".
+type TreeFolder struct {
+	Path string
+	// Parent is the path of the folder above, "" on top.
+	Parent string
+	Name   string
+}
+
+// TreeFolders checks the folder paths of a tree and returns its folders level by level, top first, each level sorted
+// by path, so each folder comes after the folder above it. The folders above a path count even when the paths leave
+// them out. A bad name gives the ValidateName error, and more than maxFolders folders gives a validation error.
+func TreeFolders(paths []string, maxFolders int) ([]TreeFolder, error) {
+	if len(paths) == 0 {
+		return nil, apperr.New(apperr.KindInvalid, "invalid paths")
+	}
+
+	seen := make(map[string]bool)
+	var levels [][]TreeFolder
+	for _, path := range paths {
+		names := strings.Split(path, "/")
+		for depth, name := range names {
+			sub := strings.Join(names[:depth+1], "/")
+			if seen[sub] {
+				continue
+			}
+			if err := ValidateName(name, FolderName); err != nil {
+				return nil, err
+			}
+			seen[sub] = true
+			if len(seen) > maxFolders {
+				return nil, apperr.New(apperr.KindValidation, fmt.Sprintf("a folder upload can make at most %d folders", maxFolders))
+			}
+			if depth == len(levels) {
+				levels = append(levels, nil)
+			}
+			levels[depth] = append(levels[depth], TreeFolder{Path: sub, Parent: strings.Join(names[:depth], "/"), Name: name})
+		}
+	}
+	for _, level := range levels {
+		slices.SortFunc(level, func(a, b TreeFolder) int { return strings.Compare(a.Path, b.Path) })
+	}
+	return slices.Concat(levels...), nil
 }

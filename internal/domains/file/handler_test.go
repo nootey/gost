@@ -3,18 +3,20 @@ package file_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"gost/config"
 	"gost/internal/apperr"
 	"gost/internal/domains/file"
 	"gost/internal/middleware"
+	"gost/internal/uploads"
 	"gost/internal/utils"
 	"gost/mocks"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,17 +38,22 @@ type FileHandlerTestSuite struct {
 	router      *chi.Mux
 	mockService *mocks.MockFileServiceInterface
 	handler     *file.FileHandler
+	uploadDir   string
 }
 
 func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.mockService = mocks.NewMockFileServiceInterface(suite.T())
-	cfg := config.UploadConfig{Dir: suite.T().TempDir(), MaxSizeMB: 1, TimeoutSeconds: 60}
-	suite.handler = file.NewFileHandler(suite.mockService, cfg, config.DownloadConfig{TimeoutSeconds: 60}, apperr.NewResponder(zap.NewNop()))
+	suite.uploadDir = suite.T().TempDir()
+	resp := apperr.NewResponder(zap.NewNop())
+	suite.handler = file.NewFileHandler(suite.mockService, config.DownloadConfig{TimeoutSeconds: 60}, resp)
+	uploadHandler, err := uploads.NewHandler(suite.uploadDir, "/uploads/", suite.handler.UploadHooks(), resp, zap.NewNop())
+	suite.Require().NoError(err)
 
 	suite.router = chi.NewRouter()
+	suite.router.Mount("/uploads", uploadHandler)
 	suite.router.Get("/files", suite.handler.List)
-	suite.router.Post("/files", suite.handler.Upload)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
+	suite.router.Post("/folders/tree", suite.handler.CreateFolderTree)
 	suite.router.Get("/favorites", suite.handler.ListFavorites)
 	suite.router.Post("/favorites", suite.handler.AddFavorites)
 	suite.router.Post("/favorites/remove", suite.handler.RemoveFavorites)
@@ -73,150 +80,197 @@ func TestFileHandlerTestSuite(t *testing.T) {
 	suite.Run(t, new(FileHandlerTestSuite))
 }
 
-// multipartBody builds a form with optional text fields first, then the file.
-func (suite *FileHandlerTestSuite) multipartBody(fields map[string]string, filename, content string) (*bytes.Buffer, string) {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	for k, v := range fields {
-		suite.Require().NoError(mw.WriteField(k, v))
-	}
-	if filename != "" {
-		fw, err := mw.CreateFormFile("file", filename)
-		suite.Require().NoError(err)
-		_, err = fw.Write([]byte(content))
-		suite.Require().NoError(err)
-	}
-	suite.Require().NoError(mw.Close())
-	return &buf, mw.FormDataContentType()
-}
-
-func (suite *FileHandlerTestSuite) upload(query string, body io.Reader, contentType string, authenticated bool) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/files"+query, body)
-	req.Header.Set("Content-Type", contentType)
-	if authenticated {
-		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
-	}
-	w := httptest.NewRecorder()
-	suite.router.ServeHTTP(w, req)
-	return w
-}
-
 func (suite *FileHandlerTestSuite) errorMessage(w *httptest.ResponseRecorder) string {
 	var resp apperr.ErrorResponse
 	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 	return resp.Message
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_Success() {
+// tusMeta builds an Upload-Metadata header from key and value pairs.
+func tusMeta(pairs ...string) string {
+	parts := make([]string, 0, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		parts = append(parts, pairs[i]+" "+base64.StdEncoding.EncodeToString([]byte(pairs[i+1])))
+	}
+	return strings.Join(parts, ",")
+}
+
+// tus sends one tus request as userID. A userID of 0 sends it without a user.
+func (suite *FileHandlerTestSuite) tus(method, path string, userID int64, header map[string]string, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Tus-Resumable", "1.0.0")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/offset+octet-stream")
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	if userID != 0 {
+		req = req.WithContext(middleware.WithUserID(req.Context(), userID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+// createUpload starts an upload of notes.txt in folder 5 and returns its URL.
+func (suite *FileHandlerTestSuite) createUpload(size int64, extraMeta ...string) string {
+	suite.mockService.EXPECT().CheckUpload(mock.Anything, testUserID, int64(5), "notes.txt", size).Return(nil).Once()
+
+	meta := tusMeta(append([]string{"filename", "notes.txt", "parent_id", "5"}, extraMeta...)...)
+	w := suite.tus(http.MethodPost, "/uploads/", testUserID, map[string]string{
+		"Upload-Length":   strconv.FormatInt(size, 10),
+		"Upload-Metadata": meta,
+	}, "")
+	suite.Require().Equal(http.StatusCreated, w.Code, w.Body.String())
+	return w.Header().Get("Location")
+}
+
+// partialFiles lists what the uploads left in the partial dir.
+func (suite *FileHandlerTestSuite) partialFiles() []string {
+	entries, err := os.ReadDir(filepath.Join(suite.uploadDir, uploads.PartialDir))
+	suite.Require().NoError(err)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names
+}
+
+func (suite *FileHandlerTestSuite) TestChunkedUpload_Success() {
+	loc := suite.createUpload(11)
+	suite.Regexp(`^/uploads/[0-9a-f]{32}$`, loc, "the Location is a path, so the chunks go through the same proxy")
+
+	w := suite.tus(http.MethodPatch, loc, testUserID, map[string]string{"Upload-Offset": "0"}, "hello")
+	suite.Require().Equal(http.StatusNoContent, w.Code, w.Body.String())
+	suite.Equal("5", w.Header().Get("Upload-Offset"))
+
+	w = suite.tus(http.MethodHead, loc, testUserID, nil, "")
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("5", w.Header().Get("Upload-Offset"))
+
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, int64(0), "notes.txt", mock.Anything).
-		RunAndReturn(func(_ context.Context, _, _ int64, name string, src io.Reader) (*file.File, error) {
-			content, err := io.ReadAll(src)
+		FinishUpload(mock.Anything, testUserID, int64(5), "notes.txt", mock.Anything).
+		RunAndReturn(func(_ context.Context, _, _ int64, _, path string) (*file.File, error) {
+			suite.Equal(filepath.Join(suite.uploadDir, uploads.PartialDir), filepath.Dir(path))
+			content, err := os.ReadFile(path)
 			suite.Require().NoError(err)
-			suite.Equal("hello", string(content))
-			return &file.File{ID: 1, Name: name, ContentType: "text/plain; charset=utf-8", SizeBytes: 5}, nil
+			suite.Equal("hello world", string(content))
+			// The service moves the bytes into the store.
+			suite.Require().NoError(os.Remove(path))
+			return &file.File{ID: 1, Name: "notes.txt", SizeBytes: 11}, nil
 		}).
 		Once()
 
-	body, ct := suite.multipartBody(nil, "notes.txt", "hello")
-	w := suite.upload("", body, ct, true)
+	w = suite.tus(http.MethodPatch, loc, testUserID, map[string]string{"Upload-Offset": "5"}, " world")
 
-	suite.Equal(http.StatusCreated, w.Code)
+	suite.Require().Equal(http.StatusOK, w.Code, w.Body.String())
 	var resp file.UploadResponse
 	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 	suite.Equal("notes.txt uploaded.", resp.Message)
-	suite.Require().NotNil(resp.File)
-	suite.Equal(int64(5), resp.File.SizeBytes)
+	suite.Equal(int64(1), resp.File.ID)
+	suite.Empty(suite.partialFiles())
+	suite.Equal(http.StatusNotFound, suite.tus(http.MethodHead, loc, testUserID, nil, "").Code)
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_SkipsFieldsBeforeFile() {
+func (suite *FileHandlerTestSuite) TestChunkedUpload_AtRoot() {
+	suite.mockService.EXPECT().CheckUpload(mock.Anything, testUserID, int64(0), "notes.txt", int64(1)).Return(nil).Once()
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, int64(0), "a.txt", mock.Anything).
-		Return(&file.File{ID: 1, Name: "a.txt"}, nil).
+		FinishUpload(mock.Anything, testUserID, int64(0), "notes.txt", mock.Anything).
+		Return(&file.File{ID: 1, Name: "notes.txt"}, nil).
 		Once()
 
-	body, ct := suite.multipartBody(map[string]string{"note": "ignored"}, "a.txt", "x")
-	w := suite.upload("", body, ct, true)
+	w := suite.tus(http.MethodPost, "/uploads/", testUserID, map[string]string{
+		"Upload-Length":   "1",
+		"Upload-Metadata": tusMeta("filename", "notes.txt"),
+	}, "")
+	suite.Require().Equal(http.StatusCreated, w.Code, w.Body.String())
+	w = suite.tus(http.MethodPatch, w.Header().Get("Location"), testUserID, map[string]string{"Upload-Offset": "0"}, "x")
 
-	suite.Equal(http.StatusCreated, w.Code)
+	suite.Equal(http.StatusOK, w.Code, w.Body.String())
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_IntoFolder() {
-	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, int64(12), "a.txt", mock.Anything).
-		Return(&file.File{ID: 1, Name: "a.txt"}, nil).
-		Once()
+// Another user's upload answers 404, as if it did not exist.
+func (suite *FileHandlerTestSuite) TestChunkedUpload_OnlyOwner() {
+	// The client cannot set the owner through the metadata.
+	loc := suite.createUpload(5, "user_id", "8")
 
-	body, ct := suite.multipartBody(nil, "a.txt", "x")
-	w := suite.upload("?parent_id=12", body, ct, true)
-
-	suite.Equal(http.StatusCreated, w.Code)
+	for _, method := range []string{http.MethodHead, http.MethodPatch, http.MethodDelete} {
+		w := suite.tus(method, loc, 8, map[string]string{"Upload-Offset": "0"}, "x")
+		suite.Equal(http.StatusNotFound, w.Code, method)
+	}
+	suite.Equal(http.StatusOK, suite.tus(http.MethodHead, loc, testUserID, nil, "").Code)
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_InvalidParentID() {
-	body, ct := suite.multipartBody(nil, "a.txt", "x")
-	w := suite.upload("?parent_id=abc", body, ct, true)
-
-	suite.Equal(http.StatusBadRequest, w.Code)
-	suite.Equal("invalid parent_id", suite.errorMessage(w))
+func (suite *FileHandlerTestSuite) TestChunkedUpload_UnknownIDs() {
+	for _, path := range []string{"/uploads/abc", "/uploads/../notes.txt", "/uploads/0123456789abcdef0123456789abcdef"} {
+		w := suite.tus(http.MethodHead, path, testUserID, nil, "")
+		suite.Equal(http.StatusNotFound, w.Code, path)
+	}
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_Unauthenticated() {
-	body, ct := suite.multipartBody(nil, "notes.txt", "hello")
-	w := suite.upload("", body, ct, false)
+func (suite *FileHandlerTestSuite) TestChunkedUpload_Unauthenticated() {
+	w := suite.tus(http.MethodPost, "/uploads/", 0, map[string]string{"Upload-Length": "1"}, "")
 
 	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_NotMultipart() {
-	w := suite.upload("", strings.NewReader(`{"file":"x"}`), "application/json", true)
-
-	suite.Equal(http.StatusBadRequest, w.Code)
-	suite.Equal("expected a multipart form", suite.errorMessage(w))
-}
-
-func (suite *FileHandlerTestSuite) TestUpload_NoFile() {
-	body, ct := suite.multipartBody(map[string]string{"note": "no file here"}, "", "")
-	w := suite.upload("", body, ct, true)
-
-	suite.Equal(http.StatusBadRequest, w.Code)
-	suite.Equal("no file was sent", suite.errorMessage(w))
-}
-
-// A field bigger than the whole body limit must stop at the limit, not be read in full.
-func (suite *FileHandlerTestSuite) TestUpload_BodyTooLarge() {
-	huge := strings.Repeat("a", 3<<20)
-	body, ct := suite.multipartBody(map[string]string{"padding": huge}, "a.txt", "x")
-	w := suite.upload("", body, ct, true)
-
-	suite.Equal(http.StatusRequestEntityTooLarge, w.Code)
-	suite.Equal("request body is too large", suite.errorMessage(w))
-}
-
-func (suite *FileHandlerTestSuite) TestUpload_ServiceError() {
+func (suite *FileHandlerTestSuite) TestChunkedUpload_CreateRejects() {
 	suite.mockService.EXPECT().
-		Upload(mock.Anything, testUserID, int64(0), "big.bin", mock.Anything).
-		Return(nil, apperr.New(apperr.KindTooLarge, "file is larger than the 1 MB limit")).
+		CheckUpload(mock.Anything, testUserID, int64(0), "notes.txt", int64(1)).
+		Return(apperr.New(apperr.KindNotFound, "folder not found")).
 		Once()
 
-	body, ct := suite.multipartBody(nil, "big.bin", "x")
-	w := suite.upload("", body, ct, true)
+	cases := []struct {
+		header  map[string]string
+		status  int
+		message string
+	}{
+		{map[string]string{"Upload-Length": "1", "Upload-Metadata": tusMeta("filename", "notes.txt")}, http.StatusNotFound, "folder not found"},
+		{map[string]string{"Upload-Length": "1", "Upload-Metadata": tusMeta("parent_id", "abc")}, http.StatusBadRequest, "invalid parent_id"},
+		{map[string]string{"Upload-Defer-Length": "1"}, http.StatusBadRequest, "the upload length is required"},
+	}
+	for _, tc := range cases {
+		w := suite.tus(http.MethodPost, "/uploads/", testUserID, tc.header, "")
 
-	suite.Equal(http.StatusRequestEntityTooLarge, w.Code)
-	suite.Equal("file is larger than the 1 MB limit", suite.errorMessage(w))
+		suite.Equal(tc.status, w.Code, tc.message)
+		suite.Equal(tc.message, suite.errorMessage(w))
+	}
+	suite.Empty(suite.partialFiles())
 }
 
-func (suite *FileHandlerTestSuite) TestUpload_InternalError() {
-	suite.mockService.EXPECT().
-		Upload(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		Return(nil, assert.AnError).
-		Once()
+// A failed finish removes the partial upload: the server has all its bytes, so the client cannot finish it again.
+func (suite *FileHandlerTestSuite) TestChunkedUpload_FinishFails() {
+	cases := []struct {
+		err     error
+		status  int
+		message string
+	}{
+		{apperr.New(apperr.KindNotFound, "folder not found"), http.StatusNotFound, "folder not found"},
+		{assert.AnError, http.StatusInternalServerError, "something went wrong"},
+	}
+	for _, tc := range cases {
+		loc := suite.createUpload(1)
+		suite.mockService.EXPECT().
+			FinishUpload(mock.Anything, testUserID, int64(5), "notes.txt", mock.Anything).
+			Return(nil, tc.err).
+			Once()
 
-	body, ct := suite.multipartBody(nil, "a.txt", "x")
-	w := suite.upload("", body, ct, true)
+		w := suite.tus(http.MethodPatch, loc, testUserID, map[string]string{"Upload-Offset": "0"}, "x")
 
-	suite.Equal(http.StatusInternalServerError, w.Code)
-	suite.Equal("something went wrong", suite.errorMessage(w))
+		suite.Equal(tc.status, w.Code, tc.message)
+		suite.Equal(tc.message, suite.errorMessage(w))
+		suite.Empty(suite.partialFiles())
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestChunkedUpload_Cancel() {
+	loc := suite.createUpload(5)
+
+	w := suite.tus(http.MethodDelete, loc, testUserID, nil, "")
+
+	suite.Equal(http.StatusNoContent, w.Code)
+	suite.Empty(suite.partialFiles())
 }
 
 func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httptest.ResponseRecorder {
@@ -427,6 +481,71 @@ func (suite *FileHandlerTestSuite) TestCreateFolder_ServiceError() {
 		Once()
 
 	w := suite.createFolder(`{"name":"Photos","parent_id":99}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("folder not found", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolderTree_Success() {
+	folders := map[string]int64{"Docs": 3, "Photos": 1, "Photos/2024": 2}
+	suite.mockService.EXPECT().
+		CreateFolderTree(mock.Anything, testUserID, int64(12), []string{"Photos/2024", "Docs"}).
+		Return(folders, nil).
+		Once()
+
+	w := suite.postItems("/folders/tree", `{"parent_id":12,"paths":["Photos/2024","Docs"]}`, true)
+
+	suite.Equal(http.StatusCreated, w.Code)
+	var resp file.FolderTreeResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("3 folders created.", resp.Message)
+	suite.Equal(folders, resp.Folders)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolderTree_OneFolderAtRoot() {
+	suite.mockService.EXPECT().
+		CreateFolderTree(mock.Anything, testUserID, int64(0), []string{"Docs"}).
+		Return(map[string]int64{"Docs": 3}, nil).
+		Once()
+
+	w := suite.postItems("/folders/tree", `{"paths":["Docs"]}`, true)
+
+	suite.Equal(http.StatusCreated, w.Code)
+	var resp file.FolderTreeResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("1 folder created.", resp.Message)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolderTree_BadRequests() {
+	cases := []struct {
+		body    string
+		message string
+	}{
+		{`not json`, "invalid request body"},
+		{`{"paths":["` + strings.Repeat("a", 16<<20) + `"]}`, "invalid request body"},
+		{`{"parent_id":0,"paths":["Docs"]}`, "invalid parent_id"},
+	}
+	for _, tc := range cases {
+		w := suite.postItems("/folders/tree", tc.body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, tc.message)
+		suite.Equal(tc.message, suite.errorMessage(w))
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolderTree_Unauthenticated() {
+	w := suite.postItems("/folders/tree", `{"paths":["Docs"]}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFolderTree_ServiceError() {
+	suite.mockService.EXPECT().
+		CreateFolderTree(mock.Anything, testUserID, int64(99), []string{"Docs"}).
+		Return(nil, apperr.New(apperr.KindNotFound, "folder not found")).
+		Once()
+
+	w := suite.postItems("/folders/tree", `{"parent_id":99,"paths":["Docs"]}`, true)
 
 	suite.Equal(http.StatusNotFound, w.Code)
 	suite.Equal("folder not found", suite.errorMessage(w))

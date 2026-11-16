@@ -141,6 +141,35 @@ func (q *Queries) CreateFolder(ctx context.Context, arg CreateFolderParams) (Fil
 	return i, err
 }
 
+const createFolders = `-- name: CreateFolders :exec
+INSERT INTO files (id, user_id, parent_id, name, content_type, size_bytes)
+SELECT t.id, $1::bigint, NULLIF(t.parent_id, 0), t.name, '', 0
+FROM (
+    SELECT unnest($2::bigint[]) AS id,
+           unnest($3::bigint[]) AS parent_id,
+           unnest($4::text[]) AS name
+) AS t
+`
+
+type CreateFoldersParams struct {
+	UserID    int64    `json:"user_id"`
+	Ids       []int64  `json:"ids"`
+	ParentIds []int64  `json:"parent_ids"`
+	Names     []string `json:"names"`
+}
+
+// Adds many folders in one statement, with IDs from NextFileIDs. The arrays hold one row each at the same index.
+// A parent ID of 0 is the root.
+func (q *Queries) CreateFolders(ctx context.Context, arg CreateFoldersParams) error {
+	_, err := q.db.ExecContext(ctx, createFolders,
+		arg.UserID,
+		pq.Array(arg.Ids),
+		pq.Array(arg.ParentIds),
+		pq.Array(arg.Names),
+	)
+	return err
+}
+
 const deleteCopyRoot = `-- name: DeleteCopyRoot :exec
 DELETE FROM files
 WHERE user_id = $1
@@ -1285,6 +1314,35 @@ func (q *Queries) MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTr
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const nextFileIDs = `-- name: NextFileIDs :many
+SELECT nextval(pg_get_serial_sequence('files', 'id'))::bigint AS id
+FROM generate_series(1, $1::bigint)
+`
+
+// Takes count new file IDs, so one insert can add folders together with the folders under them.
+func (q *Queries) NextFileIDs(ctx context.Context, count int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, nextFileIDs, count)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const renameFile = `-- name: RenameFile :one

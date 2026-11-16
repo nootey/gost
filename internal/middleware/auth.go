@@ -123,6 +123,11 @@ func WithUserID(ctx context.Context, userID int64) context.Context {
 }
 
 func GetUserID(r *http.Request) (int64, bool) {
-	userID, ok := r.Context().Value(userIDKey).(int64)
+	return UserIDFromContext(r.Context())
+}
+
+// UserIDFromContext reads the user ID for code that gets only the request context, such as the upload hooks.
+func UserIDFromContext(ctx context.Context) (int64, bool) {
+	userID, ok := ctx.Value(userIDKey).(int64)
 	return userID, ok
 }

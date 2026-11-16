@@ -15,6 +15,7 @@ import (
 	"gost/internal/database"
 	"gost/internal/domains/file"
 	"gost/internal/jobs"
+	"gost/internal/uploads"
 	"gost/internal/utils"
 	"gost/tests/integration"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,6 +34,8 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 	"github.com/stretchr/testify/suite"
+	"github.com/tus/tusd/v2/pkg/filestore"
+	tusd "github.com/tus/tusd/v2/pkg/handler"
 )
 
 // oldUpdatedAt is a fixed past time. A test sets updated_at to it, then checks which rows an action changed.
@@ -43,81 +47,6 @@ type FileServiceTestSuite struct {
 
 func TestIntegrationFileServiceTestSuite(t *testing.T) {
 	suite.Run(t, new(FileServiceTestSuite))
-}
-
-func (s *FileServiceTestSuite) TestUpload_StoresFileAndRecord() {
-	userID := s.seedUser()
-
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "notes.txt", strings.NewReader("hello world"))
-
-	s.Require().NoError(err)
-	s.Equal("notes.txt", f.Name)
-	s.False(f.IsFolder)
-	s.Nil(f.ParentID)
-	s.Equal(int64(11), f.SizeBytes)
-	s.Equal("text/plain; charset=utf-8", f.ContentType)
-
-	var key string
-	var owner int64
-	err = s.TC.DB.QueryRowContext(context.Background(),
-		`SELECT storage_key, user_id FROM files WHERE id = $1`, f.ID).Scan(&key, &owner)
-	s.Require().NoError(err)
-	s.Equal(userID, owner)
-	s.NotContains(key, "notes")
-
-	content, err := os.ReadFile(filepath.Join(s.TC.UploadDir, key))
-	s.Require().NoError(err)
-	s.Equal("hello world", string(content))
-}
-
-func (s *FileServiceTestSuite) TestUpload_AtLimit() {
-	userID := s.seedUser()
-
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "exact.bin", bytes.NewReader(make([]byte, 1<<20)))
-
-	s.Require().NoError(err)
-	s.Equal(int64(1<<20), f.SizeBytes)
-}
-
-func (s *FileServiceTestSuite) TestUpload_TooLargeLeavesNothingBehind() {
-	userID := s.seedUser()
-	before := s.dirEntries()
-
-	_, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "big.bin", bytes.NewReader(make([]byte, 1<<20+1)))
-
-	status, msg := apperr.Resolve(err)
-	s.Equal(http.StatusRequestEntityTooLarge, status)
-	s.Equal("file is larger than the 1 MB limit", msg)
-	s.Equal(before, s.dirEntries())
-	s.Equal(0, s.fileRows())
-}
-
-func (s *FileServiceTestSuite) TestUpload_RejectsBadInput() {
-	userID := s.seedUser()
-	svc := s.TC.Services.FileService
-
-	cases := []struct {
-		name    string
-		content string
-		message string
-	}{
-		{"", "x", "file name is required"},
-		{"   ", "x", "file name is required"},
-		{"bad\xffname.txt", "x", "file name has invalid characters"},
-		{"nul\x00.txt", "x", "file name has invalid characters"},
-		{"a/b.txt", "x", "file name has invalid characters"},
-		{"..", "x", "file name has invalid characters"},
-		{strings.Repeat("a", 256), "x", "file name is too long"},
-		{"empty.txt", "", "file is empty"},
-	}
-	for _, tc := range cases {
-		_, err := svc.Upload(context.Background(), userID, 0, tc.name, strings.NewReader(tc.content))
-
-		status, msg := apperr.Resolve(err)
-		s.Equal(http.StatusBadRequest, status, tc.message)
-		s.Equal(tc.message, msg)
-	}
-	s.Equal(0, s.fileRows())
 }
 
 func (s *FileServiceTestSuite) TestList_OnlyOwnFiles() {
@@ -287,7 +216,7 @@ func (s *FileServiceTestSuite) TestList_ReturnsEveryField() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	folder := s.createFolder(userID, 0, "Docs")
-	uploaded, err := svc.Upload(context.Background(), userID, folder.ID, "notes.txt", strings.NewReader("hello"))
+	uploaded, err := s.finishUpload(userID, folder.ID, "notes.txt", "hello")
 	s.Require().NoError(err)
 
 	inFolder, err := svc.List(context.Background(), userID, newestFirst(folder.ID))
@@ -368,12 +297,12 @@ func (s *FileServiceTestSuite) TestList_SortByModified() {
 	s.Equal([]string{"A2", "B", "x2.txt", "y.txt"}, fileNames(desc.Data))
 }
 
-func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
+func (s *FileServiceTestSuite) TestFinishUpload_IntoFolder() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	folder := s.createFolder(userID, 0, "Docs")
 
-	f, err := svc.Upload(context.Background(), userID, folder.ID, "notes.txt", strings.NewReader("hello"))
+	f, err := s.finishUpload(userID, folder.ID, "notes.txt", "hello")
 
 	s.Require().NoError(err)
 	s.Require().NotNil(f.ParentID)
@@ -388,11 +317,12 @@ func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
 	s.Equal([]string{"Docs"}, fileNames(atRoot.Data))
 }
 
-func (s *FileServiceTestSuite) TestUpload_UnknownFolderLeavesNothingBehind() {
+func (s *FileServiceTestSuite) TestFinishUpload_UnknownFolderLeavesNothingBehind() {
 	userID := s.seedUser()
+	path := s.writePartial("x")
 	before := s.dirEntries()
 
-	_, err := s.TC.Services.FileService.Upload(context.Background(), userID, 999, "a.txt", strings.NewReader("x"))
+	_, err := s.TC.Services.FileService.FinishUpload(context.Background(), userID, 999, "a.txt", path)
 
 	status, msg := apperr.Resolve(err)
 	s.Equal(http.StatusNotFound, status)
@@ -401,9 +331,8 @@ func (s *FileServiceTestSuite) TestUpload_UnknownFolderLeavesNothingBehind() {
 	s.Equal(0, s.fileRows())
 }
 
-func (s *FileServiceTestSuite) TestUpload_RenamesOnClash() {
+func (s *FileServiceTestSuite) TestFinishUpload_RenamesOnClash() {
 	userID := s.seedUser()
-	svc := s.TC.Services.FileService
 
 	cases := []struct{ name, want string }{
 		{"a.txt", "a.txt"},
@@ -415,7 +344,7 @@ func (s *FileServiceTestSuite) TestUpload_RenamesOnClash() {
 		{"archive.tar.gz", "archive.tar (1).gz"},
 	}
 	for _, tc := range cases {
-		f, err := svc.Upload(context.Background(), userID, 0, tc.name, strings.NewReader("x"))
+		f, err := s.finishUpload(userID, 0, tc.name, "x")
 
 		s.Require().NoError(err)
 		s.Equal(tc.want, f.Name)
@@ -423,15 +352,101 @@ func (s *FileServiceTestSuite) TestUpload_RenamesOnClash() {
 }
 
 // The lowest free number wins, so a gap left by a missing copy is filled first.
-func (s *FileServiceTestSuite) TestUpload_RenameFillsGaps() {
+func (s *FileServiceTestSuite) TestFinishUpload_RenameFillsGaps() {
 	userID := s.seedUser()
 	s.seedFile(userID, "b.txt")
 	s.seedFile(userID, "b (2).txt")
 
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, 0, "b.txt", strings.NewReader("x"))
+	f, err := s.finishUpload(userID, 0, "b.txt", "x")
 
 	s.Require().NoError(err)
 	s.Equal("b (1).txt", f.Name)
+}
+
+func (s *FileServiceTestSuite) TestCheckUpload_AcceptsGoodUpload() {
+	userID := s.seedUser()
+	folder := s.createFolder(userID, 0, "Videos")
+	svc := s.TC.Services.FileService
+
+	// Chunked uploads have no size cap.
+	s.NoError(svc.CheckUpload(context.Background(), userID, 0, "film.mp4", 10<<30))
+	s.NoError(svc.CheckUpload(context.Background(), userID, folder.ID, "film.mp4", 1))
+	s.Equal(1, s.fileRows())
+}
+
+func (s *FileServiceTestSuite) TestCheckUpload_RejectsBadInput() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	theirs := s.createFolder(s.seedUserWithEmail("other@example.com"), 0, "Theirs")
+	trashed := s.createFolder(userID, 0, "Trashed")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{trashed.ID}))
+
+	cases := []struct {
+		parentID int64
+		name     string
+		size     int64
+		status   int
+		message  string
+	}{
+		{0, "", 1, http.StatusBadRequest, "file name is required"},
+		{0, "   ", 1, http.StatusBadRequest, "file name is required"},
+		{0, "bad\xffname.txt", 1, http.StatusBadRequest, "file name has invalid characters"},
+		{0, "nul\x00.txt", 1, http.StatusBadRequest, "file name has invalid characters"},
+		{0, "a/b.txt", 1, http.StatusBadRequest, "file name has invalid characters"},
+		{0, "..", 1, http.StatusBadRequest, "file name has invalid characters"},
+		{0, strings.Repeat("a", 256), 1, http.StatusBadRequest, "file name is too long"},
+		{0, "empty.txt", 0, http.StatusBadRequest, "file is empty"},
+		{999, "a.txt", 1, http.StatusNotFound, "folder not found"},
+		{theirs.ID, "a.txt", 1, http.StatusNotFound, "folder not found"},
+		{trashed.ID, "a.txt", 1, http.StatusNotFound, "folder not found"},
+	}
+	for _, tc := range cases {
+		err := svc.CheckUpload(context.Background(), userID, tc.parentID, tc.name, tc.size)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(tc.status, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+}
+
+func (s *FileServiceTestSuite) TestFinishUpload_StoresFileAndRecord() {
+	userID := s.seedUser()
+	folder := s.createFolder(userID, 0, "Docs")
+	path := s.writePartial("hello world")
+
+	f, err := s.TC.Services.FileService.FinishUpload(context.Background(), userID, folder.ID, "notes.txt", path)
+
+	s.Require().NoError(err)
+	s.Equal("notes.txt", f.Name)
+	s.Equal(folder.ID, *f.ParentID)
+	s.Equal(int64(11), f.SizeBytes)
+	s.Equal("text/plain; charset=utf-8", f.ContentType)
+
+	var key string
+	s.Require().NoError(s.TC.DB.QueryRowContext(context.Background(),
+		`SELECT storage_key FROM files WHERE id = $1`, f.ID).Scan(&key))
+	content, err := os.ReadFile(filepath.Join(s.TC.UploadDir, key))
+	s.Require().NoError(err)
+	s.Equal("hello world", string(content))
+	s.NoFileExists(path)
+}
+
+func (s *FileServiceTestSuite) TestFinishUpload_FolderGoneLeavesNothingBehind() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	folder := s.createFolder(userID, 0, "Docs")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{folder.ID}))
+	path := s.writePartial("hello")
+	before := s.dirEntries()
+
+	_, err := svc.FinishUpload(context.Background(), userID, folder.ID, "notes.txt", path)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("folder not found", msg)
+	s.Equal(before, s.dirEntries())
+	s.Equal(1, s.fileRows())
+	s.NoFileExists(path)
 }
 
 func (s *FileServiceTestSuite) TestCreateFolder_AtRootAndNested() {
@@ -503,14 +518,13 @@ func (s *FileServiceTestSuite) TestCreateFolder_UnknownParent() {
 // Folders and files share one set of names in a folder. A folder has no extension, so the number goes at the end.
 func (s *FileServiceTestSuite) TestCreateFolder_RenamesOnClash() {
 	userID := s.seedUser()
-	svc := s.TC.Services.FileService
 	s.seedFile(userID, "a.txt")
 
 	s.Equal("Photos", s.createFolder(userID, 0, "Photos").Name)
 	s.Equal("Photos (1)", s.createFolder(userID, 0, "Photos").Name)
 	s.Equal("a.txt (1)", s.createFolder(userID, 0, "a.txt").Name)
 
-	f, err := svc.Upload(context.Background(), userID, 0, "Photos", strings.NewReader("x"))
+	f, err := s.finishUpload(userID, 0, "Photos", "x")
 	s.Require().NoError(err)
 	s.Equal("Photos (2)", f.Name)
 }
@@ -563,8 +577,103 @@ func (s *FileServiceTestSuite) TestCreateFolder_ParallelClash() {
 	s.ElementsMatch([]string{"Shared", "Shared (1)", "Shared (2)"}, names)
 }
 
+// The paths may leave out the folders above them. Each folder gets the right parent and one "created" row.
+func (s *FileServiceTestSuite) TestCreateFolderTree_MakesTheTree() {
+	userID := s.seedUser()
+	into := s.createFolder(userID, 0, "Uploads")
+
+	ids, err := s.TC.Services.FileService.CreateFolderTree(context.Background(), userID, into.ID,
+		[]string{"Photos/2024/Trip", "Photos/2023", "Docs", "Photos/2024"})
+
+	s.Require().NoError(err)
+	s.Equal([]string{"Docs/", "Photos/", "Photos/2023/", "Photos/2024/", "Photos/2024/Trip/"}, s.treeOf(into.ID))
+	s.Len(ids, 5)
+	for path, id := range ids {
+		parent := into.ID
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			parent = ids[path[:i]]
+		}
+		s.Equal(parent, s.parentOf(id), path)
+		events := s.activity(userID, id)
+		s.Require().Len(events, 1, path)
+		s.Equal("created", events[0]["event"], path)
+	}
+}
+
+// Only the folders on top can clash, with folders and files alike. The folders under them keep their names.
+func (s *FileServiceTestSuite) TestCreateFolderTree_RenamesOnlyTheTop() {
+	userID := s.seedUser()
+	s.createFolder(userID, 0, "Photos")
+	s.createFolder(userID, 0, "Photos (1)")
+	s.upload(userID, 0, "Docs", "x")
+
+	ids, err := s.TC.Services.FileService.CreateFolderTree(context.Background(), userID, 0,
+		[]string{"Photos/Photos", "Docs"})
+
+	s.Require().NoError(err)
+	s.Equal(s.childID(userID, 0, "Photos (2)"), ids["Photos"])
+	s.Equal(s.childID(userID, 0, "Docs (1)"), ids["Docs"])
+	s.Equal(s.childID(userID, ids["Photos"], "Photos"), ids["Photos/Photos"])
+}
+
+// One bad path fails the whole call, and nothing goes in.
+func (s *FileServiceTestSuite) TestCreateFolderTree_RejectsBadInput() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	trashed := s.createFolder(userID, 0, "Trashed")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{trashed.ID}))
+	tooMany := make([]string, 10001)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("f%d", i)
+	}
+
+	cases := []struct {
+		parentID int64
+		paths    []string
+		status   int
+		message  string
+	}{
+		{0, nil, http.StatusBadRequest, "invalid paths"},
+		{0, []string{"Docs", ""}, http.StatusBadRequest, "folder name is required"},
+		{0, []string{"Docs/a//b"}, http.StatusBadRequest, "folder name is required"},
+		{0, []string{"/Docs"}, http.StatusBadRequest, "folder name is required"},
+		{0, []string{"Docs/.."}, http.StatusBadRequest, "folder name has invalid characters"},
+		{0, []string{"Docs/nul\x00"}, http.StatusBadRequest, "folder name has invalid characters"},
+		{0, []string{"Docs/" + strings.Repeat("a", 256)}, http.StatusBadRequest, "folder name is too long"},
+		{0, tooMany, http.StatusBadRequest, "a folder upload can make at most 10000 folders"},
+		{999, []string{"Docs"}, http.StatusNotFound, "folder not found"},
+		{trashed.ID, []string{"Docs"}, http.StatusNotFound, "folder not found"},
+	}
+	for _, tc := range cases {
+		_, err := svc.CreateFolderTree(context.Background(), userID, tc.parentID, tc.paths)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(tc.status, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+	s.Equal(1, s.fileRows())
+}
+
+// The cap fits in one call: 100 folders on top with 99 folders in each.
+func (s *FileServiceTestSuite) TestCreateFolderTree_AtTheCap() {
+	userID := s.seedUser()
+	var paths []string
+	for i := range 100 {
+		for j := range 99 {
+			paths = append(paths, fmt.Sprintf("d%d/e%d", i, j))
+		}
+	}
+
+	ids, err := s.TC.Services.FileService.CreateFolderTree(context.Background(), userID, 0, paths)
+
+	s.Require().NoError(err)
+	s.Len(ids, 10000)
+	s.Equal(10000, s.fileRows())
+	s.Equal(ids["d42"], s.parentOf(ids["d42/e7"]))
+}
+
 // A delete of a folder and creates into it run at once. A create may fail, but it must never leave a live row inside the trash.
-func (s *FileServiceTestSuite) TestUploadAndCreateFolder_ParallelWithTrashOfParent() {
+func (s *FileServiceTestSuite) TestFinishUploadAndCreateFolder_ParallelWithTrashOfParent() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 
@@ -574,13 +683,18 @@ func (s *FileServiceTestSuite) TestUploadAndCreateFolder_ParallelWithTrashOfPare
 		folders[i] = s.createFolder(userID, 0, fmt.Sprintf("Docs %d", i)).ID
 	}
 
+	partials := make([]string, n)
+	for i := range n {
+		partials[i] = s.writePartial("n")
+	}
+
 	trashErrs := make([]error, n)
 	createErrs := make([]error, 2*n)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Go(func() { trashErrs[i] = svc.Trash(context.Background(), userID, []int64{folders[i]}) })
 		wg.Go(func() {
-			_, createErrs[2*i] = svc.Upload(context.Background(), userID, folders[i], "new.txt", strings.NewReader("n"))
+			_, createErrs[2*i] = svc.FinishUpload(context.Background(), userID, folders[i], "new.txt", partials[i])
 		})
 		wg.Go(func() { _, createErrs[2*i+1] = svc.CreateFolder(context.Background(), userID, folders[i], "New") })
 	}
@@ -652,7 +766,7 @@ func (s *FileServiceTestSuite) TestList_Search() {
 	s.seedFile(userID, "q1-report.pdf")
 	s.seedFile(userID, "notes.txt")
 	s.seedFile(userID, "100%_done.txt")
-	_, err := svc.Upload(context.Background(), userID, folder.ID, "report-2.txt", strings.NewReader("x"))
+	_, err := s.finishUpload(userID, folder.ID, "report-2.txt", "x")
 	s.Require().NoError(err)
 
 	cases := []struct {
@@ -1659,7 +1773,7 @@ func (s *FileServiceTestSuite) TestBuildZip_OverTheSizeCap() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	for _, name := range []string{"a.bin", "b.bin"} {
-		_, err := svc.Upload(context.Background(), userID, docs.ID, name, bytes.NewReader(bytes.Repeat([]byte("x"), 600<<10)))
+		_, err := s.finishUpload(userID, docs.ID, name, strings.Repeat("x", 600<<10))
 		s.Require().NoError(err)
 	}
 	dl, err := svc.RequestZip(context.Background(), userID, []int64{docs.ID})
@@ -1951,7 +2065,7 @@ func (s *FileServiceTestSuite) TestMove_ToRoot() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	_, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	_, err := s.finishUpload(userID, sub.ID, "x.txt", "x")
 	s.Require().NoError(err)
 
 	s.Require().NoError(svc.Move(context.Background(), userID, 0, []int64{sub.ID}))
@@ -1971,7 +2085,7 @@ func (s *FileServiceTestSuite) TestMove_NameTaken() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	archive := s.createFolder(userID, 0, "Archive")
-	_, err := svc.Upload(context.Background(), userID, archive.ID, "a.txt", strings.NewReader("a"))
+	_, err := s.finishUpload(userID, archive.ID, "a.txt", "a")
 	s.Require().NoError(err)
 	s.createFolder(userID, archive.ID, "Photos")
 	fileA := s.seedFile(userID, "a.txt")
@@ -2007,9 +2121,9 @@ func (s *FileServiceTestSuite) TestMove_TwoItemsWithOneName() {
 	docs := s.createFolder(userID, 0, "Docs")
 	notes := s.createFolder(userID, 0, "Notes")
 	archive := s.createFolder(userID, 0, "Archive")
-	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	inDocs, err := s.finishUpload(userID, docs.ID, "a.txt", "a")
 	s.Require().NoError(err)
-	inNotes, err := svc.Upload(context.Background(), userID, notes.ID, "a.txt", strings.NewReader("a"))
+	inNotes, err := s.finishUpload(userID, notes.ID, "a.txt", "a")
 	s.Require().NoError(err)
 
 	err = svc.Move(context.Background(), userID, archive.ID, []int64{inDocs.ID, inNotes.ID})
@@ -2026,7 +2140,7 @@ func (s *FileServiceTestSuite) TestMove_SameFolder() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	inDocs, err := s.finishUpload(userID, docs.ID, "a.txt", "a")
 	s.Require().NoError(err)
 	atRoot := s.seedFile(userID, "b.txt")
 
@@ -2419,7 +2533,7 @@ func (s *FileServiceTestSuite) TestCopy_ItemStillCopying() {
 	for _, into := range []func() error{
 		func() error { _, err := svc.List(context.Background(), userID, newestFirst(docsCopy)); return err },
 		func() error {
-			_, err := svc.Upload(context.Background(), userID, docsCopy, "new.txt", strings.NewReader("n"))
+			_, err := s.finishUpload(userID, docsCopy, "new.txt", "n")
 			return err
 		},
 		func() error { _, err := svc.CreateFolder(context.Background(), userID, docsCopy, "New"); return err },
@@ -2716,9 +2830,9 @@ func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
 	svc := s.TC.Services.FileService
 	photos := s.createFolder(userID, 0, "Photos")
 	cars := s.createFolder(userID, photos.ID, "Cars")
-	inCars, err := svc.Upload(context.Background(), userID, cars.ID, "x.txt", strings.NewReader("x"))
+	inCars, err := s.finishUpload(userID, cars.ID, "x.txt", "x")
 	s.Require().NoError(err)
-	inPhotos, err := svc.Upload(context.Background(), userID, photos.ID, "y.txt", strings.NewReader("y"))
+	inPhotos, err := s.finishUpload(userID, photos.ID, "y.txt", "y")
 	s.Require().NoError(err)
 	s.seedFile(userID, "a.txt")
 
@@ -2739,7 +2853,7 @@ func (s *FileServiceTestSuite) TestTrash_HidesFolderAndEverythingUnder() {
 		_, err := svc.List(context.Background(), userID, newestFirst(folderID))
 		s.Equal("folder not found", s.errorMessage(err))
 
-		_, err = svc.Upload(context.Background(), userID, folderID, "new.txt", strings.NewReader("n"))
+		_, err = s.finishUpload(userID, folderID, "new.txt", "n")
 		s.Equal("folder not found", s.errorMessage(err))
 
 		_, err = svc.CreateFolder(context.Background(), userID, folderID, "New")
@@ -2783,7 +2897,7 @@ func (s *FileServiceTestSuite) TestTrash_FreesNames() {
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, a1, photos.ID}))
 
 	for _, want := range []string{"a.txt", "a (1).txt"} {
-		f, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+		f, err := s.finishUpload(userID, 0, "a.txt", "new")
 		s.Require().NoError(err)
 		s.Equal(want, f.Name)
 	}
@@ -2831,14 +2945,14 @@ func (s *FileServiceTestSuite) TestTrash_EachItemKeepsItsGroup() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	old, err := s.finishUpload(userID, docs.ID, "old.txt", "o")
 	s.Require().NoError(err)
 	oldDir := s.createFolder(userID, docs.ID, "Old")
-	inOldDir, err := svc.Upload(context.Background(), userID, oldDir.ID, "in-old.txt", strings.NewReader("i"))
+	inOldDir, err := s.finishUpload(userID, oldDir.ID, "in-old.txt", "i")
 	s.Require().NoError(err)
-	listed, err := svc.Upload(context.Background(), userID, docs.ID, "listed.txt", strings.NewReader("l"))
+	listed, err := s.finishUpload(userID, docs.ID, "listed.txt", "l")
 	s.Require().NoError(err)
-	rest, err := svc.Upload(context.Background(), userID, docs.ID, "rest.txt", strings.NewReader("r"))
+	rest, err := s.finishUpload(userID, docs.ID, "rest.txt", "r")
 	s.Require().NoError(err)
 
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID, oldDir.ID}))
@@ -2861,7 +2975,7 @@ func (s *FileServiceTestSuite) TestTrash_JobMarksRowsUnderFolders() {
 	a := s.seedFile(userID, "a.txt")
 	docs := s.createFolder(userID, 0, "Docs")
 	empty := s.createFolder(userID, 0, "Empty")
-	inDocs, err := svc.Upload(context.Background(), userID, docs.ID, "x.txt", strings.NewReader("x"))
+	inDocs, err := s.finishUpload(userID, docs.ID, "x.txt", "x")
 	s.Require().NoError(err)
 
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a}))
@@ -2901,7 +3015,7 @@ func (s *FileServiceTestSuite) TestTrashSubtrees_ManyBatchesAndLevels() {
 	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Big", "Sub 1"})
 	s.Require().NoError(err)
 	deep := s.createFolder(userID, path.Path[1].ID, "Deep")
-	inDeep, err := svc.Upload(context.Background(), userID, deep.ID, "deep.txt", strings.NewReader("d"))
+	inDeep, err := s.finishUpload(userID, deep.ID, "deep.txt", "d")
 	s.Require().NoError(err)
 
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{big.ID}))
@@ -2918,7 +3032,7 @@ func (s *FileServiceTestSuite) TestTrashSubtrees_RestoreMidJobStopsIt() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	_, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	_, err := s.finishUpload(userID, sub.ID, "x.txt", "x")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
 	s.markInGroup(docs.ID, sub.ID)
@@ -2940,7 +3054,7 @@ func (s *FileServiceTestSuite) TestTrashSubtrees_RunAfterFailureFinishes() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	x, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	x, err := s.finishUpload(userID, sub.ID, "x.txt", "x")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
 	s.markInGroup(docs.ID, sub.ID)
@@ -2958,7 +3072,7 @@ func (s *FileServiceTestSuite) TestListTrash_OnlyDeletedItems() {
 	bob := s.seedUserWithEmail("bob@example.com")
 	svc := s.TC.Services.FileService
 	photos := s.createFolder(alice, 0, "Photos")
-	_, err := svc.Upload(context.Background(), alice, photos.ID, "in-photos.txt", strings.NewReader("p"))
+	_, err := s.finishUpload(alice, photos.ID, "in-photos.txt", "p")
 	s.Require().NoError(err)
 	a := s.seedFile(alice, "a.txt")
 	b := s.seedFile(alice, "b.txt")
@@ -3077,7 +3191,7 @@ func (s *FileServiceTestSuite) TestRestore_BringsBackFolderAndEverythingUnder() 
 	svc := s.TC.Services.FileService
 	photos := s.createFolder(userID, 0, "Photos")
 	cars := s.createFolder(userID, photos.ID, "Cars")
-	_, err := svc.Upload(context.Background(), userID, cars.ID, "x.txt", strings.NewReader("x"))
+	_, err := s.finishUpload(userID, cars.ID, "x.txt", "x")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
 	s.workTrashJobs()
@@ -3107,7 +3221,7 @@ func (s *FileServiceTestSuite) TestRestore_RenamesOnClash() {
 	a := s.seedFile(userID, "a.txt")
 	docs := s.createFolder(userID, 0, "Docs")
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, docs.ID}))
-	_, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+	_, err := s.finishUpload(userID, 0, "a.txt", "new")
 	s.Require().NoError(err)
 	s.createFolder(userID, 0, "Docs")
 
@@ -3125,7 +3239,7 @@ func (s *FileServiceTestSuite) TestRestore_TwoItemsWithOneName() {
 	svc := s.TC.Services.FileService
 	first := s.seedFile(userID, "a.txt")
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{first}))
-	second, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("new"))
+	second, err := s.finishUpload(userID, 0, "a.txt", "new")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{second.ID}))
 
@@ -3142,7 +3256,7 @@ func (s *FileServiceTestSuite) TestRestore_LeavesItemDeletedEarlier() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	old, err := s.finishUpload(userID, docs.ID, "old.txt", "o")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
@@ -3166,7 +3280,7 @@ func (s *FileServiceTestSuite) TestRestore_FolderInTrashSendsItemHome() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	old, err := s.finishUpload(userID, docs.ID, "old.txt", "o")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
@@ -3188,7 +3302,7 @@ func (s *FileServiceTestSuite) TestRestore_WithItsFolderGoesBackIn() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	old, err := svc.Upload(context.Background(), userID, sub.ID, "old.txt", strings.NewReader("o"))
+	old, err := s.finishUpload(userID, sub.ID, "old.txt", "o")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
@@ -3209,7 +3323,7 @@ func (s *FileServiceTestSuite) TestRestore_AllOrNone() {
 	a := s.seedFile(alice, "a.txt")
 	live := s.seedFile(alice, "live.txt")
 	docs := s.createFolder(alice, 0, "Docs")
-	under, err := svc.Upload(context.Background(), alice, docs.ID, "under.txt", strings.NewReader("u"))
+	under, err := s.finishUpload(alice, docs.ID, "under.txt", "u")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a, docs.ID}))
 	s.workTrashJobs()
@@ -3239,7 +3353,7 @@ func (s *FileServiceTestSuite) TestRestore_ParallelWithTrashOfItsFolder() {
 	items := make([]int64, n)
 	for i := range n {
 		folder := s.createFolder(userID, 0, fmt.Sprintf("Docs %d", i))
-		item, err := svc.Upload(context.Background(), userID, folder.ID, "old.txt", strings.NewReader("o"))
+		item, err := s.finishUpload(userID, folder.ID, "old.txt", "o")
 		s.Require().NoError(err)
 		s.Require().NoError(svc.Trash(context.Background(), userID, []int64{item.ID}))
 		folders[i], items[i] = folder.ID, item.ID
@@ -3266,13 +3380,13 @@ func (s *FileServiceTestSuite) TestPurge_DeletesRowsAndBytes() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	a, err := svc.Upload(context.Background(), userID, docs.ID, "a.txt", strings.NewReader("a"))
+	a, err := s.finishUpload(userID, docs.ID, "a.txt", "a")
 	s.Require().NoError(err)
-	b, err := svc.Upload(context.Background(), userID, sub.ID, "b.txt", strings.NewReader("b"))
+	b, err := s.finishUpload(userID, sub.ID, "b.txt", "b")
 	s.Require().NoError(err)
-	gone, err := svc.Upload(context.Background(), userID, 0, "gone.txt", strings.NewReader("g"))
+	gone, err := s.finishUpload(userID, 0, "gone.txt", "g")
 	s.Require().NoError(err)
-	keep, err := svc.Upload(context.Background(), userID, 0, "keep.txt", strings.NewReader("k"))
+	keep, err := s.finishUpload(userID, 0, "keep.txt", "k")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID, gone.ID}))
 	s.workTrashJobs()
@@ -3306,7 +3420,7 @@ func (s *FileServiceTestSuite) TestPurge_AllOrNone() {
 	live := s.seedFile(alice, "live.txt")
 	marked := s.seedFile(alice, "marked.txt")
 	docs := s.createFolder(alice, 0, "Docs")
-	under, err := svc.Upload(context.Background(), alice, docs.ID, "under.txt", strings.NewReader("u"))
+	under, err := s.finishUpload(alice, docs.ID, "under.txt", "u")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a, marked, docs.ID}))
 	s.workTrashJobs()
@@ -3347,7 +3461,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_MovesItemDeletedEarlierHome() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	old, err := svc.Upload(context.Background(), userID, docs.ID, "old.txt", strings.NewReader("o"))
+	old, err := s.finishUpload(userID, docs.ID, "old.txt", "o")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID}))
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
@@ -3377,7 +3491,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_BeforeTrashJobEnds() {
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
 	sub := s.createFolder(userID, docs.ID, "Sub")
-	x, err := svc.Upload(context.Background(), userID, sub.ID, "x.txt", strings.NewReader("x"))
+	x, err := s.finishUpload(userID, sub.ID, "x.txt", "x")
 	s.Require().NoError(err)
 	key := s.storageKey(x.ID)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
@@ -3412,7 +3526,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_ManyBatchesAndLevels() {
 	path, err := svc.ResolveFolder(context.Background(), userID, []string{"Big", "Sub 1"})
 	s.Require().NoError(err)
 	deep := s.createFolder(userID, path.Path[1].ID, "Deep")
-	inDeep, err := svc.Upload(context.Background(), userID, deep.ID, "deep.txt", strings.NewReader("d"))
+	inDeep, err := s.finishUpload(userID, deep.ID, "deep.txt", "d")
 	s.Require().NoError(err)
 	key := s.storageKey(inDeep.ID)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{big.ID}))
@@ -3430,7 +3544,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_RunAfterBytesGoneFinishes() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
 	docs := s.createFolder(userID, 0, "Docs")
-	x, err := svc.Upload(context.Background(), userID, docs.ID, "x.txt", strings.NewReader("x"))
+	x, err := s.finishUpload(userID, docs.ID, "x.txt", "x")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
 	s.workTrashJobs()
@@ -3446,7 +3560,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_RunAfterBytesGoneFinishes() {
 func (s *FileServiceTestSuite) TestPurgeGroups_SkipsGroupsNotMarked() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
-	a, err := svc.Upload(context.Background(), userID, 0, "a.txt", strings.NewReader("a"))
+	a, err := s.finishUpload(userID, 0, "a.txt", "a")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a.ID}))
 
@@ -3462,12 +3576,12 @@ func (s *FileServiceTestSuite) TestSweepTrash_PurgesExpiredItems() {
 	alice := s.seedUserWithEmail("alice@example.com")
 	bob := s.seedUserWithEmail("bob@example.com")
 	svc := s.TC.Services.FileService
-	a, err := svc.Upload(context.Background(), alice, 0, "a.txt", strings.NewReader("a"))
+	a, err := s.finishUpload(alice, 0, "a.txt", "a")
 	s.Require().NoError(err)
-	b, err := svc.Upload(context.Background(), alice, 0, "b.txt", strings.NewReader("b"))
+	b, err := s.finishUpload(alice, 0, "b.txt", "b")
 	s.Require().NoError(err)
 	docs := s.createFolder(alice, 0, "Docs")
-	in, err := svc.Upload(context.Background(), alice, docs.ID, "in.txt", strings.NewReader("i"))
+	in, err := s.finishUpload(alice, docs.ID, "in.txt", "i")
 	s.Require().NoError(err)
 	old := s.seedFile(bob, "old.txt")
 	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{a.ID, b.ID, docs.ID}))
@@ -3566,9 +3680,9 @@ func (s *FileServiceTestSuite) TestSweepTrash_AddsPurgeJobAgainAfterRiverGivesUp
 func (s *FileServiceTestSuite) TestSweepOrphans_RemovesOldFilesWithNoRow() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
-	live, err := svc.Upload(context.Background(), userID, 0, "live.txt", strings.NewReader("l"))
+	live, err := s.finishUpload(userID, 0, "live.txt", "l")
 	s.Require().NoError(err)
-	trashed, err := svc.Upload(context.Background(), userID, 0, "trashed.txt", strings.NewReader("t"))
+	trashed, err := s.finishUpload(userID, 0, "trashed.txt", "t")
 	s.Require().NoError(err)
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{trashed.ID}))
 	kept := []string{s.storageKey(live.ID), s.storageKey(trashed.ID)}
@@ -3600,6 +3714,57 @@ func (s *FileServiceTestSuite) TestSweepOrphans_RemovesOldFilesWithNoRow() {
 		removed[fields["name"].(string)] = fields["size_bytes"]
 	}
 	s.Equal(map[string]any{orphan: int64(len("orphan")), temp: int64(len("orphan"))}, removed)
+}
+
+// An upload is stale after 24 hours with no new bytes. A half left of one goes too, and a name the sweep does not
+// know stays.
+func (s *FileServiceTestSuite) TestSweepUploads_RemovesStaleUploads() {
+	userID := s.seedUser()
+	stale := s.startPartial(userID, 100, 40, 25)
+	fresh := s.startPartial(userID, 100, 40, 23)
+	loneData := s.startPartial(userID, 100, 1, 25)
+	s.Require().NoError(os.Remove(s.partialPath(loneData + ".info")))
+	loneInfo := s.startPartial(userID, 100, 0, 25)
+	s.Require().NoError(os.Remove(s.partialPath(loneInfo)))
+	s.Require().NoError(os.WriteFile(s.partialPath("notes.txt"), []byte("x"), 0o640))
+	s.T().Cleanup(func() { _ = os.Remove(s.partialPath("notes.txt")) })
+	s.agePartial("notes.txt", 25)
+	before := s.partialEntries()
+
+	s.Require().NoError(s.TC.Services.FileService.SweepUploads(context.Background()))
+
+	var want []string
+	for _, name := range before {
+		if !strings.HasPrefix(name, stale) && !strings.HasPrefix(name, loneData) && !strings.HasPrefix(name, loneInfo) {
+			want = append(want, name)
+		}
+	}
+	s.Equal(want, s.partialEntries())
+	s.Contains(want, fresh)
+	s.Contains(want, fresh+".info")
+	s.Contains(want, "notes.txt")
+
+	removed := map[string][3]any{}
+	for _, fields := range s.logs("removed a stale upload") {
+		removed[fields["upload_id"].(string)] = [3]any{fields["user_id"], fields["size_bytes"], fields["length_bytes"]}
+	}
+	s.Equal(map[string][3]any{
+		stale:    {userID, int64(40), int64(100)},
+		loneData: {int64(0), int64(1), int64(0)},
+		loneInfo: {userID, int64(0), int64(100)},
+	}, removed)
+}
+
+// The orphan sweep reads only the top of the upload dir, so it never removes a partial upload.
+func (s *FileServiceTestSuite) TestSweepOrphans_SkipsPartialDir() {
+	userID := s.seedUser()
+	s.upload(userID, 0, "live.txt", "l")
+	id := s.startPartial(userID, 100, 40, 25)
+
+	s.Require().NoError(s.TC.Services.FileService.SweepOrphans(context.Background()))
+
+	s.FileExists(s.partialPath(id))
+	s.Empty(s.logs("removed an orphan file"))
 }
 
 // The orphan sweep reads only the top of the upload dir, so it never removes a zip.
@@ -3709,7 +3874,7 @@ func (s *FileServiceTestSuite) TestSweepOrphans_SkipsWhenNoRowHasBytes() {
 func (s *FileServiceTestSuite) TestSweepOrphans_ManyBatches() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
-	live, err := svc.Upload(context.Background(), userID, 0, "live.txt", strings.NewReader("l"))
+	live, err := s.finishUpload(userID, 0, "live.txt", "l")
 	s.Require().NoError(err)
 	s.ageStoredFile(s.storageKey(live.ID), 25)
 	var orphans []string
@@ -4162,9 +4327,72 @@ func (s *FileServiceTestSuite) downloadRows() int {
 }
 
 func (s *FileServiceTestSuite) upload(userID, parentID int64, name, content string) *file.File {
-	f, err := s.TC.Services.FileService.Upload(context.Background(), userID, parentID, name, strings.NewReader(content))
+	f, err := s.finishUpload(userID, parentID, name, content)
 	s.Require().NoError(err)
 	return f
+}
+
+// finishUpload adds a file the way a chunked upload does: the bytes wait in the partial dir, then FinishUpload.
+func (s *FileServiceTestSuite) finishUpload(userID, parentID int64, name, content string) (*file.File, error) {
+	return s.TC.Services.FileService.FinishUpload(context.Background(), userID, parentID, name, s.writePartial(content))
+}
+
+// startPartial starts a chunked upload of length bytes through tusd's file store, writes the first written bytes, and
+// moves both its files back by hoursAgo. It returns the upload ID.
+func (s *FileServiceTestSuite) startPartial(userID, length, written int64, hoursAgo int) string {
+	store := filestore.New(filepath.Join(s.TC.UploadDir, uploads.PartialDir))
+	s.Require().NoError(os.MkdirAll(store.Path, 0o750))
+	id, err := utils.NewStorageKey()
+	s.Require().NoError(err)
+
+	upload, err := store.NewUpload(context.Background(), tusd.FileInfo{
+		ID:       id,
+		Size:     length,
+		MetaData: tusd.MetaData{"filename": "film.mp4", "user_id": strconv.FormatInt(userID, 10)},
+	})
+	s.Require().NoError(err)
+	_, err = upload.WriteChunk(context.Background(), 0, bytes.NewReader(make([]byte, written)))
+	s.Require().NoError(err)
+
+	s.agePartial(id, hoursAgo)
+	s.agePartial(id+".info", hoursAgo)
+	s.T().Cleanup(func() {
+		_ = os.Remove(s.partialPath(id))
+		_ = os.Remove(s.partialPath(id + ".info"))
+	})
+	return id
+}
+
+func (s *FileServiceTestSuite) partialPath(name string) string {
+	return filepath.Join(s.TC.UploadDir, uploads.PartialDir, name)
+}
+
+func (s *FileServiceTestSuite) agePartial(name string, hoursAgo int) {
+	at := time.Now().Add(-time.Duration(hoursAgo) * time.Hour)
+	s.Require().NoError(os.Chtimes(s.partialPath(name), at, at))
+}
+
+// partialEntries lists the partial upload dir, sorted by name.
+func (s *FileServiceTestSuite) partialEntries() []string {
+	entries, err := os.ReadDir(filepath.Join(s.TC.UploadDir, uploads.PartialDir))
+	s.Require().NoError(err)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names
+}
+
+// writePartial writes the bytes of a finished chunked upload where tusd keeps them, and returns their path.
+func (s *FileServiceTestSuite) writePartial(content string) string {
+	dir := filepath.Join(s.TC.UploadDir, uploads.PartialDir)
+	s.Require().NoError(os.MkdirAll(dir, 0o750))
+	key, err := utils.NewStorageKey()
+	s.Require().NoError(err)
+	path := filepath.Join(dir, key)
+	s.Require().NoError(os.WriteFile(path, []byte(content), 0o640))
+	s.T().Cleanup(func() { _ = os.Remove(path) })
+	return path
 }
 
 // writeStoredFile writes a file into the upload dir and moves its modified time back by hoursAgo.

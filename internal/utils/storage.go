@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -40,9 +42,13 @@ func NewStorageKey() (string, error) {
 	return hex.EncodeToString(keyBytes), nil
 }
 
-// StoreFile writes src into dir under a new random key and returns the key and size.
-// A file over maxBytes, or one that fails mid-write, is never kept under a real key.
-func StoreFile(dir string, src io.Reader, maxBytes int64) (string, int64, error) {
+// AdoptFile moves the file at path, which must be inside dir, to a new random key in dir and returns the key and size.
+// The move is a rename, so a large file takes no longer than a small one. A missing file gives ErrNoStoredFile.
+func AdoptFile(dir, path string) (string, int64, error) {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to find file in upload dir: %w", err)
+	}
 	key, err := NewStorageKey()
 	if err != nil {
 		return "", 0, err
@@ -54,11 +60,17 @@ func StoreFile(dir string, src io.Reader, maxBytes int64) (string, int64, error)
 	}
 	defer func() { _ = root.Close() }()
 
-	size, err := writeStoredFile(root, key, src, maxBytes)
-	if err != nil {
-		return "", 0, err
+	info, err := root.Stat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", 0, ErrNoStoredFile
 	}
-	return key, size, nil
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to read file: %w", err)
+	}
+	if err := root.Rename(rel, key); err != nil {
+		return "", 0, fmt.Errorf("failed to store file: %w", err)
+	}
+	return key, info.Size(), nil
 }
 
 // CopyStoredFile writes a copy of the bytes under srcKey to dstKey and returns its size. The copy is new bytes with a
@@ -104,6 +116,22 @@ func OpenStoredFile(dir, key string) (*os.File, error) {
 		return nil, fmt.Errorf("failed to open stored file: %w", err)
 	}
 	return f, nil
+}
+
+// SniffStoredFile returns the content type of the bytes under key, sniffed from their first 512 bytes.
+func SniffStoredFile(dir, key string) (string, error) {
+	f, err := OpenStoredFile(dir, key)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	head := make([]byte, 512)
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", fmt.Errorf("failed to read stored file: %w", err)
+	}
+	return http.DetectContentType(head[:n]), nil
 }
 
 // writeStoredFile writes src under key through a temp file, so a file over maxBytes, or one that fails mid-write,
@@ -196,8 +224,12 @@ func ListStoredFiles(dir string, cutoff time.Time, batchSize int, fn func([]Stor
 	}
 }
 
-// isStorageName reports whether name is a storage key or the temp name of an upload: lowercase hex of keySize bytes.
+// isStorageName reports whether name is a storage key or the temp name of an upload.
 func isStorageName(name string) bool {
-	key := strings.TrimPrefix(name, tempPrefix)
-	return len(key) == 2*keySize && strings.Trim(key, "0123456789abcdef") == ""
+	return IsStorageKey(strings.TrimPrefix(name, tempPrefix))
+}
+
+// IsStorageKey reports whether name has the form of a storage key: lowercase hex of keySize bytes.
+func IsStorageKey(name string) bool {
+	return len(name) == 2*keySize && strings.Trim(name, "0123456789abcdef") == ""
 }

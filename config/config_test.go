@@ -16,7 +16,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("SESSION_TTL_HOURS", "48")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "https://a.example,https://b.example")
 	t.Setenv("UPLOAD_DIR", "/data/uploads")
-	t.Setenv("UPLOAD_MAX_SIZE_MB", "10")
+	t.Setenv("UPLOAD_TIMEOUT_SECONDS", "900")
 	t.Setenv("DOWNLOAD_TIMEOUT_SECONDS", "120")
 	t.Setenv("DOWNLOAD_MAX_ZIP_MB", "500")
 	t.Setenv("DOWNLOAD_ZIP_CHECK_SECONDS", "5")
@@ -44,8 +44,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	if c.Session.TTLHours != 48 {
 		t.Errorf("Session.TTLHours = %d, want 48", c.Session.TTLHours)
 	}
-	if c.Upload.Dir != "/data/uploads" || c.Upload.MaxSizeMB != 10 {
-		t.Errorf("Upload = %+v, want dir /data/uploads max 10 MB", c.Upload)
+	if c.Upload.Dir != "/data/uploads" || c.Upload.TimeoutSeconds != 900 {
+		t.Errorf("Upload = %+v, want dir /data/uploads timeout 900s", c.Upload)
 	}
 	if c.Download.TimeoutSeconds != 120 || c.Download.MaxZipMB != 500 || c.Download.ZipCheckSeconds != 5 {
 		t.Errorf("Download = %+v, want timeout 120s max zip 500 MB zip check 5s", c.Download)
@@ -79,8 +79,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Session.RememberMeTTLHours != 720 {
 		t.Errorf("Session.RememberMeTTLHours = %d, want 720", c.Session.RememberMeTTLHours)
 	}
-	if c.Upload.Dir != "./storage/uploads" || c.Upload.MaxSizeMB != 50 || c.Upload.TimeoutSeconds != 300 {
-		t.Errorf("Upload = %+v, want dir ./storage/uploads max 50 MB timeout 300s", c.Upload)
+	if c.Upload.Dir != "./storage/uploads" || c.Upload.TimeoutSeconds != 300 {
+		t.Errorf("Upload = %+v, want dir ./storage/uploads timeout 300s", c.Upload)
 	}
 	if c.Download.TimeoutSeconds != 3600 || c.Download.MaxZipMB != 10240 || c.Download.ZipCheckSeconds != 1 {
 		t.Errorf("Download = %+v, want timeout 3600s max zip 10240 MB zip check 1s", c.Download)

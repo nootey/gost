@@ -21,6 +21,9 @@ type Querier interface {
 	CreateDownload(ctx context.Context, arg CreateDownloadParams) (Download, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateFolder(ctx context.Context, arg CreateFolderParams) (File, error)
+	// Adds many folders in one statement, with IDs from NextFileIDs. The arrays hold one row each at the same index.
+	// A parent ID of 0 is the root.
+	CreateFolders(ctx context.Context, arg CreateFoldersParams) error
 	CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
@@ -128,6 +131,8 @@ type Querier interface {
 	// Moves up to batch_size items deleted earlier out of the root_ids groups, to Home. They stay in the trash.
 	// Else the parent_id foreign key blocks the delete of the folder they were in.
 	MoveNestedTrashRootsHome(ctx context.Context, arg MoveNestedTrashRootsHomeParams) (int64, error)
+	// Takes count new file IDs, so one insert can add folders together with the folders under them.
+	NextFileIDs(ctx context.Context, count int64) ([]int64, error)
 	RemoveFavorites(ctx context.Context, arg RemoveFavoritesParams) error
 	RenameFile(ctx context.Context, arg RenameFileParams) (File, error)
 	// Marks up to batch_size of the user's items in the trash longer than retention_days for a permanent delete.

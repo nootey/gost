@@ -15,6 +15,7 @@ import (
 	"gost/internal/sessions"
 	"gost/internal/store"
 	"gost/internal/tokens"
+	"gost/internal/uploads"
 	"gost/internal/worker"
 	"gost/pkg/logging"
 	"gost/pkg/telemetry"
@@ -36,10 +37,11 @@ import (
 )
 
 type Handlers struct {
-	Auth   *auth.AuthHandler
-	User   *user.UserHandler
-	File   *file.FileHandler
-	Health *health.HealthHandler
+	Auth    *auth.AuthHandler
+	User    *user.UserHandler
+	File    *file.FileHandler
+	Uploads *uploads.Handler
+	Health  *health.HealthHandler
 }
 
 func main() {
@@ -138,15 +140,20 @@ func main() {
 	responder := apperr.NewResponder(logger)
 	userHandler := user.NewUserHandler(userService, responder)
 	authHandler := auth.NewAuthHandler(authService, authMiddleware, responder, logger)
-	fileHandler := file.NewFileHandler(fileService, cfg.Upload, cfg.Download, responder)
+	fileHandler := file.NewFileHandler(fileService, cfg.Download, responder)
 	healthHandler := health.NewHealthHandler(healthSvc, responder)
+	uploadHandler, err := uploads.NewHandler(cfg.Upload.Dir, "/api/uploads/", fileHandler.UploadHooks(), responder, logger.Named("uploads"))
+	if err != nil {
+		logger.Fatal("failed to initialize uploads", zap.Error(err))
+	}
 	// Add more handlers as needed
 
 	h := Handlers{
-		Auth:   authHandler,
-		User:   userHandler,
-		File:   fileHandler,
-		Health: healthHandler,
+		Auth:    authHandler,
+		User:    userHandler,
+		File:    fileHandler,
+		Uploads: uploadHandler,
+		Health:  healthHandler,
 	}
 
 	r := setupRouter(cfg, &h, authMiddleware, tel, logger)
@@ -183,12 +190,12 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	// CORS
+	// CORS. HEAD, PATCH and the tus headers are for the chunked uploads.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.Cors.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
+		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "Tus-Resumable", "Upload-Length", "Upload-Offset", "Upload-Metadata"},
+		ExposedHeaders:   []string{"Link", "Location", "Tus-Resumable", "Upload-Offset", "Upload-Length"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -231,6 +238,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Post("/favorites", h.File.AddFavorites)
 				r.Post("/favorites/remove", h.File.RemoveFavorites)
 				r.Post("/folders", h.File.CreateFolder)
+				r.Post("/folders/tree", h.File.CreateFolderTree)
 				r.Get("/folders/resolve", h.File.ResolveFolder)
 				r.Get("/trash", h.File.ListTrash)
 				r.Post("/trash", h.File.Trash)
@@ -248,7 +256,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 			r.Use(uploadTimeout)
 			r.Use(authMiddleware.WebClientAuthentication)
 
-			r.Post("/files", h.File.Upload)
+			r.Mount("/uploads", h.Uploads)
 		})
 
 		// Protected download routes

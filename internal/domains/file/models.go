@@ -159,6 +159,18 @@ type FolderResponse struct {
 	Folder *File `json:"folder"`
 }
 
+// CreateFolderTreeRequest names the folders of a folder upload by their paths, such as "Photos/2024".
+type CreateFolderTreeRequest struct {
+	ParentID *int64   `json:"parent_id"`
+	Paths    []string `json:"paths"`
+}
+
+// FolderTreeResponse gives the ID of each folder of a folder upload by its path.
+type FolderTreeResponse struct {
+	apperr.SuccessResponse
+	Folders map[string]int64 `json:"folders"`
+}
+
 type RenameRequest struct {
 	Name string `json:"name"`
 }

@@ -4,11 +4,12 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"gost/config"
 	"gost/internal/apperr"
 	"gost/internal/middleware"
+	"gost/internal/uploads"
 	"gost/internal/utils"
-	"io"
 	"mime"
 	"net/http"
 	"strconv"
@@ -16,21 +17,26 @@ import (
 	"unicode/utf8"
 )
 
-const multipartOverhead = 1 << 20
+// The metadata keys of a chunked upload.
+const (
+	uploadNameKey   = "filename"
+	uploadParentKey = "parent_id"
+)
+
+// maxTreeBodyBytes caps the body of a folder upload's tree: room for the most folders at a long path each.
+const maxTreeBodyBytes = 16 << 20
 
 var errInvalidBody = apperr.New(apperr.KindInvalid, "invalid request body")
 
 type FileHandler struct {
 	service  FileServiceInterface
-	cfg      config.UploadConfig
 	download config.DownloadConfig
 	resp     *apperr.Responder
 }
 
-func NewFileHandler(srv FileServiceInterface, cfg config.UploadConfig, download config.DownloadConfig, resp *apperr.Responder) *FileHandler {
+func NewFileHandler(srv FileServiceInterface, download config.DownloadConfig, resp *apperr.Responder) *FileHandler {
 	return &FileHandler{
 		service:  srv,
-		cfg:      cfg,
 		download: download,
 		resp:     resp,
 	}
@@ -114,45 +120,35 @@ func (h *FileHandler) ResolveFolder(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusOK, result)
 }
 
-func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.GetUserID(r)
-	if !ok {
-		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
-		return
-	}
+// UploadHooks connect the chunked uploads to the service. The client sends the file name and the folder as metadata.
+func (h *FileHandler) UploadHooks() uploads.Hooks {
+	return uploads.Hooks{Create: h.checkUpload, Finish: h.finishUpload}
+}
 
-	rc := http.NewResponseController(w)
-	deadline := time.Now().Add(time.Duration(h.cfg.TimeoutSeconds) * time.Second)
-	_ = rc.SetReadDeadline(deadline)
-	_ = rc.SetWriteDeadline(deadline)
-
-	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxSizeMB<<20+multipartOverhead)
-	// Read what is left of the body, so an early error reaches the browser instead of a reset connection.
-	defer func() { _, _ = io.Copy(io.Discard, r.Body) }()
-
-	parentID, err := utils.OptionalQueryID(r, "parent_id")
+func (h *FileHandler) checkUpload(ctx context.Context, userID, size int64, meta map[string]string) (map[string]string, error) {
+	parentID, err := utils.OptionalID(meta[uploadParentKey], "parent_id")
 	if err != nil {
-		h.resp.Error(w, r, err)
-		return
+		return nil, err
 	}
+	if err := h.service.CheckUpload(ctx, userID, parentID, meta[uploadNameKey], size); err != nil {
+		return nil, err
+	}
+	return map[string]string{uploadNameKey: meta[uploadNameKey], uploadParentKey: meta[uploadParentKey]}, nil
+}
 
-	part, err := utils.FormFilePart(r, "file")
+func (h *FileHandler) finishUpload(ctx context.Context, userID int64, meta map[string]string, path string) (any, error) {
+	parentID, err := utils.OptionalID(meta[uploadParentKey], "parent_id")
 	if err != nil {
-		h.resp.Error(w, r, err)
-		return
+		return nil, err
 	}
-	defer func() { _ = part.Close() }()
-
-	f, err := h.service.Upload(r.Context(), userID, parentID, part.FileName(), part)
+	f, err := h.service.FinishUpload(ctx, userID, parentID, meta[uploadNameKey], path)
 	if err != nil {
-		h.resp.Error(w, r, err)
-		return
+		return nil, err
 	}
-
-	h.resp.JSON(w, http.StatusCreated, UploadResponse{
+	return UploadResponse{
 		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: f.Name + " uploaded."},
 		File:            f,
-	})
+	}, nil
 }
 
 // Download sends one file.
@@ -302,6 +298,43 @@ func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusCreated, FolderResponse{
 		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: f.Name + " created."},
 		Folder:          f,
+	})
+}
+
+// CreateFolderTree makes the folders of a folder upload, so its files can go up into them.
+func (h *FileHandler) CreateFolderTree(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxTreeBodyBytes)
+	var req CreateFolderTreeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	parentID, err := utils.OptionalBodyID(req.ParentID, "parent_id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	folders, err := h.service.CreateFolderTree(r.Context(), userID, parentID, req.Paths)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	message := fmt.Sprintf("%d folders created.", len(folders))
+	if len(folders) == 1 {
+		message = "1 folder created."
+	}
+	h.resp.JSON(w, http.StatusCreated, FolderTreeResponse{
+		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: message},
+		Folders:         folders,
 	})
 }
 

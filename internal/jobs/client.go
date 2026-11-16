@@ -23,6 +23,7 @@ const (
 	sweepCopiesInterval    = time.Hour
 	sweepDownloadsInterval = time.Hour
 	sweepOrphansInterval   = 24 * time.Hour
+	sweepUploadsInterval   = time.Hour
 
 	// jobTimeout is how long one run may take. River's default is 1 minute, which cuts a big trash, purge, copy or zip.
 	// It must stay under River's stuck-job rescue (1 hour), or River starts a second run next to the first.
@@ -41,8 +42,8 @@ type InserterInterface interface {
 }
 
 // NewClient builds a River client on the app's database/sql pool. This driver has no LISTEN/NOTIFY,
-// so River polls for new jobs, once a second by default. The trash, copy, download and orphan sweeps run at start,
-// then on their intervals.
+// so River polls for new jobs, once a second by default. The trash, copy, download, orphan and upload sweeps run at
+// start, then on their intervals.
 func NewClient(db *sql.DB, workers *river.Workers, logger *zap.Logger) (*river.Client[*sql.Tx], error) {
 	return river.NewClient(riverdatabasesql.New(db), &river.Config{
 		Workers: workers,
@@ -65,6 +66,9 @@ func NewClient(db *sql.DB, workers *river.Workers, logger *zap.Logger) (*river.C
 			}, &river.PeriodicJobOpts{RunOnStart: true}),
 			river.NewPeriodicJob(river.PeriodicInterval(sweepOrphansInterval), func() (river.JobArgs, *river.InsertOpts) {
 				return SweepOrphansArgs{}, nil
+			}, &river.PeriodicJobOpts{RunOnStart: true}),
+			river.NewPeriodicJob(river.PeriodicInterval(sweepUploadsInterval), func() (river.JobArgs, *river.InsertOpts) {
+				return SweepUploadsArgs{}, nil
 			}, &river.PeriodicJobOpts{RunOnStart: true}),
 		},
 	})

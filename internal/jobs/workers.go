@@ -114,6 +114,16 @@ type zipBuilder interface {
 	FailZip(ctx context.Context, userID, downloadID int64) error
 }
 
+// SweepUploadsArgs starts the upload sweep. It runs on a schedule, see NewClient.
+type SweepUploadsArgs struct{}
+
+func (SweepUploadsArgs) Kind() string { return "sweep_uploads" }
+
+// InsertOpts runs a sweep once. The next run on the schedule is the retry.
+func (SweepUploadsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1}
+}
+
 type trashSweeper interface {
 	SweepTrash(ctx context.Context) error
 }
@@ -130,6 +140,10 @@ type orphanSweeper interface {
 	SweepOrphans(ctx context.Context) error
 }
 
+type uploadSweeper interface {
+	SweepUploads(ctx context.Context) error
+}
+
 // fileJobs is what the file workers need from the file service.
 type fileJobs interface {
 	subtreeTrasher
@@ -140,6 +154,7 @@ type fileJobs interface {
 	copySweeper
 	downloadSweeper
 	orphanSweeper
+	uploadSweeper
 }
 
 type TrashSubtreesWorker struct {
@@ -252,6 +267,19 @@ func (w *SweepOrphansWorker) Work(ctx context.Context, _ *river.Job[SweepOrphans
 	return w.files.SweepOrphans(ctx)
 }
 
+type SweepUploadsWorker struct {
+	river.WorkerDefaults[SweepUploadsArgs]
+	files uploadSweeper
+}
+
+func NewSweepUploadsWorker(files uploadSweeper) *SweepUploadsWorker {
+	return &SweepUploadsWorker{files: files}
+}
+
+func (w *SweepUploadsWorker) Work(ctx context.Context, _ *river.Job[SweepUploadsArgs]) error {
+	return w.files.SweepUploads(ctx)
+}
+
 func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewTrashSubtreesWorker(files)); err != nil {
 		return err
@@ -274,5 +302,8 @@ func RegisterWorkers(workers *river.Workers, files fileJobs) error {
 	if err := river.AddWorkerSafely(workers, NewSweepDownloadsWorker(files)); err != nil {
 		return err
 	}
-	return river.AddWorkerSafely(workers, NewSweepOrphansWorker(files))
+	if err := river.AddWorkerSafely(workers, NewSweepOrphansWorker(files)); err != nil {
+		return err
+	}
+	return river.AddWorkerSafely(workers, NewSweepUploadsWorker(files))
 }
