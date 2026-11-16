@@ -130,6 +130,7 @@ type FileServiceInterface interface {
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	GetItem(ctx context.Context, userID, id int64) (*File, error)
 	ListActivity(ctx context.Context, userID, id int64, q ActivityQuery) (*utils.Page[*Activity], error)
+	ListUserActivity(ctx context.Context, userID int64, q ActivityQuery) (*utils.Page[*Activity], error)
 	Rename(ctx context.Context, userID, id int64, name string) (*File, error)
 	AddFavorites(ctx context.Context, userID int64, ids []int64) error
 	SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error
@@ -209,6 +210,11 @@ func fileFields(f *database.File) []any {
 		&f.CreatedAt, &f.UpdatedAt, &f.ParentID, &f.TrashedAt, &f.TrashRootID, &f.PurgeRequestedAt,
 		&f.CopiedFromID, &f.CopyRequestedAt, &f.HiddenAt,
 	}
+}
+
+// activityFields follows the select list of the activity lists.
+func activityFields(a *Activity) []any {
+	return []any{&a.ID, &a.Event, &a.Metadata, &a.CreatedAt}
 }
 
 func toDownloadModel(dl database.Download) *Download {
@@ -491,18 +497,27 @@ func (s *FileService) ListActivity(ctx context.Context, userID, id int64, q Acti
 		Desc:     true,
 		Cursor:   q.Cursor,
 		PageSize: q.PageSize,
-	}, func(a *Activity) []any {
-		return []any{&a.ID, &a.Event, &a.Metadata, &a.CreatedAt}
-	})
+	}, activityFields)
 	if err != nil {
 		return nil, err
 	}
+	return utils.PointerPage(page), nil
+}
 
-	list := make([]*Activity, len(page.Data))
-	for i := range page.Data {
-		list[i] = &page.Data[i]
+// ListUserActivity reads one page of the audit log of all the user's items, newest first. Each event names its item
+// as it was then, so an event of a deleted item still reads well.
+func (s *FileService) ListUserActivity(ctx context.Context, userID int64, q ActivityQuery) (*utils.Page[*Activity], error) {
+	page, err := utils.FetchPage(ctx, s.db, userActivityList, utils.PageQuery[SortField]{
+		Args:     []any{userID},
+		Sort:     SortByDate,
+		Desc:     true,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, activityFields)
+	if err != nil {
+		return nil, err
 	}
-	return &utils.Page[*Activity]{Data: list, NextCursor: page.NextCursor}, nil
+	return utils.PointerPage(page), nil
 }
 
 func (s *FileService) Rename(ctx context.Context, userID, id int64, name string) (*File, error) {

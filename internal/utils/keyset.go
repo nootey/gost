@@ -30,6 +30,15 @@ type Page[T any] struct {
 	NextCursor *string `json:"next_cursor"`
 }
 
+// PointerPage turns a page of values into a page of pointers to them, the shape the services send.
+func PointerPage[T any](page *Page[T]) *Page[*T] {
+	list := make([]*T, len(page.Data))
+	for i := range page.Data {
+		list[i] = &page.Data[i]
+	}
+	return &Page[*T]{Data: list, NextCursor: page.NextCursor}
+}
+
 // KeysetList is a list that pages by cursor. sqlc needs a fixed ORDER BY, so this SQL is built at runtime.
 type KeysetList[S ~string] struct {
 	Select string

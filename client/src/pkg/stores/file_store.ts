@@ -81,6 +81,11 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
+        async listUserActivity(query: ActivityQuery): Promise<Page<Activity>> {
+            const response = await apiClient.get<Page<Activity>>("activity", { params: { ...query } });
+            return response.data;
+        },
+
         async rename(id: number, form: RenameForm): Promise<RenameResponse> {
             const response = await apiClient.patch<RenameResponse>(`${this.apiPrefix}/${id}`, form);
             return response.data;

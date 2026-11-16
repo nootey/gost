@@ -289,6 +289,14 @@ var activityList = utils.KeysetList[SortField]{
 	Sorts:  map[SortField][]string{SortByDate: {"id"}},
 }
 
+// userActivityList lists the audit log of all the user's items, newest first. The arg is the user id.
+var userActivityList = utils.KeysetList[SortField]{
+	Select: "id, event, metadata, created_at",
+	From:   "activity_logs",
+	Where:  "user_id = $1 AND category = 'file'",
+	Sorts:  map[SortField][]string{SortByDate: {"id"}},
+}
+
 // Activity is one event in an item's audit log. Metadata holds the item's name and its folder's name at the time
 // (a null folder is Home), and the values of the event: "old_name" for a rename, "from" for a move.
 type Activity struct {
@@ -298,7 +306,7 @@ type Activity struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
-// ActivityQuery picks one page of an item's audit log, newest first.
+// ActivityQuery picks one page of an audit log, newest first.
 type ActivityQuery struct {
 	Cursor   string
 	PageSize int

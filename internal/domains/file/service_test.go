@@ -1473,6 +1473,57 @@ func (s *FileServiceTestSuite) TestListActivity_Pages() {
 	s.Equal("invalid cursor", s.errorMessage(err))
 }
 
+// The user's log holds the events of all their items, newest first, also of an item that is gone. Other users'
+// events stay out. The pages join up to the whole log.
+func (s *FileServiceTestSuite) TestListUserActivity_AllItemsNewestFirst() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	a := s.upload(alice, docs.ID, "a.txt", "a")
+	_, err := svc.Rename(context.Background(), alice, a.ID, "b.txt")
+	s.Require().NoError(err)
+	gone := s.upload(alice, 0, "gone.txt", "g")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{gone.ID}))
+	s.Require().NoError(svc.Purge(context.Background(), alice, []int64{gone.ID}))
+	s.upload(bob, 0, "bob.txt", "b")
+
+	var events []string
+	cursor := ""
+	pages := 0
+	for {
+		page, err := svc.ListUserActivity(context.Background(), alice, file.ActivityQuery{Cursor: cursor, PageSize: 2})
+		s.Require().NoError(err)
+		pages++
+		for _, entry := range page.Data {
+			var meta map[string]any
+			s.Require().NoError(json.Unmarshal(entry.Metadata, &meta))
+			events = append(events, fmt.Sprintf("%s %s", entry.Event, meta["name"]))
+		}
+		if page.NextCursor == nil {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	s.Equal(3, pages)
+	s.Equal([]string{
+		"purged gone.txt",
+		"trashed gone.txt",
+		"uploaded gone.txt",
+		"renamed b.txt",
+		"uploaded a.txt",
+		"created Docs",
+	}, events)
+
+	empty, err := svc.ListUserActivity(context.Background(), s.seedUserWithEmail("carol@example.com"), file.ActivityQuery{})
+	s.Require().NoError(err)
+	s.NotNil(empty.Data)
+	s.Empty(empty.Data)
+
+	_, err = svc.ListUserActivity(context.Background(), alice, file.ActivityQuery{Cursor: "bad"})
+	s.Equal("invalid cursor", s.errorMessage(err))
+}
+
 func (s *FileServiceTestSuite) TestGetItem() {
 	alice := s.seedUserWithEmail("alice@example.com")
 	bob := s.seedUserWithEmail("bob@example.com")

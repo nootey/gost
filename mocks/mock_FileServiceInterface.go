@@ -1093,6 +1093,80 @@ func (_c *MockFileServiceInterface_ListTrash_Call) RunAndReturn(run func(ctx con
 	return _c
 }
 
+// ListUserActivity provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) ListUserActivity(ctx context.Context, userID int64, q file.ActivityQuery) (*utils.Page[*file.Activity], error) {
+	ret := _mock.Called(ctx, userID, q)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListUserActivity")
+	}
+
+	var r0 *utils.Page[*file.Activity]
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ActivityQuery) (*utils.Page[*file.Activity], error)); ok {
+		return returnFunc(ctx, userID, q)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.ActivityQuery) *utils.Page[*file.Activity]); ok {
+		r0 = returnFunc(ctx, userID, q)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*utils.Page[*file.Activity])
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, file.ActivityQuery) error); ok {
+		r1 = returnFunc(ctx, userID, q)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_ListUserActivity_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListUserActivity'
+type MockFileServiceInterface_ListUserActivity_Call struct {
+	*mock.Call
+}
+
+// ListUserActivity is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - q file.ActivityQuery
+func (_e *MockFileServiceInterface_Expecter) ListUserActivity(ctx any, userID any, q any) *MockFileServiceInterface_ListUserActivity_Call {
+	return &MockFileServiceInterface_ListUserActivity_Call{Call: _e.mock.On("ListUserActivity", ctx, userID, q)}
+}
+
+func (_c *MockFileServiceInterface_ListUserActivity_Call) Run(run func(ctx context.Context, userID int64, q file.ActivityQuery)) *MockFileServiceInterface_ListUserActivity_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 file.ActivityQuery
+		if args[2] != nil {
+			arg2 = args[2].(file.ActivityQuery)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListUserActivity_Call) Return(page *utils.Page[*file.Activity], err error) *MockFileServiceInterface_ListUserActivity_Call {
+	_c.Call.Return(page, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListUserActivity_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.ActivityQuery) (*utils.Page[*file.Activity], error)) *MockFileServiceInterface_ListUserActivity_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Move provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) Move(ctx context.Context, userID int64, parentID int64, ids []int64) error {
 	ret := _mock.Called(ctx, userID, parentID, ids)

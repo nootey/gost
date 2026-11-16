@@ -18,8 +18,9 @@ interface NavLink {
 
 const NAV_LINKS: NavLink[] = [
     { name: "dashboard", label: "Files", icon: "pi pi-folder" },
-    { name: "recents", label: "Recent", icon: "pi pi-history" },
+    { name: "recents", label: "Recent", icon: "pi pi-clock" },
     { name: "favorites", label: "Favorites", icon: "pi pi-star" },
+    { name: "activity", label: "Activity", icon: "pi pi-history" },
     { name: "trash", label: "Trash", icon: "pi pi-trash" },
 ];
 
@@ -71,10 +72,10 @@ function signOut(): void {
 </script>
 
 <template>
-    <div class="flex h-16 items-center justify-between gap-4">
-        <div class="flex min-w-0 items-center gap-3 sm:gap-6">
+    <div class="flex h-16 items-center justify-between gap-2 sm:gap-4">
+        <div class="flex min-w-0 items-center gap-2 sm:gap-6">
             <router-link to="/" class="no-underline" aria-label="Gost home">
-                <BrandMark />
+                <BrandMark compact />
             </router-link>
 
             <nav class="flex items-center gap-1" aria-label="Main">
@@ -86,7 +87,7 @@ function signOut(): void {
                     text
                     size="small"
                     severity="secondary"
-                    class="gap-2 no-underline"
+                    class="gap-2 px-2 no-underline sm:px-2.5"
                     :class="{ 'bg-inset text-fg': route.name === link.name }"
                     :aria-label="link.label"
                 >
@@ -129,7 +130,8 @@ function signOut(): void {
                 <span class="hidden max-w-40 truncate text-sm font-medium text-fg sm:block">
                     {{ user?.display_name }}
                 </span>
-                <i class="pi pi-chevron-down hidden text-xs text-fg-muted sm:block" />
+                <!-- The icon font sets display on .pi, so hidden goes on a wrapper. -->
+                <span class="hidden sm:block"><i class="pi pi-chevron-down text-xs text-fg-muted" /></span>
             </Button>
         </div>
 
