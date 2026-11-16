@@ -37,7 +37,9 @@ func (s *AuthServiceTestSuite) TestRegister_UnconfirmedUserCannotLogin() {
 	err := svc.Register(ctx, "Jane", "jane@example.com", "supersecret")
 	s.Require().NoError(err)
 
-	s.NotEmpty(s.TC.Mailer.ConfirmationLink)
+	link, err := url.Parse(s.TC.Mailer.ConfirmationLink)
+	s.Require().NoError(err)
+	s.Equal("localhost:5173", link.Host)
 
 	// Unconfirmed account: login is blocked.
 	_, err = svc.ValidateCredentials(ctx, "jane@example.com", "supersecret")
