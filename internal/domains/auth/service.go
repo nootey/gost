@@ -238,7 +238,7 @@ func (s *AuthService) issueConfirmation(ctx context.Context, userID int64, email
 		return err
 	}
 
-	link := utils.APIBaseURL(s.cfg) + "/api/auth/confirm-email?token=" + id
+	link := utils.WebClientBaseURL(s.cfg) + "/api/auth/confirm-email?token=" + id
 	return s.mailer.SendConfirmationEmail(email, displayName, link)
 }
 
