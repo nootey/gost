@@ -557,6 +557,80 @@ func (_c *MockFileServiceInterface_ListDownloads_Call) RunAndReturn(run func(ctx
 	return _c
 }
 
+// ListFavorites provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) ListFavorites(ctx context.Context, userID int64, q file.FavoriteQuery) (*utils.Page[*file.Favorite], error) {
+	ret := _mock.Called(ctx, userID, q)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListFavorites")
+	}
+
+	var r0 *utils.Page[*file.Favorite]
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.FavoriteQuery) (*utils.Page[*file.Favorite], error)); ok {
+		return returnFunc(ctx, userID, q)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, file.FavoriteQuery) *utils.Page[*file.Favorite]); ok {
+		r0 = returnFunc(ctx, userID, q)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*utils.Page[*file.Favorite])
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, file.FavoriteQuery) error); ok {
+		r1 = returnFunc(ctx, userID, q)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_ListFavorites_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListFavorites'
+type MockFileServiceInterface_ListFavorites_Call struct {
+	*mock.Call
+}
+
+// ListFavorites is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - q file.FavoriteQuery
+func (_e *MockFileServiceInterface_Expecter) ListFavorites(ctx any, userID any, q any) *MockFileServiceInterface_ListFavorites_Call {
+	return &MockFileServiceInterface_ListFavorites_Call{Call: _e.mock.On("ListFavorites", ctx, userID, q)}
+}
+
+func (_c *MockFileServiceInterface_ListFavorites_Call) Run(run func(ctx context.Context, userID int64, q file.FavoriteQuery)) *MockFileServiceInterface_ListFavorites_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 file.FavoriteQuery
+		if args[2] != nil {
+			arg2 = args[2].(file.FavoriteQuery)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListFavorites_Call) Return(page *utils.Page[*file.Favorite], err error) *MockFileServiceInterface_ListFavorites_Call {
+	_c.Call.Return(page, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListFavorites_Call) RunAndReturn(run func(ctx context.Context, userID int64, q file.FavoriteQuery) (*utils.Page[*file.Favorite], error)) *MockFileServiceInterface_ListFavorites_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListTrash provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) ListTrash(ctx context.Context, userID int64, q file.TrashQuery) (*utils.Page[*file.TrashedFile], error) {
 	ret := _mock.Called(ctx, userID, q)

@@ -25,7 +25,7 @@ import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
 import type { SuccessResponse } from "../../../pkg/api/api_models.ts";
 import type { ClipboardMode } from "../../../pkg/stores/clipboard_store.ts";
-import type { ItemsForm, PasteForm, SortField, StoredFile } from "../models.ts";
+import type { ItemsForm, ListSortField, PasteForm, StoredFile } from "../models.ts";
 
 // Hide and Add show while any target is not hidden or no favorite yet, so a mixed selection changes the rest.
 // Unhide and Remove show when all targets are hidden or favorites.
@@ -71,7 +71,7 @@ const rowOptions = [25, 50, 100];
 const files = ref<StoredFile[]>([]);
 const loading = ref<boolean>(true);
 const { pageSize, nextCursor, cursor, first, total, turn, reset } = useCursorPager(rowOptions[0]);
-const sortField = ref<SortField>("date");
+const sortField = ref<ListSortField>("date");
 const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
@@ -140,7 +140,7 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
 }
 
 async function onSort(event: DataTableSortEvent): Promise<void> {
-    sortField.value = event.sortField as SortField;
+    sortField.value = event.sortField as ListSortField;
     sortOrder.value = event.sortOrder ?? -1;
     await refresh();
 }
@@ -544,6 +544,18 @@ defineExpose({ refresh });
             >
                 <template #body="{ data }">
                     <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.created_at) }}</span>
+                </template>
+            </Column>
+
+            <Column
+                header="Modified"
+                sort-field="modified"
+                sortable
+                header-class="hidden w-48 xl:table-cell"
+                body-class="hidden xl:table-cell"
+            >
+                <template #body="{ data }">
+                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.updated_at) }}</span>
                 </template>
             </Column>
         </DataTable>

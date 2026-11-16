@@ -32,6 +32,8 @@ const (
 	SortBySize SortField = "size"
 	SortByType SortField = "type"
 	SortByDate SortField = "date"
+	// SortByModified sorts by updated_at: the time of the last rename, move or restore, or of the add if none.
+	SortByModified SortField = "modified"
 )
 
 // foldersFirst splits a list into folders, then files. This is the only place that applies that rule.
@@ -48,10 +50,11 @@ var fileList = utils.KeysetList[SortField]{
 	Where: "user_id = $1 AND COALESCE(parent_id, 0) = $2::bigint AND trashed_at IS NULL AND strpos(lower(name), lower($3::text)) > 0" +
 		" AND ($4::boolean OR hidden_at IS NULL)",
 	Sorts: map[SortField][]string{
-		SortByName: {"lower(name)", "id"},
-		SortBySize: {"size_bytes", "lower(name)", "id"},
-		SortByType: {"content_type", "lower(name)", "id"},
-		SortByDate: {"created_at", "id"},
+		SortByName:     {"lower(name)", "id"},
+		SortBySize:     {"size_bytes", "lower(name)", "id"},
+		SortByType:     {"content_type", "lower(name)", "id"},
+		SortByDate:     {"created_at", "id"},
+		SortByModified: {"updated_at", "id"},
 	},
 	Parts: foldersFirst,
 }
@@ -68,6 +71,22 @@ var trashList = utils.KeysetList[SortField]{
 		SortBySize: {"size_bytes", "lower(name)", "id"},
 		SortByType: {"content_type", "lower(name)", "id"},
 		SortByDate: {"trashed_at", "id"},
+	},
+	Parts: foldersFirst,
+}
+
+// favoriteList lists the user's live favorites from all folders. The args are the user id and whether to show hidden
+// items. Like the file list, the hidden check looks at the item only, not at the folders above it. Select f.* must
+// match fileFields. Only files has a storage_key, so foldersFirst needs no table name.
+var favoriteList = utils.KeysetList[SortField]{
+	Select: "f.*",
+	From:   "favorites fav JOIN files f ON f.id = fav.file_id",
+	Where:  "fav.user_id = $1 AND f.user_id = $1 AND f.trashed_at IS NULL AND ($2::boolean OR f.hidden_at IS NULL)",
+	Sorts: map[SortField][]string{
+		SortByName: {"lower(f.name)", "f.id"},
+		SortBySize: {"f.size_bytes", "lower(f.name)", "f.id"},
+		SortByType: {"f.content_type", "lower(f.name)", "f.id"},
+		SortByDate: {"f.created_at", "f.id"},
 	},
 	Parts: foldersFirst,
 }
@@ -90,6 +109,23 @@ type TrashQuery struct {
 	PageSize int
 	Sort     SortField
 	Desc     bool
+}
+
+// FavoriteQuery picks one page of the favorites. The date sort is the time the item was added, not the time it
+// became a favorite. ShowHidden adds the hidden items.
+type FavoriteQuery struct {
+	Cursor     string
+	PageSize   int
+	Sort       SortField
+	Desc       bool
+	ShowHidden bool
+}
+
+// Favorite is one of the user's favorites. Path names the folders from the root down to the item's folder. An item in
+// the root has an empty Path.
+type Favorite struct {
+	File
+	Path []string `json:"path"`
 }
 
 // TrashedFile is an item the user deleted. ParentID is the folder it was in.

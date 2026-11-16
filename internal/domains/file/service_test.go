@@ -182,7 +182,7 @@ func (s *FileServiceTestSuite) TestList_WalkEverySort() {
 		`UPDATE files SET created_at = '2026-01-01 10:00:00' WHERE name IN ('alpha', 'Gamma', 'a.txt', 'A.txt', 'b.png')`)
 	s.Require().NoError(err)
 
-	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
+	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate, file.SortByModified} {
 		var full [2][]string
 		for i, desc := range []bool{false, true} {
 			result, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 100, Sort: sort, Desc: desc})
@@ -296,7 +296,76 @@ func (s *FileServiceTestSuite) TestList_ReturnsEveryField() {
 	s.Require().NoError(err)
 
 	s.Equal([]*file.File{uploaded}, inFolder.Data)
-	s.Equal([]*file.File{folder}, atRoot.Data)
+	// The folder row stores no size. The list gives the total of the files under it.
+	withSize := *folder
+	withSize.SizeBytes = uploaded.SizeBytes
+	s.Equal([]*file.File{&withSize}, atRoot.Data)
+}
+
+// A folder's size is the total of the files at any depth under it. Hidden files count. A file in the trash does not,
+// and nor do the rows under a folder in the trash, before or after the trash job marks them. The details and the
+// favorites list give the same size.
+func (s *FileServiceTestSuite) TestList_FolderSizes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(userID, 0, "Docs")
+	work := s.createFolder(userID, docs.ID, "Work")
+	old := s.createFolder(userID, work.ID, "Old")
+	s.createFolder(userID, 0, "Empty")
+	s.upload(userID, docs.ID, "a.txt", "aaaa")
+	s.upload(userID, work.ID, "b.txt", "bb")
+	hidden := s.upload(userID, work.ID, "c.txt", "c")
+	s.upload(userID, old.ID, "d.txt", "ddddd")
+	gone := s.upload(userID, docs.ID, "e.txt", "eeeeee")
+	s.upload(userID, 0, "root.txt", "r")
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{hidden.ID}, true))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{old.ID, gone.ID}))
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID}))
+
+	for _, label := range []string{"before the trash job", "after the trash job"} {
+		atRoot, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByName})
+		s.Require().NoError(err)
+		s.Equal(map[string]int64{"Docs": 7, "Empty": 0, "root.txt": 1}, fileSizes(atRoot.Data), label)
+
+		inDocs, err := svc.List(context.Background(), userID, file.ListQuery{ParentID: docs.ID, Sort: file.SortByName})
+		s.Require().NoError(err)
+		s.Equal(map[string]int64{"Work": 3, "a.txt": 4}, fileSizes(inDocs.Data), label)
+
+		details, err := svc.GetItem(context.Background(), userID, docs.ID)
+		s.Require().NoError(err)
+		s.Equal(int64(7), details.SizeBytes, label)
+
+		favorites, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName})
+		s.Require().NoError(err)
+		s.Require().Len(favorites.Data, 1)
+		s.Equal(int64(7), favorites.Data[0].SizeBytes, label)
+
+		s.workTrashJobs()
+	}
+}
+
+// The modified sort follows updated_at, folders first. A rename makes an item the newest.
+func (s *FileServiceTestSuite) TestList_SortByModified() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	a := s.createFolder(userID, 0, "A")
+	s.createFolder(userID, 0, "B")
+	x := s.seedFile(userID, "x.txt")
+	s.seedFile(userID, "y.txt")
+	_, err := s.TC.DB.ExecContext(context.Background(), `UPDATE files SET updated_at = $1 WHERE user_id = $2`, oldUpdatedAt, userID)
+	s.Require().NoError(err)
+	_, err = svc.Rename(context.Background(), userID, a.ID, "A2")
+	s.Require().NoError(err)
+	_, err = svc.Rename(context.Background(), userID, x, "x2.txt")
+	s.Require().NoError(err)
+
+	asc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified})
+	s.Require().NoError(err)
+	desc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified, Desc: true})
+	s.Require().NoError(err)
+
+	s.Equal([]string{"B", "A2", "y.txt", "x2.txt"}, fileNames(asc.Data))
+	s.Equal([]string{"A2", "B", "x2.txt", "y.txt"}, fileNames(desc.Data))
 }
 
 func (s *FileServiceTestSuite) TestUpload_IntoFolder() {
@@ -899,6 +968,107 @@ func (s *FileServiceTestSuite) TestFavorites_FollowTheItem() {
 	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{docs.ID}))
 	s.workPurgeJobs()
 	s.Equal(0, s.favoriteRows())
+}
+
+// The list holds the user's live favorites from every folder, folders first. Each item names the path of its folder,
+// read at the time of the list, so it follows a rename. Items in the trash and other users' favorites stay out.
+func (s *FileServiceTestSuite) TestListFavorites_FromAllFolders() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	work := s.createFolder(alice, docs.ID, "Work")
+	report := s.upload(alice, work.ID, "report.txt", "r")
+	notes := s.upload(alice, 0, "notes.txt", "n")
+	s.upload(alice, 0, "plain.txt", "p")
+	trashed := s.upload(alice, docs.ID, "trashed.txt", "t")
+	bobFile := s.upload(bob, 0, "bob.txt", "b")
+	s.Require().NoError(svc.AddFavorites(context.Background(), alice, []int64{report.ID, notes.ID, work.ID, trashed.ID}))
+	s.Require().NoError(svc.AddFavorites(context.Background(), bob, []int64{bobFile.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+	_, err := svc.Rename(context.Background(), alice, docs.ID, "Papers")
+	s.Require().NoError(err)
+
+	result, err := svc.ListFavorites(context.Background(), alice, file.FavoriteQuery{Sort: file.SortByName})
+
+	s.Require().NoError(err)
+	s.Nil(result.NextCursor)
+	s.Equal([]string{"Work", "notes.txt", "report.txt"}, favoriteNames(result.Data))
+	s.Equal(map[string][]string{
+		"Work":       {"Papers"},
+		"notes.txt":  {},
+		"report.txt": {"Papers", "Work"},
+	}, favoritePaths(result.Data))
+	s.True(result.Data[0].IsFolder)
+	for _, item := range result.Data {
+		s.True(item.IsFavorite, item.Name)
+	}
+
+	empty, err := svc.ListFavorites(context.Background(), s.seedUserWithEmail("carol@example.com"), file.FavoriteQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.NotNil(empty.Data)
+	s.Empty(empty.Data)
+}
+
+// Hidden favorites show only with ShowHidden. Like the file list, the check looks at the item only, so an item in a
+// hidden folder still shows.
+func (s *FileServiceTestSuite) TestListFavorites_HiddenOnlyWithToggle() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	secret := s.createFolder(userID, 0, "Secret")
+	inner := s.upload(userID, secret.ID, "inner.txt", "i")
+	shown := s.upload(userID, 0, "shown.txt", "s")
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{secret.ID, inner.ID, shown.ID}))
+	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{secret.ID}, true))
+
+	result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Equal([]string{"inner.txt", "shown.txt"}, favoriteNames(result.Data))
+
+	all, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true})
+	s.Require().NoError(err)
+	s.Equal([]string{"Secret", "inner.txt", "shown.txt"}, favoriteNames(all.Data))
+	s.True(all.Data[0].IsHidden)
+	s.False(all.Data[1].IsHidden)
+}
+
+// The same walk as the file list, over favorites in different folders: every page joins up to the full list, and desc
+// reverses asc inside each part. a.txt and A.txt tie on size and name, so the cursor must keep the id tie-break.
+func (s *FileServiceTestSuite) TestListFavorites_WalkEverySort() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	box := s.createFolder(userID, 0, "Box")
+	ids := []int64{box.ID, s.createFolder(userID, box.ID, "Beta").ID, s.createFolder(userID, box.ID, "alpha").ID}
+	ids = append(ids,
+		s.seedFileWith(userID, "a.txt", "text/plain", 10, 0),
+		s.seedFileWith(userID, "b.png", "image/png", 10, 2),
+		s.seedFileWith(userID, "c.pdf", "text/plain", 5, 1),
+		s.upload(userID, box.ID, "A.txt", "0123456789").ID,
+	)
+	s.moveCreatedAt(ids[1], 3)
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, ids))
+
+	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
+		var full [2][]string
+		for i, desc := range []bool{false, true} {
+			result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{PageSize: 100, Sort: sort, Desc: desc})
+			s.Require().NoError(err)
+			full[i] = favoriteNames(result.Data)
+
+			pages := s.walkFavorites(userID, file.FavoriteQuery{PageSize: 2, Sort: sort, Desc: desc})
+			s.Equal(full[i], slices.Concat(pages...), "%s desc=%t", sort, desc)
+			for _, page := range pages[:len(pages)-1] {
+				s.Len(page, 2, "%s desc=%t", sort, desc)
+			}
+		}
+
+		s.Len(full[0], 7, sort)
+		s.ElementsMatch([]string{"Box", "Beta", "alpha"}, full[0][:3], sort)
+		ascFolders, ascFiles := slices.Clone(full[0][:3]), slices.Clone(full[0][3:])
+		slices.Reverse(ascFolders)
+		slices.Reverse(ascFiles)
+		s.Equal(slices.Concat(ascFolders, ascFiles), full[1], "%s desc must reverse asc", sort)
+	}
 }
 
 // Upload, new folder and rename each write one audit row with the name and folder after the change. A rename to the
@@ -2853,6 +3023,32 @@ func (s *FileServiceTestSuite) TestListTrash_WalkEverySort() {
 	}
 }
 
+// A folder in the trash counts the rows deleted with it, before and after the trash job marks them. A file deleted on
+// its own before the folder is its own trash item, so the folder does not count it.
+func (s *FileServiceTestSuite) TestListTrash_FolderSizes() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	photos := s.createFolder(userID, 0, "Photos")
+	trip := s.createFolder(userID, photos.ID, "Trip")
+	s.upload(userID, photos.ID, "a.txt", "aaa")
+	s.upload(userID, trip.ID, "b.txt", "bb")
+	early := s.upload(userID, trip.ID, "c.txt", "cccc")
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{early.ID}))
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
+
+	for _, label := range []string{"before the trash job", "after the trash job"} {
+		result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByName})
+		s.Require().NoError(err)
+		files := make([]*file.File, len(result.Data))
+		for i, item := range result.Data {
+			files[i] = &item.File
+		}
+		s.Equal(map[string]int64{"Photos": 5, "c.txt": 4}, fileSizes(files), label)
+
+		s.workTrashJobs()
+	}
+}
+
 func (s *FileServiceTestSuite) TestListTrash_BadCursor() {
 	userID := s.seedUser()
 	svc := s.TC.Services.FileService
@@ -3603,6 +3799,15 @@ func cursorOf(raw string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
+// fileSizes maps each item's name to its size.
+func fileSizes(files []*file.File) map[string]int64 {
+	sizes := make(map[string]int64, len(files))
+	for _, f := range files {
+		sizes[f.Name] = f.SizeBytes
+	}
+	return sizes
+}
+
 func fileNames(files []*file.File) []string {
 	names := make([]string, len(files))
 	for i, f := range files {
@@ -3664,6 +3869,38 @@ func (s *FileServiceTestSuite) walkTrash(userID int64, q file.TrashQuery) [][]st
 	}
 	s.FailNow("the pages never end")
 	return nil
+}
+
+func (s *FileServiceTestSuite) walkFavorites(userID int64, q file.FavoriteQuery) [][]string {
+	var pages [][]string
+	for range 50 {
+		result, err := s.TC.Services.FileService.ListFavorites(context.Background(), userID, q)
+		s.Require().NoError(err)
+
+		pages = append(pages, favoriteNames(result.Data))
+		if result.NextCursor == nil {
+			return pages
+		}
+		q.Cursor = *result.NextCursor
+	}
+	s.FailNow("the pages never end")
+	return nil
+}
+
+func favoriteNames(items []*file.Favorite) []string {
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = item.Name
+	}
+	return names
+}
+
+func favoritePaths(items []*file.Favorite) map[string][]string {
+	paths := map[string][]string{}
+	for _, item := range items {
+		paths[item.Name] = item.Path
+	}
+	return paths
 }
 
 func trashNames(items []*file.TrashedFile) []string {
