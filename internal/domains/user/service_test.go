@@ -107,6 +107,46 @@ func (s *UserServiceTestSuite) TestListUsers_ReturnsEveryField() {
 	}}, result.Data)
 }
 
+// A user who never saved settings gets the defaults: the lists as they were before settings existed.
+func (s *UserServiceTestSuite) TestGetSettings_Defaults() {
+	u := s.seedUser("test1@example.com", "Test User 1")
+
+	settings, err := s.TC.Services.UserService.GetSettings(context.Background(), u.ID)
+
+	s.Require().NoError(err)
+	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true}, settings)
+}
+
+// The first save makes the row, a later save changes it, and each user keeps their own settings.
+func (s *UserServiceTestSuite) TestSaveSettings() {
+	svc := s.TC.Services.UserService
+	ctx := context.Background()
+	u := s.seedUser("test1@example.com", "Test User 1")
+	other := s.seedUser("test2@example.com", "Test User 2")
+
+	first := user.Settings{SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false}
+	saved, err := svc.SaveSettings(ctx, u.ID, first)
+	s.Require().NoError(err)
+	s.Equal(&first, saved)
+
+	second := user.Settings{SortFavoritesFirst: false, SortFoldersFirst: true, ShowHidden: true, ShowExtensions: true}
+	saved, err = svc.SaveSettings(ctx, u.ID, second)
+	s.Require().NoError(err)
+	s.Equal(&second, saved)
+
+	got, err := svc.GetSettings(ctx, u.ID)
+	s.Require().NoError(err)
+	s.Equal(&second, got)
+
+	got, err = svc.GetSettings(ctx, other.ID)
+	s.Require().NoError(err)
+	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true}, got)
+
+	var rows int
+	s.Require().NoError(s.TC.DB.QueryRowContext(ctx, `SELECT count(*) FROM user_settings`).Scan(&rows))
+	s.Equal(1, rows)
+}
+
 func (s *UserServiceTestSuite) seedUser(email, displayName string) database.User {
 	role, err := s.TC.Queries.GetRoleByName(context.Background(), "user")
 	s.Require().NoError(err)

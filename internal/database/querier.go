@@ -51,6 +51,7 @@ type Querier interface {
 	GetRoleByName(ctx context.Context, name string) (Role, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	GetUserSettings(ctx context.Context, userID int64) (UserSetting, error)
 	// Reports whether any row points to bytes on disk.
 	HasStoredFiles(ctx context.Context) (bool, error)
 	// Adds one batch of copies. The arrays hold one row each at the same index, and the unnest calls read them in step.
@@ -150,6 +151,7 @@ type Querier interface {
 	RestoreTrashGroups(ctx context.Context, arg RestoreTrashGroupsParams) error
 	// parent_ids[i] and names[i] belong to ids[i].
 	RestoreTrashRoots(ctx context.Context, arg RestoreTrashRootsParams) error
+	SaveUserSettings(ctx context.Context, arg SaveUserSettingsParams) (UserSetting, error)
 	// Hides the user's live items in ids, or shows them again when hidden is false. An item already in that state keeps
 	// it, so a hidden item keeps its first time. It returns each id it found, and whether it changed, for the audit log.
 	SetHidden(ctx context.Context, arg SetHiddenParams) ([]SetHiddenRow, error)

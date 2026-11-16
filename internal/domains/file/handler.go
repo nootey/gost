@@ -79,16 +79,30 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	favoritesFirst, err := utils.QueryChoice(r, "favorites_first", "false", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	foldersFirst, err := utils.QueryChoice(r, "folders_first", "true", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.List(r.Context(), userID, ListQuery{
-		ParentID:   parentID,
-		Cursor:     r.URL.Query().Get("cursor"),
-		PageSize:   pageSize,
-		Search:     search,
-		Sort:       sort,
-		Desc:       order == "desc",
-		ShowHidden: showHidden == "true",
+		ParentID:       parentID,
+		Cursor:         r.URL.Query().Get("cursor"),
+		PageSize:       pageSize,
+		Search:         search,
+		Sort:           sort,
+		Desc:           order == "desc",
+		ShowHidden:     showHidden == "true",
+		FavoritesFirst: favoritesFirst == "true",
+		FoldersFirst:   foldersFirst == "true",
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)
@@ -548,14 +562,21 @@ func (h *FileHandler) ListFavorites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	foldersFirst, err := utils.QueryChoice(r, "folders_first", "true", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.ListFavorites(r.Context(), userID, FavoriteQuery{
-		Cursor:     r.URL.Query().Get("cursor"),
-		PageSize:   pageSize,
-		Sort:       sort,
-		Desc:       order == "desc",
-		ShowHidden: showHidden == "true",
+		Cursor:       r.URL.Query().Get("cursor"),
+		PageSize:     pageSize,
+		Sort:         sort,
+		Desc:         order == "desc",
+		ShowHidden:   showHidden == "true",
+		FoldersFirst: foldersFirst == "true",
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)
@@ -696,13 +717,20 @@ func (h *FileHandler) ListTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	foldersFirst, err := utils.QueryChoice(r, "folders_first", "true", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
 	result, err := h.service.ListTrash(r.Context(), userID, TrashQuery{
-		Cursor:   r.URL.Query().Get("cursor"),
-		PageSize: pageSize,
-		Sort:     sort,
-		Desc:     order == "desc",
+		Cursor:       r.URL.Query().Get("cursor"),
+		PageSize:     pageSize,
+		Sort:         sort,
+		Desc:         order == "desc",
+		FoldersFirst: foldersFirst == "true",
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)

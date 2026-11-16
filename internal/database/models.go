@@ -185,3 +185,12 @@ type User struct {
 	UpdatedAt      time.Time    `json:"updated_at"`
 	DeletedAt      sql.NullTime `json:"deleted_at"`
 }
+
+type UserSetting struct {
+	UserID             int64     `json:"user_id"`
+	SortFavoritesFirst bool      `json:"sort_favorites_first"`
+	SortFoldersFirst   bool      `json:"sort_folders_first"`
+	ShowHidden         bool      `json:"show_hidden"`
+	ShowExtensions     bool      `json:"show_extensions"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}

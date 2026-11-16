@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from "vue";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import { startDownload } from "../../../pkg/utils/download_link.ts";
-import { isViewable, itemView, viewKind } from "../../../pkg/utils/item_view.ts";
+import { isViewable, itemView, shownName, viewKind } from "../../../pkg/utils/item_view.ts";
 import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import { useZoomPan } from "../../../pkg/utils/use_zoom_pan.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
@@ -33,6 +34,7 @@ const props = defineProps<{ items: StoredFile[] }>();
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 const { viewId, show, close } = useViewRoute();
 const {
     transform,
@@ -219,7 +221,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
         <template #header>
             <div v-if="current" class="flex h-16 items-center gap-3 pr-16 pl-4 text-white sm:pl-6">
                 <div class="flex min-w-0 flex-1 items-baseline gap-3">
-                    <span class="truncate text-sm font-medium" :title="current.name">{{ current.name }}</span>
+                    <span class="truncate text-sm font-medium" :title="current.name">
+                        {{ shownName(current, settingsStore.settings.show_extensions) }}
+                    </span>
                     <span v-if="shown.length > 1" class="shrink-0 text-xs tabular-nums text-white/60">
                         {{ activeIndex + 1 }} of {{ shown.length }}
                     </span>

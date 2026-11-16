@@ -118,6 +118,65 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 	return i, err
 }
 
+const getUserSettings = `-- name: GetUserSettings :one
+SELECT user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at FROM user_settings
+WHERE user_id = $1
+`
+
+func (q *Queries) GetUserSettings(ctx context.Context, userID int64) (UserSetting, error) {
+	row := q.db.QueryRowContext(ctx, getUserSettings, userID)
+	var i UserSetting
+	err := row.Scan(
+		&i.UserID,
+		&i.SortFavoritesFirst,
+		&i.SortFoldersFirst,
+		&i.ShowHidden,
+		&i.ShowExtensions,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const saveUserSettings = `-- name: SaveUserSettings :one
+INSERT INTO user_settings (user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (user_id) DO UPDATE SET
+    sort_favorites_first = EXCLUDED.sort_favorites_first,
+    sort_folders_first = EXCLUDED.sort_folders_first,
+    show_hidden = EXCLUDED.show_hidden,
+    show_extensions = EXCLUDED.show_extensions,
+    updated_at = NOW()
+RETURNING user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at
+`
+
+type SaveUserSettingsParams struct {
+	UserID             int64 `json:"user_id"`
+	SortFavoritesFirst bool  `json:"sort_favorites_first"`
+	SortFoldersFirst   bool  `json:"sort_folders_first"`
+	ShowHidden         bool  `json:"show_hidden"`
+	ShowExtensions     bool  `json:"show_extensions"`
+}
+
+func (q *Queries) SaveUserSettings(ctx context.Context, arg SaveUserSettingsParams) (UserSetting, error) {
+	row := q.db.QueryRowContext(ctx, saveUserSettings,
+		arg.UserID,
+		arg.SortFavoritesFirst,
+		arg.SortFoldersFirst,
+		arg.ShowHidden,
+		arg.ShowExtensions,
+	)
+	var i UserSetting
+	err := row.Scan(
+		&i.UserID,
+		&i.SortFavoritesFirst,
+		&i.SortFoldersFirst,
+		&i.ShowHidden,
+		&i.ShowExtensions,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateUserPassword = `-- name: UpdateUserPassword :exec
 UPDATE users SET password = $2, updated_at = NOW()
 WHERE id = $1 AND deleted_at IS NULL

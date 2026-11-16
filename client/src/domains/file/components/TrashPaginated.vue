@@ -2,9 +2,10 @@
 import { computed, onMounted, ref } from "vue";
 import { useConfirm } from "primevue/useconfirm";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
-import { itemView } from "../../../pkg/utils/item_view.ts";
+import { itemView, shownName } from "../../../pkg/utils/item_view.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import type { DataTablePageEvent, DataTableSortEvent } from "primevue/datatable";
@@ -19,6 +20,7 @@ const MENU_ITEMS: MenuItem[] = [
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 const confirm = useConfirm();
 
 const rowOptions = [25, 50, 100];
@@ -46,6 +48,7 @@ async function getData(): Promise<void> {
             page_size: pageSize.value,
             sort: sortField.value,
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
+            folders_first: settingsStore.settings.sort_folders_first,
         });
         if (request !== latestRequest) return;
         items.value = response.data;
@@ -198,7 +201,7 @@ onMounted(getData);
                         </span>
                         <div class="flex min-w-0 flex-col">
                             <span class="truncate text-sm font-medium text-fg" :title="data.name">
-                                {{ data.name }}
+                                {{ shownName(data, settingsStore.settings.show_extensions) }}
                             </span>
                             <span class="truncate text-xs text-fg-subtle sm:hidden">
                                 {{ vueHelper.formatDate(data.trashed_at) }}

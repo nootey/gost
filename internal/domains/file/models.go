@@ -36,12 +36,20 @@ const (
 	SortByModified SortField = "modified"
 )
 
-// foldersFirst splits a list into folders, then files. This is the only place that applies that rule.
+// foldersFirst splits a list into folders, then files, when the user's setting is on. This is the only place that
+// applies that rule. Off, the list is one part, and Postgres sorts the rows the list indexes find.
 // Postgres turns "(storage_key IS NULL) = false" into "storage_key IS NOT NULL", and the index does not match that. IS FALSE stays as it is.
-var foldersFirst = []string{"(storage_key IS NULL) IS TRUE", "(storage_key IS NULL) IS FALSE"}
+var foldersFirst = map[bool][]string{true: {"(storage_key IS NULL) IS TRUE", "(storage_key IS NULL) IS FALSE"}}
+
+// favoritesFirst splits the file list into the user's favorites, then the rest, when the user's setting is on. $1 is
+// the user id. The favorites primary key (file_id, user_id) serves the check.
+var favoritesFirst = map[bool][]string{true: {
+	"EXISTS (SELECT 1 FROM favorites fav WHERE fav.file_id = files.id AND fav.user_id = $1)",
+	"NOT EXISTS (SELECT 1 FROM favorites fav WHERE fav.file_id = files.id AND fav.user_id = $1)",
+}}
 
 // fileList lists one folder. The args are the user id, the folder id (0 for the root), the search, and whether to show
-// hidden items. Select * must match fileFields.
+// hidden items. Select * must match fileFields. Split it by favoritesFirst and foldersFirst before a fetch.
 var fileList = utils.KeysetList[SortField]{
 	Select: "*",
 	From:   "files",
@@ -56,11 +64,11 @@ var fileList = utils.KeysetList[SortField]{
 		SortByDate:     {"created_at", "id"},
 		SortByModified: {"updated_at", "id"},
 	},
-	Parts: foldersFirst,
 }
 
 // trashList lists the items the user deleted, not the rows under them. An item marked for a permanent delete is gone
-// for the user, so it is left out. The arg is the user id. Select * must match fileFields.
+// for the user, so it is left out. The arg is the user id. Select * must match fileFields. Split it by foldersFirst
+// before a fetch.
 var trashList = utils.KeysetList[SortField]{
 	Select: "*",
 	From:   "files",
@@ -72,12 +80,12 @@ var trashList = utils.KeysetList[SortField]{
 		SortByType: {"content_type", "lower(name)", "id"},
 		SortByDate: {"trashed_at", "id"},
 	},
-	Parts: foldersFirst,
 }
 
 // favoriteList lists the user's live favorites from all folders. The args are the user id and whether to show hidden
 // items. Like the file list, the hidden check looks at the item only, not at the folders above it. Select f.* must
-// match fileFields. Only files has a storage_key, so foldersFirst needs no table name.
+// match fileFields. Only files has a storage_key, so foldersFirst needs no table name. Split it by foldersFirst before
+// a fetch. Every row is a favorite, so favoritesFirst has no use here.
 var favoriteList = utils.KeysetList[SortField]{
 	Select: "f.*",
 	From:   "favorites fav JOIN files f ON f.id = fav.file_id",
@@ -88,37 +96,40 @@ var favoriteList = utils.KeysetList[SortField]{
 		SortByType: {"f.content_type", "lower(f.name)", "f.id"},
 		SortByDate: {"f.created_at", "f.id"},
 	},
-	Parts: foldersFirst,
 }
 
 // ListQuery picks one page of a folder. A ParentID of 0 means the root. An empty Search matches every name.
-// ShowHidden adds the hidden items.
+// ShowHidden adds the hidden items. FavoritesFirst and FoldersFirst are the user's sort settings.
 type ListQuery struct {
-	ParentID   int64
-	Cursor     string
-	PageSize   int
-	Search     string
-	Sort       SortField
-	Desc       bool
-	ShowHidden bool
+	ParentID       int64
+	Cursor         string
+	PageSize       int
+	Search         string
+	Sort           SortField
+	Desc           bool
+	ShowHidden     bool
+	FavoritesFirst bool
+	FoldersFirst   bool
 }
 
-// TrashQuery picks one page of the trash. The date sort is the time of the delete.
+// TrashQuery picks one page of the trash. The date sort is the time of the delete. FoldersFirst is the user's setting.
 type TrashQuery struct {
-	Cursor   string
-	PageSize int
-	Sort     SortField
-	Desc     bool
+	Cursor       string
+	PageSize     int
+	Sort         SortField
+	Desc         bool
+	FoldersFirst bool
 }
 
 // FavoriteQuery picks one page of the favorites. The date sort is the time the item was added, not the time it
-// became a favorite. ShowHidden adds the hidden items.
+// became a favorite. ShowHidden adds the hidden items. FoldersFirst is the user's setting.
 type FavoriteQuery struct {
-	Cursor     string
-	PageSize   int
-	Sort       SortField
-	Desc       bool
-	ShowHidden bool
+	Cursor       string
+	PageSize     int
+	Sort         SortField
+	Desc         bool
+	ShowHidden   bool
+	FoldersFirst bool
 }
 
 // Favorite is one of the user's favorites. Path names the folders from the root down to the item's folder. An item in

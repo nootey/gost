@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
+import { useSettingsStore } from "./settings_store.ts";
 import type { User } from "../../domains/user/models.ts";
 import type { AuthForm } from "../../domains/auth/models.ts";
 import router from "../router/router.ts";
@@ -75,6 +76,8 @@ export const useAuthStore = defineStore("auth", {
             this.user = null;
             this.setAuthenticated(false);
             this.setInitialized(null);
+            // The next user to sign in gets their own settings.
+            useSettingsStore().$reset();
 
             sessionStorage.clear();
 

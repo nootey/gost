@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"gost/internal/apperr"
 	"gost/internal/domains/user"
+	"gost/internal/middleware"
 	"gost/internal/utils"
 	"gost/mocks"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -31,6 +33,27 @@ func (suite *UserHandlerTestSuite) SetupTest() {
 	// Setup router
 	suite.router = chi.NewRouter()
 	suite.router.Mount("/users", suite.handler.Routes())
+	suite.router.Get("/settings", suite.handler.GetSettings)
+	suite.router.Put("/settings", suite.handler.SaveSettings)
+}
+
+const testUserID int64 = 7
+
+func (suite *UserHandlerTestSuite) settingsRequest(method, body string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *UserHandlerTestSuite) errorMessage(w *httptest.ResponseRecorder) string {
+	var resp apperr.ErrorResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	return resp.Message
 }
 
 func (suite *UserHandlerTestSuite) TearDownTest() {
@@ -115,5 +138,81 @@ func (suite *UserHandlerTestSuite) TestListUsers_DefaultPagination() {
 
 		suite.Equal(http.StatusOK, w.Code, query)
 		suite.JSONEq(`{"data":[],"next_cursor":null}`, w.Body.String(), query)
+	}
+}
+
+func (suite *UserHandlerTestSuite) TestGetSettings_Success() {
+	suite.mockService.EXPECT().
+		GetSettings(mock.Anything, testUserID).
+		Return(&user.Settings{SortFoldersFirst: true, ShowHidden: true}, nil).
+		Once()
+
+	w := suite.settingsRequest(http.MethodGet, "", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.JSONEq(`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":true,"show_extensions":false}`,
+		w.Body.String())
+}
+
+func (suite *UserHandlerTestSuite) TestGetSettings_ServiceError() {
+	suite.mockService.EXPECT().
+		GetSettings(mock.Anything, testUserID).
+		Return(nil, assert.AnError).
+		Once()
+
+	w := suite.settingsRequest(http.MethodGet, "", true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *UserHandlerTestSuite) TestSaveSettings_Success() {
+	saved := user.Settings{SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false}
+	suite.mockService.EXPECT().
+		SaveSettings(mock.Anything, testUserID, saved).
+		Return(&saved, nil).
+		Once()
+
+	w := suite.settingsRequest(http.MethodPut,
+		`{"sort_favorites_first":true,"sort_folders_first":false,"show_hidden":true,"show_extensions":false}`, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.JSONEq(`{"sort_favorites_first":true,"sort_folders_first":false,"show_hidden":true,"show_extensions":false}`,
+		w.Body.String())
+}
+
+// Every setting needs a value, so a missing one never turns into false.
+func (suite *UserHandlerTestSuite) TestSaveSettings_InvalidBody() {
+	for _, body := range []string{
+		`not json`,
+		`{}`,
+		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true}`,
+		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true,"show_extensions":null}`,
+		`{"sort_favorites_first":true,"sort_folders_first":"yes","show_hidden":true,"show_extensions":true}`,
+	} {
+		w := suite.settingsRequest(http.MethodPut, body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, body)
+		suite.Equal("invalid settings", suite.errorMessage(w), body)
+	}
+}
+
+func (suite *UserHandlerTestSuite) TestSaveSettings_ServiceError() {
+	suite.mockService.EXPECT().
+		SaveSettings(mock.Anything, testUserID, mock.Anything).
+		Return(nil, assert.AnError).
+		Once()
+
+	w := suite.settingsRequest(http.MethodPut,
+		`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":false,"show_extensions":true}`, true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *UserHandlerTestSuite) TestSettings_Unauthenticated() {
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		w := suite.settingsRequest(method,
+			`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":false,"show_extensions":true}`, false)
+
+		suite.Equal(http.StatusUnauthorized, w.Code, method)
 	}
 }

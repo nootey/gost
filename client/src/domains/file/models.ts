@@ -67,6 +67,8 @@ export interface ListQuery {
     order: "asc" | "desc";
     search: string | null;
     show_hidden: boolean;
+    favorites_first: boolean;
+    folders_first: boolean;
 }
 
 // One of the user's favorites. path names the folders from the root down to the item's folder. An item in the root
@@ -83,6 +85,7 @@ export interface FavoriteQuery {
     sort: SortField;
     order: "asc" | "desc";
     show_hidden: boolean;
+    folders_first: boolean;
 }
 
 // One of the user's newest added or changed files. path names the folders from the root down to the file's folder. A
@@ -107,6 +110,7 @@ export interface TrashQuery {
     page_size: number;
     sort: SortField;
     order: "asc" | "desc";
+    folders_first: boolean;
 }
 
 export type NewItemKind = "folder" | "file";

@@ -49,6 +49,15 @@ export function isViewable(item: StoredFile): boolean {
     return viewKind(item) !== null;
 }
 
+// shownName is the name a list shows. With the extensions setting off, a file loses its last extension: report.pdf
+// shows as report. A folder, a dot file such as .env, and a name that ends in a dot keep the full name.
+export function shownName(item: StoredFile, showExtensions: boolean): string {
+    if (showExtensions || item.is_folder) return item.name;
+    const dot = item.name.lastIndexOf(".");
+    if (dot <= 0 || dot === item.name.length - 1) return item.name;
+    return item.name.slice(0, dot);
+}
+
 // A folder's size_bytes is the total of the files under it, so a folder shows a size like a file.
 export function itemView(item: StoredFile): ItemView {
     const size = vueHelper.formatBytes(item.size_bytes);

@@ -48,6 +48,74 @@ func (_m *MockUserServiceInterface) EXPECT() *MockUserServiceInterface_Expecter 
 	return &MockUserServiceInterface_Expecter{mock: &_m.Mock}
 }
 
+// GetSettings provides a mock function for the type MockUserServiceInterface
+func (_mock *MockUserServiceInterface) GetSettings(ctx context.Context, userID int64) (*user.Settings, error) {
+	ret := _mock.Called(ctx, userID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetSettings")
+	}
+
+	var r0 *user.Settings
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (*user.Settings, error)); ok {
+		return returnFunc(ctx, userID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) *user.Settings); ok {
+		r0 = returnFunc(ctx, userID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*user.Settings)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, userID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockUserServiceInterface_GetSettings_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetSettings'
+type MockUserServiceInterface_GetSettings_Call struct {
+	*mock.Call
+}
+
+// GetSettings is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+func (_e *MockUserServiceInterface_Expecter) GetSettings(ctx any, userID any) *MockUserServiceInterface_GetSettings_Call {
+	return &MockUserServiceInterface_GetSettings_Call{Call: _e.mock.On("GetSettings", ctx, userID)}
+}
+
+func (_c *MockUserServiceInterface_GetSettings_Call) Run(run func(ctx context.Context, userID int64)) *MockUserServiceInterface_GetSettings_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockUserServiceInterface_GetSettings_Call) Return(settings *user.Settings, err error) *MockUserServiceInterface_GetSettings_Call {
+	_c.Call.Return(settings, err)
+	return _c
+}
+
+func (_c *MockUserServiceInterface_GetSettings_Call) RunAndReturn(run func(ctx context.Context, userID int64) (*user.Settings, error)) *MockUserServiceInterface_GetSettings_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListUsers provides a mock function for the type MockUserServiceInterface
 func (_mock *MockUserServiceInterface) ListUsers(ctx context.Context, cursor string, pageSize int) (*utils.Page[*user.User], error) {
 	ret := _mock.Called(ctx, cursor, pageSize)
@@ -118,6 +186,80 @@ func (_c *MockUserServiceInterface_ListUsers_Call) Return(page *utils.Page[*user
 }
 
 func (_c *MockUserServiceInterface_ListUsers_Call) RunAndReturn(run func(ctx context.Context, cursor string, pageSize int) (*utils.Page[*user.User], error)) *MockUserServiceInterface_ListUsers_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SaveSettings provides a mock function for the type MockUserServiceInterface
+func (_mock *MockUserServiceInterface) SaveSettings(ctx context.Context, userID int64, settings user.Settings) (*user.Settings, error) {
+	ret := _mock.Called(ctx, userID, settings)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SaveSettings")
+	}
+
+	var r0 *user.Settings
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, user.Settings) (*user.Settings, error)); ok {
+		return returnFunc(ctx, userID, settings)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, user.Settings) *user.Settings); ok {
+		r0 = returnFunc(ctx, userID, settings)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*user.Settings)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, user.Settings) error); ok {
+		r1 = returnFunc(ctx, userID, settings)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockUserServiceInterface_SaveSettings_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SaveSettings'
+type MockUserServiceInterface_SaveSettings_Call struct {
+	*mock.Call
+}
+
+// SaveSettings is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - settings user.Settings
+func (_e *MockUserServiceInterface_Expecter) SaveSettings(ctx any, userID any, settings any) *MockUserServiceInterface_SaveSettings_Call {
+	return &MockUserServiceInterface_SaveSettings_Call{Call: _e.mock.On("SaveSettings", ctx, userID, settings)}
+}
+
+func (_c *MockUserServiceInterface_SaveSettings_Call) Run(run func(ctx context.Context, userID int64, settings user.Settings)) *MockUserServiceInterface_SaveSettings_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 user.Settings
+		if args[2] != nil {
+			arg2 = args[2].(user.Settings)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockUserServiceInterface_SaveSettings_Call) Return(settings1 *user.Settings, err error) *MockUserServiceInterface_SaveSettings_Call {
+	_c.Call.Return(settings1, err)
+	return _c
+}
+
+func (_c *MockUserServiceInterface_SaveSettings_Call) RunAndReturn(run func(ctx context.Context, userID int64, settings user.Settings) (*user.Settings, error)) *MockUserServiceInterface_SaveSettings_Call {
 	_c.Call.Return(run)
 	return _c
 }

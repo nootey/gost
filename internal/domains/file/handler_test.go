@@ -291,7 +291,7 @@ func (suite *FileHandlerTestSuite) list(query string, authenticated bool) *httpt
 func (suite *FileHandlerTestSuite) TestList_Success() {
 	next := "next-page"
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, file.ListQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true}).
+		List(mock.Anything, testUserID, file.ListQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true, FoldersFirst: true}).
 		Return(&utils.Page[*file.File]{
 			Data:       []*file.File{{ID: 3, Name: "c.txt"}, {ID: 2, Name: "b.txt"}},
 			NextCursor: &next,
@@ -313,7 +313,7 @@ func (suite *FileHandlerTestSuite) TestList_Success() {
 // The old page param is ignored. The last page has a null next_cursor, so the client knows to stop.
 func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, file.ListQuery{Sort: file.SortByDate, Desc: true}).
+		List(mock.Anything, testUserID, file.ListQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}).
 		Return(&utils.Page[*file.File]{Data: []*file.File{}}, nil).
 		Twice()
 
@@ -326,7 +326,7 @@ func (suite *FileHandlerTestSuite) TestList_DefaultPagination() {
 
 func (suite *FileHandlerTestSuite) TestList_InFolder() {
 	suite.mockService.EXPECT().
-		List(mock.Anything, testUserID, file.ListQuery{ParentID: 12, PageSize: 10, Sort: file.SortByDate, Desc: true}).
+		List(mock.Anything, testUserID, file.ListQuery{ParentID: 12, PageSize: 10, Sort: file.SortByDate, Desc: true, FoldersFirst: true}).
 		Return(&utils.Page[*file.File]{Data: []*file.File{}}, nil).
 		Once()
 
@@ -350,15 +350,19 @@ func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
 		query string
 		want  file.ListQuery
 	}{
-		{"?sort=name&order=asc", file.ListQuery{Sort: file.SortByName}},
-		{"?sort=size&order=desc", file.ListQuery{Sort: file.SortBySize, Desc: true}},
-		{"?sort=type", file.ListQuery{Sort: file.SortByType, Desc: true}},
-		{"?sort=modified&order=asc", file.ListQuery{Sort: file.SortByModified}},
-		{"?order=asc", file.ListQuery{Sort: file.SortByDate}},
-		{"?search=%20Report%25_", file.ListQuery{Search: " Report%_", Sort: file.SortByDate, Desc: true}},
-		{"?search=" + atNameLimit, file.ListQuery{Search: atNameLimit, Sort: file.SortByDate, Desc: true}},
-		{"?show_hidden=true", file.ListQuery{Sort: file.SortByDate, Desc: true, ShowHidden: true}},
-		{"?show_hidden=false", file.ListQuery{Sort: file.SortByDate, Desc: true}},
+		{"?sort=name&order=asc", file.ListQuery{Sort: file.SortByName, FoldersFirst: true}},
+		{"?sort=size&order=desc", file.ListQuery{Sort: file.SortBySize, Desc: true, FoldersFirst: true}},
+		{"?sort=type", file.ListQuery{Sort: file.SortByType, Desc: true, FoldersFirst: true}},
+		{"?sort=modified&order=asc", file.ListQuery{Sort: file.SortByModified, FoldersFirst: true}},
+		{"?order=asc", file.ListQuery{Sort: file.SortByDate, FoldersFirst: true}},
+		{"?search=%20Report%25_", file.ListQuery{Search: " Report%_", Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?search=" + atNameLimit, file.ListQuery{Search: atNameLimit, Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?show_hidden=true", file.ListQuery{Sort: file.SortByDate, Desc: true, ShowHidden: true, FoldersFirst: true}},
+		{"?show_hidden=false", file.ListQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?favorites_first=true", file.ListQuery{Sort: file.SortByDate, Desc: true, FavoritesFirst: true, FoldersFirst: true}},
+		{"?favorites_first=false", file.ListQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?folders_first=false", file.ListQuery{Sort: file.SortByDate, Desc: true}},
+		{"?folders_first=true", file.ListQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
 	}
 	for _, tc := range cases {
 		suite.mockService.EXPECT().
@@ -388,6 +392,8 @@ func (suite *FileHandlerTestSuite) TestList_InvalidSort() {
 		{"?order=up", "invalid order"},
 		{"?order=DESC", "invalid order"},
 		{"?search=" + atNameLimit + "a", "invalid search"},
+		{"?favorites_first=yes", "invalid favorites_first"},
+		{"?folders_first=1", "invalid folders_first"},
 	}
 	for _, tc := range cases {
 		w := suite.list(tc.query, true)
@@ -1604,7 +1610,7 @@ func (suite *FileHandlerTestSuite) TestRemoveFavorites_ServiceError() {
 func (suite *FileHandlerTestSuite) TestListFavorites_Success() {
 	next := "next-page"
 	suite.mockService.EXPECT().
-		ListFavorites(mock.Anything, testUserID, file.FavoriteQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByName}).
+		ListFavorites(mock.Anything, testUserID, file.FavoriteQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByName, FoldersFirst: true}).
 		Return(&utils.Page[*file.Favorite]{
 			Data: []*file.Favorite{
 				{File: file.File{ID: 3, Name: "c.txt", IsFavorite: true}, Path: []string{"Docs", "Work"}},
@@ -1641,13 +1647,14 @@ func (suite *FileHandlerTestSuite) TestListFavorites_Query() {
 		query string
 		want  file.FavoriteQuery
 	}{
-		{"", file.FavoriteQuery{Sort: file.SortByName}},
-		{"?page_size=-x", file.FavoriteQuery{Sort: file.SortByName}},
-		{"?sort=date&order=desc", file.FavoriteQuery{Sort: file.SortByDate, Desc: true}},
-		{"?sort=size", file.FavoriteQuery{Sort: file.SortBySize}},
-		{"?sort=type&order=asc", file.FavoriteQuery{Sort: file.SortByType}},
-		{"?show_hidden=true", file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true}},
-		{"?show_hidden=false", file.FavoriteQuery{Sort: file.SortByName}},
+		{"", file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true}},
+		{"?page_size=-x", file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true}},
+		{"?sort=date&order=desc", file.FavoriteQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?sort=size", file.FavoriteQuery{Sort: file.SortBySize, FoldersFirst: true}},
+		{"?sort=type&order=asc", file.FavoriteQuery{Sort: file.SortByType, FoldersFirst: true}},
+		{"?show_hidden=true", file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true, FoldersFirst: true}},
+		{"?show_hidden=false", file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true}},
+		{"?folders_first=false", file.FavoriteQuery{Sort: file.SortByName}},
 	}
 	for _, tc := range cases {
 		suite.mockService.EXPECT().
@@ -1671,6 +1678,7 @@ func (suite *FileHandlerTestSuite) TestListFavorites_InvalidQuery() {
 		{"?sort=modified", "invalid sort"},
 		{"?order=DESC", "invalid order"},
 		{"?show_hidden=yes", "invalid show_hidden"},
+		{"?folders_first=no", "invalid folders_first"},
 	}
 	for _, tc := range cases {
 		w := suite.getPath("/favorites"+tc.query, true)
@@ -1927,7 +1935,7 @@ func (suite *FileHandlerTestSuite) TestListTrash_Success() {
 	next := "next-page"
 	trashedAt := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	suite.mockService.EXPECT().
-		ListTrash(mock.Anything, testUserID, file.TrashQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true}).
+		ListTrash(mock.Anything, testUserID, file.TrashQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByDate, Desc: true, FoldersFirst: true}).
 		Return(&utils.Page[*file.TrashedFile]{
 			Data:       []*file.TrashedFile{{File: file.File{ID: 3, Name: "c.txt"}, TrashedAt: trashedAt}},
 			NextCursor: &next,
@@ -1958,11 +1966,12 @@ func (suite *FileHandlerTestSuite) TestListTrash_Sort() {
 		query string
 		want  file.TrashQuery
 	}{
-		{"", file.TrashQuery{Sort: file.SortByDate, Desc: true}},
-		{"?page_size=-x", file.TrashQuery{Sort: file.SortByDate, Desc: true}},
-		{"?sort=name&order=asc", file.TrashQuery{Sort: file.SortByName}},
-		{"?sort=size", file.TrashQuery{Sort: file.SortBySize, Desc: true}},
-		{"?sort=type&order=desc", file.TrashQuery{Sort: file.SortByType, Desc: true}},
+		{"", file.TrashQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?page_size=-x", file.TrashQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true}},
+		{"?sort=name&order=asc", file.TrashQuery{Sort: file.SortByName, FoldersFirst: true}},
+		{"?sort=size", file.TrashQuery{Sort: file.SortBySize, Desc: true, FoldersFirst: true}},
+		{"?sort=type&order=desc", file.TrashQuery{Sort: file.SortByType, Desc: true, FoldersFirst: true}},
+		{"?folders_first=false", file.TrashQuery{Sort: file.SortByDate, Desc: true}},
 	}
 	for _, tc := range cases {
 		suite.mockService.EXPECT().
@@ -1985,6 +1994,7 @@ func (suite *FileHandlerTestSuite) TestListTrash_InvalidSort() {
 		{"?sort=trashed_at", "invalid sort"},
 		{"?sort=modified", "invalid sort"},
 		{"?order=DESC", "invalid order"},
+		{"?folders_first=TRUE", "invalid folders_first"},
 	}
 	for _, tc := range cases {
 		w := suite.listTrash(tc.query, true)

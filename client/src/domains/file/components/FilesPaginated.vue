@@ -3,11 +3,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useClipboardStore } from "../../../pkg/stores/clipboard_store.ts";
 import { useDownloadStore } from "../../../pkg/stores/download_store.ts";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { startDownload } from "../../../pkg/utils/download_link.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
-import { isViewable, itemView } from "../../../pkg/utils/item_view.ts";
+import { isViewable, itemView, shownName } from "../../../pkg/utils/item_view.ts";
 import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
@@ -60,6 +61,7 @@ const fileStore = useFileStore();
 const clipboardStore = useClipboardStore();
 const downloadStore = useDownloadStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 const { viewRoute } = useViewRoute();
 
 const PASTE_ACTIONS: Record<ClipboardMode, (form: PasteForm) => Promise<SuccessResponse>> = {
@@ -76,8 +78,8 @@ const sortField = ref<ListSortField>("date");
 const sortOrder = ref<number>(-1);
 const search = ref<string>("");
 const listedSearch = ref<string>("");
-// Hidden items show greyed when this is on. The later "show hidden files" setting sets its default.
-const showHidden = ref<boolean>(false);
+// Hidden items show greyed when this is on. The "Show hidden files" setting sets its default.
+const showHidden = ref<boolean>(settingsStore.settings.show_hidden);
 
 // A copying row cannot be selected, so no action reaches it before its copy job ends.
 const selection = ref<StoredFile[]>([]);
@@ -122,6 +124,8 @@ async function getData(): Promise<void> {
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
             search: query || null,
             show_hidden: showHidden.value,
+            favorites_first: settingsStore.settings.sort_favorites_first,
+            folders_first: settingsStore.settings.sort_folders_first,
         });
         if (request !== latestRequest) return;
         files.value = response.data;
@@ -466,10 +470,10 @@ defineExpose({ refresh });
                                     class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                     :title="data.name"
                                 >
-                                    {{ data.name }}
+                                    {{ shownName(data, settingsStore.settings.show_extensions) }}
                                 </router-link>
                                 <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
-                                    {{ data.name }}
+                                    {{ shownName(data, settingsStore.settings.show_extensions) }}
                                 </span>
                                 <i
                                     v-if="data.is_hidden"

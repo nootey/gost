@@ -422,7 +422,8 @@ func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*uti
 		return nil, err
 	}
 
-	page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
+	list := fileList.Split(favoritesFirst[q.FavoritesFirst], foldersFirst[q.FoldersFirst])
+	page, err := utils.FetchPage(ctx, s.db, list, utils.PageQuery[SortField]{
 		Args:     []any{userID, q.ParentID, strings.TrimSpace(q.Search), q.ShowHidden},
 		Sort:     q.Sort,
 		Desc:     q.Desc,
@@ -622,7 +623,7 @@ func (s *FileService) RemoveFavorites(ctx context.Context, userID int64, ids []i
 // ListFavorites reads one page of the user's live favorites from all folders. Each item comes with the path of its
 // folder, so the client can open that folder.
 func (s *FileService) ListFavorites(ctx context.Context, userID int64, q FavoriteQuery) (*utils.Page[*Favorite], error) {
-	page, err := utils.FetchPage(ctx, s.db, favoriteList, utils.PageQuery[SortField]{
+	page, err := utils.FetchPage(ctx, s.db, favoriteList.Split(foldersFirst[q.FoldersFirst]), utils.PageQuery[SortField]{
 		Args:     []any{userID, q.ShowHidden},
 		Sort:     q.Sort,
 		Desc:     q.Desc,
@@ -1524,7 +1525,7 @@ func (s *FileService) SweepOrphans(ctx context.Context) error {
 }
 
 func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {
-	page, err := utils.FetchPage(ctx, s.db, trashList, utils.PageQuery[SortField]{
+	page, err := utils.FetchPage(ctx, s.db, trashList.Split(foldersFirst[q.FoldersFirst]), utils.PageQuery[SortField]{
 		Args:     []any{userID},
 		Sort:     q.Sort,
 		Desc:     q.Desc,
@@ -1961,7 +1962,8 @@ func (s *FileService) addZipFolder(ctx context.Context, zb *utils.ZipBuilder, us
 	taken := make(map[string]bool)
 	cursor := ""
 	for {
-		page, err := utils.FetchPage(ctx, s.db, fileList, utils.PageQuery[SortField]{
+		// Folders first, whatever the user's setting: each part then pages straight down a list index.
+		page, err := utils.FetchPage(ctx, s.db, fileList.Split(foldersFirst[true]), utils.PageQuery[SortField]{
 			// A zip keeps the hidden items, the way zip keeps dot files.
 			Args:     []any{userID, folder.id, "", true},
 			Sort:     SortByName,
