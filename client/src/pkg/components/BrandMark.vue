@@ -1,8 +1,3 @@
-<script setup lang="ts">
-// compact shows only the icon on a phone, where the header has no room for the name.
-defineProps<{ compact?: boolean }>();
-</script>
-
 <template>
     <span class="flex items-center gap-2.5">
         <span class="grid size-8 place-items-center rounded-lg bg-primary text-primary-contrast shadow-sm">
@@ -17,6 +12,6 @@ defineProps<{ compact?: boolean }>();
                 />
             </svg>
         </span>
-        <span class="text-lg font-semibold tracking-tight text-fg" :class="{ 'hidden sm:inline': compact }">gost</span>
+        <span class="text-lg font-semibold tracking-tight text-fg">gost</span>
     </span>
 </template>
