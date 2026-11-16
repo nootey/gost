@@ -10,8 +10,8 @@ export interface ViewRoute {
     close: () => Promise<void>;
 }
 
-// The open picture is the view param of the list page, such as /?dir=/Photos&view=12, so back and reload keep it.
-// Open it with a link or a push to viewRoute. show moves to another picture in the same history entry, so one back
+// The file open in the viewer is the view param of the list page, such as /?dir=/Photos&view=12, so back and reload keep it.
+// Open it with a link or a push to viewRoute. show moves to another file in the same history entry, so one back
 // closes the viewer. close goes back when the viewer opened from this page, and else drops the param.
 export function useViewRoute(): ViewRoute {
     const route = useRoute();

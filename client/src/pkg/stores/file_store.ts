@@ -101,6 +101,20 @@ export const useFileStore = defineStore("file", {
             return apiClient.url(`${this.apiPrefix}/${id}/download`);
         },
 
+        // The address the viewer shows a file from. A type that is not safe to show comes as a download.
+        contentUrl(id: number): string {
+            return apiClient.url(`${this.apiPrefix}/${id}/content`);
+        },
+
+        // The first bytes of a file, for the text view. An empty file has no bytes, so the server answers 416.
+        async readStart(id: number, bytes: number): Promise<ArrayBuffer> {
+            const response = await apiClient.get<Blob>(`${this.apiPrefix}/${id}/content`, {
+                headers: { Range: `bytes=0-${bytes - 1}` },
+                responseType: "blob",
+            });
+            return response.data.arrayBuffer();
+        },
+
         // A small copy of a picture for the list. The server makes it on the first request and keeps it.
         thumbnailUrl(id: number): string {
             return apiClient.url(`${this.apiPrefix}/${id}/thumbnail`);

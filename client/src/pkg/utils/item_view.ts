@@ -14,12 +14,39 @@ const FOLDER_VIEW: Omit<ItemView, "size"> = {
     type: "Folder",
 };
 
-// The sniffed types an <img> shows. The server never sniffs an SVG as an image, so a script in one never runs here.
-const PICTURE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]);
+// How the file viewer shows a file. "other" shows the name, the size and a download button.
+export type ViewKind = "picture" | "video" | "pdf" | "text" | "other";
 
-// isPicture says if the picture viewer can show the item. A copying file has no bytes yet, so it does not show.
+// The view for each sniffed type. The server never sniffs an SVG as an image, so a script in one never runs here. The
+// text view shows HTML and XML as plain text, so they never run.
+const VIEW_BY_TYPE: Record<string, ViewKind> = {
+    "image/png": "picture",
+    "image/jpeg": "picture",
+    "image/gif": "picture",
+    "image/webp": "picture",
+    "image/bmp": "picture",
+    "video/mp4": "video",
+    "video/webm": "video",
+    "application/pdf": "pdf",
+    "text/plain": "text",
+    "text/html": "text",
+    "text/xml": "text",
+};
+
+// viewKind says how the file viewer shows the item, or null if it does not open there. A copying file has no bytes yet.
+export function viewKind(item: StoredFile): ViewKind | null {
+    if (item.is_folder || item.is_copying) return null;
+    return VIEW_BY_TYPE[vueHelper.mimeType(item.content_type)] ?? "other";
+}
+
+// isPicture says if the item is a picture, which has a thumbnail and zooms in the viewer.
 export function isPicture(item: StoredFile): boolean {
-    return !item.is_folder && !item.is_copying && PICTURE_TYPES.has(vueHelper.mimeType(item.content_type));
+    return viewKind(item) === "picture";
+}
+
+// isViewable says if the item opens in the file viewer.
+export function isViewable(item: StoredFile): boolean {
+    return viewKind(item) !== null;
 }
 
 // A folder's size_bytes is the total of the files under it, so a folder shows a size like a file.

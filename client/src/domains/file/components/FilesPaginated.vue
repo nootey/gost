@@ -7,14 +7,14 @@ import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { startDownload } from "../../../pkg/utils/download_link.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
-import { isPicture, itemView } from "../../../pkg/utils/item_view.ts";
+import { isViewable, itemView } from "../../../pkg/utils/item_view.ts";
 import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import DetailsDialog from "./DetailsDialog.vue";
 import ItemIcon from "./ItemIcon.vue";
-import PictureViewer from "./PictureViewer.vue";
+import FileViewer from "./FileViewer.vue";
 import RenameDialog from "./RenameDialog.vue";
 import type {
     DataTablePageEvent,
@@ -164,10 +164,10 @@ async function onFolderChange(): Promise<void> {
     await refresh();
 }
 
-// A folder opens in the list, and a picture opens in the viewer. Other files and copying items do not open.
+// A folder opens in the list, and a file opens in the viewer. Copying items do not open.
 function openRoute(item: StoredFile): RouteLocationRaw | null {
     if (item.is_folder && !item.is_copying) return folderRoute(joinDir(props.dir, item.name));
-    if (isPicture(item)) return viewRoute(item.id);
+    if (isViewable(item)) return viewRoute(item.id);
     return null;
 }
 
@@ -561,6 +561,6 @@ defineExpose({ refresh });
 
         <RenameDialog v-model:visible="renameVisible" :item="renameTarget" @renamed="getData" />
         <DetailsDialog v-model:visible="detailsVisible" :item="detailsTarget" :dir="dir" />
-        <PictureViewer :items="files" />
+        <FileViewer :items="files" />
     </div>
 </template>

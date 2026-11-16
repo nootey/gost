@@ -266,6 +266,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 			r.Use(authMiddleware.WebClientAuthentication)
 
 			r.Get("/files/{id}/download", h.File.Download)
+			r.Get("/files/{id}/content", h.File.Content)
 			r.Get("/files/{id}/thumbnail", h.File.Thumbnail)
 			r.Get("/downloads/{id}/file", h.File.DownloadZip)
 		})

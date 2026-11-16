@@ -63,6 +63,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files/{id}/activity", suite.handler.ListActivity)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
 	suite.router.Get("/files/{id}/download", suite.handler.Download)
+	suite.router.Get("/files/{id}/content", suite.handler.Content)
 	suite.router.Get("/files/{id}/thumbnail", suite.handler.Thumbnail)
 	suite.router.Post("/files/move", suite.handler.Move)
 	suite.router.Post("/files/copy", suite.handler.Copy)
@@ -767,7 +768,19 @@ func (c *trackedContent) Close() error {
 }
 
 func (suite *FileHandlerTestSuite) download(id string, header http.Header, authenticated bool) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/files/"+id+"/download", nil)
+	return suite.getFile("download", id, header, authenticated)
+}
+
+func (suite *FileHandlerTestSuite) content(id string, header http.Header, authenticated bool) *httptest.ResponseRecorder {
+	return suite.getFile("content", id, header, authenticated)
+}
+
+func (suite *FileHandlerTestSuite) getFile(
+	route, id string,
+	header http.Header,
+	authenticated bool,
+) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/files/"+id+"/"+route, nil)
 	for k, v := range header {
 		req.Header[k] = v
 	}
@@ -781,12 +794,17 @@ func (suite *FileHandlerTestSuite) download(id string, header http.Header, authe
 
 // expectOpen makes OpenFile return name with "hello world" as its bytes, once.
 func (suite *FileHandlerTestSuite) expectOpen(name string) *trackedContent {
+	return suite.expectOpenType(name, "text/plain; charset=utf-8")
+}
+
+// expectOpenType is expectOpen with the sniffed contentType.
+func (suite *FileHandlerTestSuite) expectOpenType(name, contentType string) *trackedContent {
 	content := &trackedContent{Reader: bytes.NewReader([]byte("hello world"))}
 	suite.mockService.EXPECT().
 		OpenFile(mock.Anything, testUserID, int64(5)).
 		Return(&file.FileContent{
 			Name:        name,
-			ContentType: "text/plain; charset=utf-8",
+			ContentType: contentType,
 			ModTime:     time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
 			ETag:        `"abc123"`,
 			Content:     content,
@@ -867,6 +885,84 @@ func (suite *FileHandlerTestSuite) TestDownload_ServiceError() {
 	suite.Equal(http.StatusBadRequest, w.Code)
 	suite.Equal("a folder downloads as a zip", suite.errorMessage(w))
 	suite.Empty(w.Header().Get("Content-Disposition"))
+}
+
+// The content route shows a file with the download's headers, but inline, and under a sandbox that blocks scripts.
+func (suite *FileHandlerTestSuite) TestContent_Success() {
+	content := suite.expectOpen("notes.txt")
+
+	w := suite.content("5", nil, true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("hello world", w.Body.String())
+	suite.Equal("text/plain; charset=utf-8", w.Header().Get("Content-Type"))
+	suite.Equal("inline; filename=notes.txt", w.Header().Get("Content-Disposition"))
+	suite.Equal("nosniff", w.Header().Get("X-Content-Type-Options"))
+	suite.Equal("sandbox", w.Header().Get("Content-Security-Policy"))
+	suite.Equal(`"abc123"`, w.Header().Get("ETag"))
+	suite.Equal("private, no-cache", w.Header().Get("Cache-Control"))
+	suite.Equal("bytes", w.Header().Get("Accept-Ranges"))
+	suite.True(content.closed)
+}
+
+// Only the sniffed types on the allow list show. HTML and XML can run scripts, so they save, like any other type.
+func (suite *FileHandlerTestSuite) TestContent_Disposition() {
+	cases := []struct {
+		contentType string
+		disposition string
+	}{
+		{"application/pdf", "inline"},
+		{"video/mp4", "inline"},
+		{"video/webm", "inline"},
+		{"image/png", "inline"},
+		{"image/jpeg", "inline"},
+		{"text/plain; charset=utf-16le", "inline"},
+		{"text/html; charset=utf-8", "attachment"},
+		{"text/xml; charset=utf-8", "attachment"},
+		{"application/zip", "attachment"},
+		{"application/octet-stream", "attachment"},
+		{"", "attachment"},
+	}
+	for _, tc := range cases {
+		suite.expectOpenType("file", tc.contentType)
+
+		w := suite.content("5", nil, true)
+
+		suite.Equal(http.StatusOK, w.Code, tc.contentType)
+		suite.Equal(tc.disposition+"; filename=file", w.Header().Get("Content-Disposition"), tc.contentType)
+		suite.Equal("sandbox", w.Header().Get("Content-Security-Policy"), tc.contentType)
+	}
+}
+
+// A <video> seeks with range requests, and the text view reads only the start of a big file.
+func (suite *FileHandlerTestSuite) TestContent_Range() {
+	suite.expectOpen("notes.txt")
+
+	w := suite.content("5", http.Header{"Range": {"bytes=0-4"}}, true)
+
+	suite.Equal(http.StatusPartialContent, w.Code)
+	suite.Equal("hello", w.Body.String())
+	suite.Equal("bytes 0-4/11", w.Header().Get("Content-Range"))
+}
+
+// OpenFile checks the owner, so another user's file is not found.
+func (suite *FileHandlerTestSuite) TestContent_NotFound() {
+	suite.mockService.EXPECT().
+		OpenFile(mock.Anything, testUserID, int64(5)).
+		Return(nil, apperr.New(apperr.KindNotFound, "item not found")).
+		Once()
+
+	w := suite.content("5", nil, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("item not found", suite.errorMessage(w))
+	suite.Empty(w.Header().Get("Content-Disposition"))
+}
+
+func (suite *FileHandlerTestSuite) TestContent_Unauthenticated() {
+	w := suite.content("5", nil, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
 // The thumbnail goes through the same path as a download: the owner check, the ETag and the cache headers.
