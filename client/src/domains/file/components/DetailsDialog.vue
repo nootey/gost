@@ -5,6 +5,7 @@ import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { itemView } from "../../../pkg/utils/item_view.ts";
 import { useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
+import ItemIcon from "./ItemIcon.vue";
 import type { DataTablePageEvent } from "primevue/datatable";
 import type { Activity, ActivityEvent, ActivityMetadata, StoredFile } from "../models.ts";
 
@@ -107,9 +108,7 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
     >
         <template #header>
             <div v-if="details && view" class="flex min-w-0 items-center gap-3">
-                <span class="grid size-9 shrink-0 place-items-center rounded-lg" :class="view.iconBox">
-                    <i :class="view.icon" />
-                </span>
+                <ItemIcon :item="details" />
                 <span class="truncate text-lg font-semibold tracking-tight text-fg" :title="details.name">
                     {{ details.name }}
                 </span>

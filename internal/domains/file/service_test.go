@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,11 @@ import (
 	"gost/internal/uploads"
 	"gost/internal/utils"
 	"gost/tests/integration"
+	"hash/crc32"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"io/fs"
 	"net/http"
@@ -1525,6 +1531,132 @@ func (s *FileServiceTestSuite) TestOpenFile_NoBytes() {
 	id := s.seedFile(userID, "lost.txt")
 
 	_, err := s.TC.Services.FileService.OpenFile(context.Background(), userID, id)
+
+	status, msg := apperr.Resolve(err)
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("file not found on disk", msg)
+	s.Len(s.logs("a file has no bytes on disk"), 1)
+}
+
+// A picture gets a thumbnail with a long edge of 256 pixels. The second request reads the one on disk.
+func (s *FileServiceTestSuite) TestOpenThumbnail_MakesAndKeeps() {
+	userID := s.seedUser()
+	f := s.upload(userID, 0, "wide.png", s.encodePNG(testPicture(600, 300, 255)))
+	key := s.storageKey(f.ID)
+
+	img, content := s.thumbnail(userID, f.ID)
+
+	s.Equal("wide.png", content.Name)
+	s.Equal("image/jpeg", content.ContentType)
+	s.Equal(`"`+key+`-thumb"`, content.ETag)
+	s.Equal(image.Rect(0, 0, 256, 128), img.Bounds())
+	s.Equal("green", colorName(img.At(20, 20)))
+	s.Equal("red", colorName(img.At(20, 108)))
+	s.Equal("blue", colorName(img.At(236, 64)))
+
+	path := filepath.Join(s.thumbDir(), key)
+	past := time.Now().Add(-time.Hour)
+	s.Require().NoError(os.Chtimes(path, past, past))
+	s.thumbnail(userID, f.ID)
+	info, err := os.Stat(path)
+	s.Require().NoError(err)
+	s.WithinDuration(past, info.ModTime(), time.Second)
+}
+
+// A picture with transparency keeps it in a PNG. A small picture keeps its size.
+func (s *FileServiceTestSuite) TestOpenThumbnail_KeepsTransparency() {
+	userID := s.seedUser()
+	f := s.upload(userID, 0, "logo.png", s.encodePNG(testPicture(40, 20, 128)))
+
+	img, content := s.thumbnail(userID, f.ID)
+
+	s.Equal("image/png", content.ContentType)
+	s.Equal(image.Rect(0, 0, 40, 20), img.Bounds())
+	_, _, _, alpha := img.At(35, 10).RGBA()
+	s.InDelta(0x8080, alpha, 0x200)
+}
+
+// A JPEG turns by its EXIF orientation, the same as the browser shows it. The green corner of the picture is at the top
+// left before the turn, so its place tells each of the eight orientations apart.
+func (s *FileServiceTestSuite) TestOpenThumbnail_TurnsByExif() {
+	userID := s.seedUser()
+	wide, tall := image.Rect(0, 0, 60, 30), image.Rect(0, 0, 30, 60)
+	cases := []struct {
+		orientation uint16
+		bounds      image.Rectangle
+		green       image.Point
+	}{
+		{1, wide, image.Pt(5, 5)},
+		{2, wide, image.Pt(55, 5)},
+		{3, wide, image.Pt(55, 25)},
+		{4, wide, image.Pt(5, 25)},
+		{5, tall, image.Pt(5, 5)},
+		{6, tall, image.Pt(25, 5)},
+		{7, tall, image.Pt(25, 55)},
+		{8, tall, image.Pt(5, 55)},
+	}
+	for _, tc := range cases {
+		name := fmt.Sprintf("turn-%d.jpg", tc.orientation)
+		f := s.upload(userID, 0, name, s.encodeJPEG(testPicture(60, 30, 255), tc.orientation))
+
+		img, content := s.thumbnail(userID, f.ID)
+
+		s.Equal("image/jpeg", content.ContentType, name)
+		s.Equal(tc.bounds, img.Bounds(), name)
+		s.Equal("green", colorName(img.At(tc.green.X, tc.green.Y)), name)
+	}
+}
+
+// A folder, a file that is not a picture, a copy that has no bytes yet, a broken picture and a picture over the pixel
+// cap have no thumbnail. Only the two that fail to decode are logged.
+func (s *FileServiceTestSuite) TestOpenThumbnail_NoThumbnail() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	archive := s.createFolder(userID, 0, "Archive")
+	text := s.upload(userID, 0, "notes.txt", "hello")
+	broken := s.upload(userID, 0, "broken.png", "\x89PNG\r\n\x1a\nnot a picture")
+	huge := s.upload(userID, 0, "huge.png", s.hugePNG())
+	picture := s.upload(userID, 0, "picture.png", s.encodePNG(testPicture(4, 4, 255)))
+	s.Require().NoError(svc.Copy(context.Background(), userID, archive.ID, []int64{picture.ID}))
+	copying := s.copiesOf(picture.ID)[0]
+
+	for _, id := range []int64{archive.ID, text.ID, copying, broken.ID, huge.ID} {
+		_, err := svc.OpenThumbnail(context.Background(), userID, id)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("no thumbnail for this file", msg, id)
+	}
+	s.Len(s.logs("a picture has no thumbnail"), 2)
+	for _, id := range []int64{text.ID, broken.ID, huge.ID} {
+		s.NoFileExists(filepath.Join(s.thumbDir(), s.storageKey(id)), id)
+	}
+}
+
+// Another user's picture and a picture in the trash look the same as an unknown id.
+func (s *FileServiceTestSuite) TestOpenThumbnail_NotFound() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	picture := s.encodePNG(testPicture(4, 4, 255))
+	bobPicture := s.upload(bob, 0, "bob.png", picture)
+	trashed := s.upload(alice, 0, "old.png", picture)
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{trashed.ID}))
+
+	for _, id := range []int64{999, bobPicture.ID, trashed.ID} {
+		_, err := svc.OpenThumbnail(context.Background(), alice, id)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(http.StatusNotFound, status, id)
+		s.Equal("item not found", msg)
+	}
+}
+
+func (s *FileServiceTestSuite) TestOpenThumbnail_NoBytes() {
+	userID := s.seedUser()
+	id := s.seedFileWith(userID, "lost.png", "image/png", 1, 0)
+
+	_, err := s.TC.Services.FileService.OpenThumbnail(context.Background(), userID, id)
 
 	status, msg := apperr.Resolve(err)
 	s.Equal(http.StatusNotFound, status)
@@ -3411,6 +3543,26 @@ func (s *FileServiceTestSuite) TestPurge_DeletesRowsAndBytes() {
 	}, s.logs("purged trash groups"))
 }
 
+// Purge removes the thumbnail of a picture with its bytes.
+func (s *FileServiceTestSuite) TestPurge_RemovesThumbnail() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	picture := s.encodePNG(testPicture(4, 4, 255))
+	gone := s.upload(userID, 0, "gone.png", picture)
+	keep := s.upload(userID, 0, "keep.png", picture)
+	s.thumbnail(userID, gone.ID)
+	s.thumbnail(userID, keep.ID)
+	goneKey, keepKey := s.storageKey(gone.ID), s.storageKey(keep.ID)
+	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{gone.ID}))
+	s.workTrashJobs()
+
+	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{gone.ID}))
+	s.workPurgeJobs()
+
+	s.NoFileExists(filepath.Join(s.thumbDir(), goneKey))
+	s.FileExists(filepath.Join(s.thumbDir(), keepKey))
+}
+
 // One bad id undoes the rest. A live item, a row under a deleted folder and an item already marked are bad ids too.
 func (s *FileServiceTestSuite) TestPurge_AllOrNone() {
 	alice := s.seedUserWithEmail("alice@example.com")
@@ -3777,6 +3929,30 @@ func (s *FileServiceTestSuite) TestSweepOrphans_SkipsZipDir() {
 
 	s.Equal([]string{stray}, s.zipFiles())
 	s.Empty(s.logs("removed an orphan file"))
+}
+
+// The sweep removes an old thumbnail whose picture has no row. A live picture's thumbnail and a new one stay.
+func (s *FileServiceTestSuite) TestSweepOrphans_RemovesOldThumbnails() {
+	userID := s.seedUser()
+	f := s.upload(userID, 0, "picture.png", s.encodePNG(testPicture(4, 4, 255)))
+	s.thumbnail(userID, f.ID)
+	live, orphan, fresh := s.storageKey(f.ID), fmt.Sprintf("%032x", 1), fmt.Sprintf("%032x", 2)
+	for _, name := range []string{orphan, fresh} {
+		s.Require().NoError(os.WriteFile(filepath.Join(s.thumbDir(), name), []byte("thumb"), 0o640))
+	}
+	for name, hoursAgo := range map[string]int{live: 25, orphan: 25, fresh: 23} {
+		past := time.Now().Add(-time.Duration(hoursAgo) * time.Hour)
+		s.Require().NoError(os.Chtimes(filepath.Join(s.thumbDir(), name), past, past))
+	}
+
+	s.Require().NoError(s.TC.Services.FileService.SweepOrphans(context.Background()))
+
+	s.NoFileExists(filepath.Join(s.thumbDir(), orphan))
+	s.FileExists(filepath.Join(s.thumbDir(), live))
+	s.FileExists(filepath.Join(s.thumbDir(), fresh))
+	removed := s.logs("removed an orphan thumbnail")
+	s.Require().Len(removed, 1)
+	s.Equal(orphan, removed[0]["name"])
 }
 
 // A ready zip goes 24 hours after it got ready. Any other download goes 24 hours after it was asked for: a failed one,
@@ -4425,6 +4601,85 @@ func (s *FileServiceTestSuite) storedFileExists(key string) bool {
 	}
 	s.Require().NoError(err)
 	return true
+}
+
+func (s *FileServiceTestSuite) thumbDir() string {
+	return filepath.Join(s.TC.UploadDir, utils.ThumbDir)
+}
+
+// thumbnail opens the thumbnail of id and decodes it. The thumbnail dir goes when the test ends, so the next test
+// starts with none.
+func (s *FileServiceTestSuite) thumbnail(userID, id int64) (image.Image, *file.FileContent) {
+	s.T().Cleanup(func() { _ = os.RemoveAll(s.thumbDir()) })
+	content, err := s.TC.Services.FileService.OpenThumbnail(context.Background(), userID, id)
+	s.Require().NoError(err)
+	defer func() { _ = content.Content.Close() }()
+	img, _, err := image.Decode(content.Content)
+	s.Require().NoError(err)
+	return img, content
+}
+
+func (s *FileServiceTestSuite) encodePNG(img image.Image) string {
+	var buf bytes.Buffer
+	s.Require().NoError(png.Encode(&buf, img))
+	return buf.String()
+}
+
+// encodeJPEG encodes img as a JPEG with an EXIF segment that holds only the orientation, the way a camera writes it.
+func (s *FileServiceTestSuite) encodeJPEG(img image.Image, orientation uint16) string {
+	var buf bytes.Buffer
+	s.Require().NoError(jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}))
+	// A big-endian TIFF header, then a directory with one entry: the orientation tag (0x0112) as a SHORT (3).
+	tiff := []byte{'M', 'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1}
+	tiff = binary.BigEndian.AppendUint16(tiff, orientation)
+	tiff = append(tiff, 0, 0, 0, 0, 0, 0)
+	exif := append([]byte("Exif\x00\x00"), tiff...)
+	segment := binary.BigEndian.AppendUint16([]byte{0xFF, 0xE1}, uint16(len(exif)+2))
+	b := buf.Bytes()
+	return string(b[:2]) + string(segment) + string(exif) + string(b[2:])
+}
+
+// hugePNG is a 1 by 1 PNG whose header says 10000 by 10000, so it is over the pixel cap before it decodes.
+func (s *FileServiceTestSuite) hugePNG() string {
+	b := []byte(s.encodePNG(testPicture(1, 1, 255)))
+	// The IHDR chunk starts at byte 8: the length, the type, the width, the height, 5 more bytes, then the CRC of the
+	// type and the data.
+	binary.BigEndian.PutUint32(b[16:], 10000)
+	binary.BigEndian.PutUint32(b[20:], 10000)
+	binary.BigEndian.PutUint32(b[29:], crc32.ChecksumIEEE(b[12:29]))
+	return string(b)
+}
+
+// testPicture is w by h with the given alpha: the left half red with a green top left quarter, and the right half blue.
+func testPicture(w, h int, alpha uint8) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			c := color.NRGBA{B: 255, A: alpha}
+			switch {
+			case x < w/2 && y < h/2:
+				c = color.NRGBA{G: 255, A: alpha}
+			case x < w/2:
+				c = color.NRGBA{R: 255, A: alpha}
+			}
+			img.SetNRGBA(x, y, c)
+		}
+	}
+	return img
+}
+
+// colorName names the pure colors of testPicture, so a failed check shows which one it got.
+func colorName(c color.Color) string {
+	r, g, b, _ := c.RGBA()
+	switch {
+	case r > 0xC000 && g < 0x4000 && b < 0x4000:
+		return "red"
+	case g > 0xC000 && r < 0x4000 && b < 0x4000:
+		return "green"
+	case b > 0xC000 && r < 0x4000 && g < 0x4000:
+		return "blue"
+	}
+	return fmt.Sprintf("other (%x, %x, %x)", r, g, b)
 }
 
 // markInGroup marks a row the way a batch of the trash job does. It stands for a job that stopped part way.

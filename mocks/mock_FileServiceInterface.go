@@ -1088,6 +1088,80 @@ func (_c *MockFileServiceInterface_OpenFile_Call) RunAndReturn(run func(ctx cont
 	return _c
 }
 
+// OpenThumbnail provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) OpenThumbnail(ctx context.Context, userID int64, id int64) (*file.FileContent, error) {
+	ret := _mock.Called(ctx, userID, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenThumbnail")
+	}
+
+	var r0 *file.FileContent
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) (*file.FileContent, error)); ok {
+		return returnFunc(ctx, userID, id)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64) *file.FileContent); ok {
+		r0 = returnFunc(ctx, userID, id)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.FileContent)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64) error); ok {
+		r1 = returnFunc(ctx, userID, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_OpenThumbnail_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenThumbnail'
+type MockFileServiceInterface_OpenThumbnail_Call struct {
+	*mock.Call
+}
+
+// OpenThumbnail is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - id int64
+func (_e *MockFileServiceInterface_Expecter) OpenThumbnail(ctx any, userID any, id any) *MockFileServiceInterface_OpenThumbnail_Call {
+	return &MockFileServiceInterface_OpenThumbnail_Call{Call: _e.mock.On("OpenThumbnail", ctx, userID, id)}
+}
+
+func (_c *MockFileServiceInterface_OpenThumbnail_Call) Run(run func(ctx context.Context, userID int64, id int64)) *MockFileServiceInterface_OpenThumbnail_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenThumbnail_Call) Return(fileContent *file.FileContent, err error) *MockFileServiceInterface_OpenThumbnail_Call {
+	_c.Call.Return(fileContent, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_OpenThumbnail_Call) RunAndReturn(run func(ctx context.Context, userID int64, id int64) (*file.FileContent, error)) *MockFileServiceInterface_OpenThumbnail_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OpenZip provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) OpenZip(ctx context.Context, userID int64, id int64) (*file.FileContent, error) {
 	ret := _mock.Called(ctx, userID, id)

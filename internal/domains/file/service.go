@@ -78,6 +78,21 @@ const zipSweepBatchSize = 1000
 // downloadListSize is the rows the downloads list shows. The sweep keeps the list to one day, so it has no pages.
 const downloadListSize = 50
 
+// thumbnailEdge is the long edge of a thumbnail in pixels. It is sharp in the list's icon box on a 2x screen, with room
+// for a bigger view later.
+const thumbnailEdge = 256
+
+// thumbnailMaxPixels caps the pictures that get a thumbnail. A decoded picture takes 2 to 8 bytes a pixel.
+const thumbnailMaxPixels = 50_000_000
+
+// thumbnailSlots caps the thumbnails made at once, so a page full of new photos cannot take all memory or CPU.
+const thumbnailSlots = 2
+
+// thumbnailTypes are the sniffed types that get a thumbnail. The client's isPicture uses the same list.
+var thumbnailTypes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/bmp": true,
+}
+
 var (
 	errEmptyFile      = apperr.New(apperr.KindValidation, "file is empty")
 	errFolderNotFound = apperr.New(apperr.KindNotFound, "folder not found")
@@ -88,6 +103,7 @@ var (
 	errSameFolder     = apperr.New(apperr.KindValidation, "the items are already in this folder")
 	errFolderDownload = apperr.New(apperr.KindValidation, "a folder downloads as a zip")
 	errNoBytes        = apperr.New(apperr.KindNotFound, "file not found on disk")
+	errNoThumbnail    = apperr.New(apperr.KindNotFound, "no thumbnail for this file")
 	errDownloadGone   = apperr.New(apperr.KindNotFound, "download not found")
 	errTooManyZips    = apperr.New(apperr.KindConflict, "wait for your other downloads to finish")
 	errZipNotReady    = apperr.New(apperr.KindConflict, "the zip is not ready yet")
@@ -116,6 +132,7 @@ type FileServiceInterface interface {
 	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
 	ListFavorites(ctx context.Context, userID int64, q FavoriteQuery) (*utils.Page[*Favorite], error)
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
+	OpenThumbnail(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
 	ListDownloads(ctx context.Context, userID int64) ([]*Download, error)
 	RemoveDownload(ctx context.Context, userID, id int64) error
@@ -137,6 +154,8 @@ type FileService struct {
 	cfg      config.UploadConfig
 	download config.DownloadConfig
 	logger   *zap.Logger
+	// thumbs holds one token for each thumbnail being made.
+	thumbs chan struct{}
 }
 
 func NewFileService(
@@ -154,6 +173,7 @@ func NewFileService(
 		cfg:      cfg,
 		download: download,
 		logger:   logger,
+		thumbs:   make(chan struct{}, thumbnailSlots),
 	}
 }
 
@@ -620,6 +640,67 @@ func (s *FileService) OpenFile(ctx context.Context, userID, id int64) (*FileCont
 		ContentType: dbFile.ContentType,
 		ModTime:     dbFile.CreatedAt,
 		ETag:        `"` + dbFile.StorageKey.String + `"`,
+		Content:     f,
+	}, nil
+}
+
+// OpenThumbnail opens the thumbnail of one live picture of the user. The first request makes it and keeps it under the
+// picture's storage key. The bytes under a key never change, so the thumbnail never goes stale. A file that is not a
+// picture, or one that is too big or does not decode, has no thumbnail.
+func (s *FileService) OpenThumbnail(ctx context.Context, userID, id int64) (*FileContent, error) {
+	dbFile, err := s.queries.GetFile(ctx, database.GetFileParams{ID: id, UserID: userID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errItemNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	mediaType, _, _ := strings.Cut(dbFile.ContentType, ";")
+	if !dbFile.StorageKey.Valid || dbFile.CopyRequestedAt.Valid || !thumbnailTypes[strings.TrimSpace(mediaType)] {
+		return nil, errNoThumbnail
+	}
+
+	key := dbFile.StorageKey.String
+	thumbDir := filepath.Join(s.cfg.Dir, utils.ThumbDir)
+	f, err := utils.OpenStoredFile(thumbDir, key)
+	// The thumbnail dir is made with the first thumbnail, so it can be missing too.
+	if errors.Is(err, utils.ErrNoStoredFile) || errors.Is(err, fs.ErrNotExist) {
+		// Make it once a slot is free. The deferred release frees the slot even if a decoder panics.
+		err = func() error {
+			select {
+			case s.thumbs <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			defer func() { <-s.thumbs }()
+			return utils.MakeThumbnail(s.cfg.Dir, key, thumbnailEdge, thumbnailMaxPixels)
+		}()
+		if err == nil {
+			f, err = utils.OpenStoredFile(thumbDir, key)
+		}
+	}
+	if errors.Is(err, utils.ErrNoStoredFile) {
+		s.logger.Warn("a file has no bytes on disk", zap.Int64("user_id", userID), zap.Int64("file_id", id))
+		return nil, errNoBytes
+	}
+	if errors.Is(err, utils.ErrNoThumbnail) {
+		s.logger.Info("a picture has no thumbnail", zap.Int64("user_id", userID), zap.Int64("file_id", id), zap.Error(err))
+		return nil, errNoThumbnail
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	contentType, err := utils.SniffStoredFile(thumbDir, key)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &FileContent{
+		Name:        dbFile.Name,
+		ContentType: contentType,
+		ModTime:     dbFile.CreatedAt,
+		ETag:        `"` + key + `-thumb"`,
 		Content:     f,
 	}, nil
 }
@@ -1322,6 +1403,7 @@ func (s *FileService) SweepUploads(ctx context.Context) error {
 }
 
 // SweepOrphans removes the files in the upload dir that no row points to, such as the bytes of an upload that never got its row.
+// It does the same in the thumbnail dir, where each name is the storage key of its picture.
 // If no row has bytes, it removes nothing, because the app can point at a new, empty database by mistake.
 func (s *FileService) SweepOrphans(ctx context.Context) error {
 	hasFiles, err := s.queries.HasStoredFiles(ctx)
@@ -1334,26 +1416,43 @@ func (s *FileService) SweepOrphans(ctx context.Context) error {
 	}
 
 	cutoff := time.Now().Add(-orphanGraceHours * time.Hour)
-	return utils.ListStoredFiles(s.cfg.Dir, cutoff, orphanBatchSize, func(files []utils.StoredFile) error {
-		byName := make(map[string]utils.StoredFile, len(files))
-		names := make([]string, len(files))
-		for i, f := range files {
-			byName[f.Name] = f
-			names[i] = f.Name
+	// The thumbnail dir is made with the first thumbnail, so it can be missing. The upload dir always exists.
+	sweeps := []struct {
+		dir, what    string
+		mayBeMissing bool
+	}{
+		{s.cfg.Dir, "file", false},
+		{filepath.Join(s.cfg.Dir, utils.ThumbDir), "thumbnail", true},
+	}
+	for _, sweep := range sweeps {
+		err := utils.ListStoredFiles(sweep.dir, cutoff, orphanBatchSize, func(files []utils.StoredFile) error {
+			byName := make(map[string]utils.StoredFile, len(files))
+			names := make([]string, len(files))
+			for i, f := range files {
+				byName[f.Name] = f
+				names[i] = f.Name
+			}
+			orphans, err := s.queries.ListOrphanKeys(ctx, names)
+			if err != nil {
+				return err
+			}
+			for _, name := range orphans {
+				if err := utils.RemoveStoredFile(sweep.dir, name); err != nil {
+					return fmt.Errorf("failed to remove orphan %s: %w", sweep.what, err)
+				}
+				s.logger.Info("removed an orphan "+sweep.what, zap.String("name", name),
+					zap.Int64("size_bytes", byName[name].Size), zap.Time("modified_at", byName[name].ModTime))
+			}
+			return nil
+		})
+		if sweep.mayBeMissing && errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
-		orphans, err := s.queries.ListOrphanKeys(ctx, names)
 		if err != nil {
 			return err
 		}
-		for _, name := range orphans {
-			if err := utils.RemoveStoredFile(s.cfg.Dir, name); err != nil {
-				return fmt.Errorf("failed to remove orphan file: %w", err)
-			}
-			s.logger.Info("removed an orphan file", zap.String("name", name),
-				zap.Int64("size_bytes", byName[name].Size), zap.Time("modified_at", byName[name].ModTime))
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery) (*utils.Page[*TrashedFile], error) {
@@ -1523,10 +1622,11 @@ func (s *FileService) requestExpiredPurges(ctx context.Context, userID int64) er
 }
 
 // deleteGroupRows deletes the groups from the bottom up, one batch of rows with nothing under them at a time.
-// It removes the bytes before the rows, so a crash leaves rows the next run deletes, never bytes with no row.
-// It returns the count of rows it deleted and of files it removed from disk.
+// It removes the bytes and their thumbnails before the rows, so a crash leaves rows the next run deletes, never bytes
+// with no row. It returns the count of rows it deleted and of files it removed from disk.
 func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs []int64) (int64, int64, error) {
 	var rows, files int64
+	thumbDir := filepath.Join(s.cfg.Dir, utils.ThumbDir)
 	for {
 		leaves, err := s.queries.ListPurgeLeaves(ctx, database.ListPurgeLeavesParams{
 			UserID:    userID,
@@ -1545,6 +1645,11 @@ func (s *FileService) deleteGroupRows(ctx context.Context, userID int64, rootIDs
 			}
 			if err := utils.RemoveStoredFile(s.cfg.Dir, leaf.StorageKey.String); err != nil {
 				return rows, files, fmt.Errorf("failed to remove stored file: %w", err)
+			}
+			// No thumbnail dir means no thumbnail was ever made.
+			err := utils.RemoveStoredFile(thumbDir, leaf.StorageKey.String)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return rows, files, fmt.Errorf("failed to remove thumbnail: %w", err)
 			}
 			files++
 		}

@@ -5,10 +5,13 @@ import { useFileStore } from "../../../pkg/stores/file_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { dirLabel, folderRoute, joinDir, namesDir } from "../../../pkg/utils/folder_route.ts";
-import { itemView } from "../../../pkg/utils/item_view.ts";
+import { isPicture, itemView } from "../../../pkg/utils/item_view.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
+import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import DetailsDialog from "./DetailsDialog.vue";
+import ItemIcon from "./ItemIcon.vue";
+import PictureViewer from "./PictureViewer.vue";
 import type { DataTablePageEvent, DataTableRowClickEvent, DataTableSortEvent } from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
@@ -16,6 +19,7 @@ import type { Favorite, SortField } from "../models.ts";
 
 const MENU_ITEMS: MenuItem[] = [
     { label: "Open", icon: "pi pi-folder-open", command: openMenuTarget, visible: oneFolderTarget },
+    { label: "Open", icon: "pi pi-image", command: openMenuTarget, visible: onePictureTarget },
     { label: "Show in folder", icon: "pi pi-directions", command: showMenuTarget, disabled: notOneTarget },
     { label: "Details", icon: "pi pi-info-circle", command: openDetails, disabled: notOneTarget },
     { separator: true },
@@ -25,6 +29,7 @@ const MENU_ITEMS: MenuItem[] = [
 const fileStore = useFileStore();
 const toastStore = useToastStore();
 const router = useRouter();
+const { viewRoute } = useViewRoute();
 
 const rowOptions = [25, 50, 100];
 
@@ -90,8 +95,11 @@ function parentRoute(item: Favorite): RouteLocationRaw {
     return folderRoute(namesDir(item.path));
 }
 
-function folderOpenRoute(item: Favorite): RouteLocationRaw {
-    return folderRoute(joinDir(namesDir(item.path), item.name));
+// A folder opens in Files, and a picture opens in the viewer. Other files do not open.
+function openRoute(item: Favorite): RouteLocationRaw | null {
+    if (item.is_folder) return folderRoute(joinDir(namesDir(item.path), item.name));
+    if (isPicture(item)) return viewRoute(item.id);
+    return null;
 }
 
 function rowClass(item: Favorite): string {
@@ -99,12 +107,13 @@ function rowClass(item: Favorite): string {
     return item.is_hidden ? `${row} opacity-60` : row;
 }
 
-// The whole folder row opens it. A click on a link already navigates by itself.
+// The whole row of a folder or a picture opens it. A click on a link already navigates by itself.
 async function onRowClick(event: DataTableRowClickEvent<Favorite>): Promise<void> {
-    if (!event.data.is_folder) return;
+    const to = openRoute(event.data);
+    if (to === null) return;
     const target = event.originalEvent.target;
     if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
-    await router.push(folderOpenRoute(event.data));
+    await router.push(to);
 }
 
 function notOneTarget(): boolean {
@@ -115,10 +124,14 @@ function oneFolderTarget(): boolean {
     return menuTargets.value.length === 1 && menuTargets.value[0].is_folder;
 }
 
+function onePictureTarget(): boolean {
+    return menuTargets.value.length === 1 && isPicture(menuTargets.value[0]);
+}
+
 // The target is read before the first await, because the menu clears its target when it hides.
 async function openMenuTarget(): Promise<void> {
-    const item = menuTarget.value;
-    if (item) await router.push(folderOpenRoute(item));
+    const to = menuTarget.value ? openRoute(menuTarget.value) : null;
+    if (to) await router.push(to);
 }
 
 async function showMenuTarget(): Promise<void> {
@@ -235,17 +248,12 @@ onMounted(getData);
             <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
                     <div class="flex min-w-0 items-center gap-3">
-                        <span
-                            class="grid size-9 shrink-0 place-items-center rounded-lg"
-                            :class="itemView(data).iconBox"
-                        >
-                            <i :class="itemView(data).icon" />
-                        </span>
+                        <ItemIcon :item="data" />
                         <div class="flex min-w-0 flex-col">
                             <div class="flex min-w-0 items-center gap-2">
                                 <router-link
-                                    v-if="data.is_folder"
-                                    :to="folderOpenRoute(data)"
+                                    v-if="openRoute(data)"
+                                    :to="openRoute(data)!"
                                     class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                     :title="data.name"
                                 >
@@ -332,5 +340,6 @@ onMounted(getData);
         </ContextMenu>
 
         <DetailsDialog v-model:visible="detailsVisible" :item="detailsTarget" :dir="detailsDir" />
+        <PictureViewer :items="items" />
     </div>
 </template>

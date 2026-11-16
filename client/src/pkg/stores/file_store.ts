@@ -95,6 +95,11 @@ export const useFileStore = defineStore("file", {
             return apiClient.url(`${this.apiPrefix}/${id}/download`);
         },
 
+        // A small copy of a picture for the list. The server makes it on the first request and keeps it.
+        thumbnailUrl(id: number): string {
+            return apiClient.url(`${this.apiPrefix}/${id}/thumbnail`);
+        },
+
         // The answer comes once the zip job is in place. The download store waits for the zip.
         async requestZip(form: ItemsForm): Promise<DownloadResponse> {
             const response = await apiClient.post<DownloadResponse>(this.downloadPrefix, form);

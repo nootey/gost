@@ -62,6 +62,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files/{id}/activity", suite.handler.ListActivity)
 	suite.router.Patch("/files/{id}", suite.handler.Rename)
 	suite.router.Get("/files/{id}/download", suite.handler.Download)
+	suite.router.Get("/files/{id}/thumbnail", suite.handler.Thumbnail)
 	suite.router.Post("/files/move", suite.handler.Move)
 	suite.router.Post("/files/copy", suite.handler.Copy)
 	suite.router.Post("/files/hide", suite.handler.Hide)
@@ -793,6 +794,49 @@ func (suite *FileHandlerTestSuite) TestDownload_ServiceError() {
 	suite.Equal(http.StatusBadRequest, w.Code)
 	suite.Equal("a folder downloads as a zip", suite.errorMessage(w))
 	suite.Empty(w.Header().Get("Content-Disposition"))
+}
+
+// The thumbnail goes through the same path as a download: the owner check, the ETag and the cache headers.
+func (suite *FileHandlerTestSuite) TestThumbnail_Success() {
+	content := &trackedContent{Reader: bytes.NewReader([]byte("thumb bytes"))}
+	suite.mockService.EXPECT().
+		OpenThumbnail(mock.Anything, testUserID, int64(5)).
+		Return(&file.FileContent{
+			Name:        "beach.png",
+			ContentType: "image/jpeg",
+			ModTime:     time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC),
+			ETag:        `"abc123-thumb"`,
+			Content:     content,
+		}, nil).
+		Once()
+
+	w := suite.getPath("/files/5/thumbnail", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.Equal("thumb bytes", w.Body.String())
+	suite.Equal("image/jpeg", w.Header().Get("Content-Type"))
+	suite.Equal("nosniff", w.Header().Get("X-Content-Type-Options"))
+	suite.Equal(`"abc123-thumb"`, w.Header().Get("ETag"))
+	suite.Equal("private, no-cache", w.Header().Get("Cache-Control"))
+	suite.True(content.closed)
+}
+
+func (suite *FileHandlerTestSuite) TestThumbnail_NoThumbnail() {
+	suite.mockService.EXPECT().
+		OpenThumbnail(mock.Anything, testUserID, int64(5)).
+		Return(nil, apperr.New(apperr.KindNotFound, "no thumbnail for this file")).
+		Once()
+
+	w := suite.getPath("/files/5/thumbnail", true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("no thumbnail for this file", suite.errorMessage(w))
+}
+
+func (suite *FileHandlerTestSuite) TestThumbnail_Unauthenticated() {
+	w := suite.getPath("/files/5/thumbnail", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
 }
 
 func (suite *FileHandlerTestSuite) getPath(path string, authenticated bool) *httptest.ResponseRecorder {

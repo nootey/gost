@@ -8,11 +8,14 @@ import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { startDownload } from "../../../pkg/utils/download_link.ts";
 import { folderRoute, joinDir } from "../../../pkg/utils/folder_route.ts";
-import { itemView } from "../../../pkg/utils/item_view.ts";
+import { isPicture, itemView } from "../../../pkg/utils/item_view.ts";
 import { useClipboardKeys } from "../../../pkg/utils/use_clipboard_keys.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
+import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import DetailsDialog from "./DetailsDialog.vue";
+import ItemIcon from "./ItemIcon.vue";
+import PictureViewer from "./PictureViewer.vue";
 import RenameDialog from "./RenameDialog.vue";
 import type {
     DataTablePageEvent,
@@ -60,6 +63,7 @@ const clipboardStore = useClipboardStore();
 const downloadStore = useDownloadStore();
 const toastStore = useToastStore();
 const router = useRouter();
+const { viewRoute } = useViewRoute();
 
 const PASTE_ACTIONS: Record<ClipboardMode, (form: PasteForm) => Promise<SuccessResponse>> = {
     cut: (form) => fileStore.move(form),
@@ -163,8 +167,11 @@ async function onFolderChange(): Promise<void> {
     await refresh();
 }
 
-function childRoute(folder: StoredFile): RouteLocationRaw {
-    return folderRoute(joinDir(props.dir, folder.name));
+// A folder opens in the list, and a picture opens in the viewer. Other files and copying items do not open.
+function openRoute(item: StoredFile): RouteLocationRaw | null {
+    if (item.is_folder && !item.is_copying) return folderRoute(joinDir(props.dir, item.name));
+    if (isPicture(item)) return viewRoute(item.id);
+    return null;
 }
 
 function rowClass(item: StoredFile): string {
@@ -192,12 +199,13 @@ function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
     showMenu(event);
 }
 
-// The whole folder row opens it. A click on the name link already navigates by itself. A copying folder does not open.
+// The whole row of a folder or a picture opens it. A click on the name link already navigates by itself.
 async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<void> {
-    if (!event.data.is_folder || event.data.is_copying) return;
+    const to = openRoute(event.data);
+    if (to === null) return;
     const target = event.originalEvent.target;
     if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
-    await router.push(childRoute(event.data));
+    await router.push(to);
 }
 
 function notOneTarget(): boolean {
@@ -463,17 +471,12 @@ defineExpose({ refresh });
             <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
                     <div class="flex min-w-0 items-center gap-3">
-                        <span
-                            class="grid size-9 shrink-0 place-items-center rounded-lg"
-                            :class="itemView(data).iconBox"
-                        >
-                            <i :class="itemView(data).icon" />
-                        </span>
+                        <ItemIcon :item="data" />
                         <div class="flex min-w-0 flex-col">
                             <div class="flex min-w-0 items-center gap-2">
                                 <router-link
-                                    v-if="data.is_folder && !data.is_copying"
-                                    :to="childRoute(data)"
+                                    v-if="openRoute(data)"
+                                    :to="openRoute(data)!"
                                     class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                     :title="data.name"
                                 >
@@ -572,5 +575,6 @@ defineExpose({ refresh });
 
         <RenameDialog v-model:visible="renameVisible" :item="renameTarget" @renamed="getData" />
         <DetailsDialog v-model:visible="detailsVisible" :item="detailsTarget" :dir="dir" />
+        <PictureViewer :items="files" />
     </div>
 </template>
