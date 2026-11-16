@@ -2,10 +2,11 @@
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { dirLabel, folderRoute, joinDir, namesDir } from "../../../pkg/utils/folder_route.ts";
-import { isViewable, itemView } from "../../../pkg/utils/item_view.ts";
+import { isViewable, itemView, shownName } from "../../../pkg/utils/item_view.ts";
 import { ORDER_BY_SORT_ORDER, useCursorPager } from "../../../pkg/utils/use_cursor_pager.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
@@ -28,6 +29,7 @@ const MENU_ITEMS: MenuItem[] = [
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 const router = useRouter();
 const { viewRoute } = useViewRoute();
 
@@ -38,7 +40,8 @@ const loading = ref<boolean>(true);
 const { pageSize, nextCursor, cursor, first, total, turn, reset } = useCursorPager(rowOptions[0]);
 const sortField = ref<SortField>("name");
 const sortOrder = ref<number>(1);
-const showHidden = ref<boolean>(false);
+// The "Show hidden files" setting sets the default.
+const showHidden = ref<boolean>(settingsStore.settings.show_hidden);
 
 const selection = ref<Favorite[]>([]);
 const { menuTarget, menuTargets, showMenu } = useRowMenu(selection, "rowMenu");
@@ -62,6 +65,7 @@ async function getData(): Promise<void> {
             sort: sortField.value,
             order: ORDER_BY_SORT_ORDER[sortOrder.value],
             show_hidden: showHidden.value,
+            folders_first: settingsStore.settings.sort_folders_first,
         });
         if (request !== latestRequest) return;
         items.value = response.data;
@@ -246,10 +250,10 @@ onMounted(getData);
                                     class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                     :title="data.name"
                                 >
-                                    {{ data.name }}
+                                    {{ shownName(data, settingsStore.settings.show_extensions) }}
                                 </router-link>
                                 <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
-                                    {{ data.name }}
+                                    {{ shownName(data, settingsStore.settings.show_extensions) }}
                                 </span>
                                 <i
                                     v-if="data.is_hidden"

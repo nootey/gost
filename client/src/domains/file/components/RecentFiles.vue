@@ -2,10 +2,11 @@
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { dirLabel, folderRoute, namesDir } from "../../../pkg/utils/folder_route.ts";
-import { isViewable, itemView } from "../../../pkg/utils/item_view.ts";
+import { isViewable, itemView, shownName } from "../../../pkg/utils/item_view.ts";
 import { useRowMenu } from "../../../pkg/utils/use_row_menu.ts";
 import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import DetailsDialog from "./DetailsDialog.vue";
@@ -23,6 +24,7 @@ const MENU_ITEMS: MenuItem[] = [
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 const router = useRouter();
 const { viewRoute } = useViewRoute();
 
@@ -113,10 +115,10 @@ onMounted(getData);
                                 class="truncate rounded-sm text-sm font-medium text-fg no-underline hover:underline"
                                 :title="data.name"
                             >
-                                {{ data.name }}
+                                {{ shownName(data, settingsStore.settings.show_extensions) }}
                             </router-link>
                             <span v-else class="truncate text-sm font-medium text-fg" :title="data.name">
-                                {{ data.name }}
+                                {{ shownName(data, settingsStore.settings.show_extensions) }}
                             </span>
                             <router-link
                                 :to="parentRoute(data)"

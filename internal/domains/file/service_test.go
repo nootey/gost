@@ -96,7 +96,7 @@ func (s *FileServiceTestSuite) TestList_Pages() {
 		s.seedFile(userID, fmt.Sprintf("file-%d.txt", i))
 	}
 
-	pages := s.walkPages(userID, file.ListQuery{PageSize: 2, Sort: file.SortByName})
+	pages := s.walkPages(userID, file.ListQuery{PageSize: 2, Sort: file.SortByName, FoldersFirst: true})
 
 	s.Equal([][]string{{"file-1.txt", "file-2.txt"}, {"file-3.txt", "file-4.txt"}, {"file-5.txt"}}, pages)
 }
@@ -120,13 +120,13 @@ func (s *FileServiceTestSuite) TestList_WalkEverySort() {
 	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate, file.SortByModified} {
 		var full [2][]string
 		for i, desc := range []bool{false, true} {
-			result, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 100, Sort: sort, Desc: desc})
+			result, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 100, Sort: sort, Desc: desc, FoldersFirst: true})
 			s.Require().NoError(err)
 			s.Nil(result.NextCursor)
 			full[i] = fileNames(result.Data)
 
 			for _, pageSize := range []int{2, 3} {
-				pages := s.walkPages(userID, file.ListQuery{PageSize: pageSize, Sort: sort, Desc: desc})
+				pages := s.walkPages(userID, file.ListQuery{PageSize: pageSize, Sort: sort, Desc: desc, FoldersFirst: true})
 
 				s.Equal(full[i], slices.Concat(pages...), "%s desc=%t page size %d", sort, desc, pageSize)
 				for _, page := range pages[:len(pages)-1] {
@@ -185,7 +185,7 @@ func (s *FileServiceTestSuite) TestList_BadCursor() {
 	s.createFolder(userID, 0, "Docs")
 	s.seedFile(userID, "a.txt")
 
-	first, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 1, Sort: file.SortByName})
+	first, err := svc.List(context.Background(), userID, file.ListQuery{PageSize: 1, Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Require().NotNil(first.NextCursor)
 	byName := *first.NextCursor
@@ -209,7 +209,7 @@ func (s *FileServiceTestSuite) TestList_BadCursor() {
 		{"nul byte in a name", cursorOf(`{"s":"name","v":["a\u0000","1"]}`), file.SortByName, false},
 	}
 	for _, tc := range cases {
-		_, err := svc.List(context.Background(), userID, file.ListQuery{Cursor: tc.cursor, Sort: tc.sort, Desc: tc.desc})
+		_, err := svc.List(context.Background(), userID, file.ListQuery{Cursor: tc.cursor, Sort: tc.sort, Desc: tc.desc, FoldersFirst: true})
 
 		status, msg := apperr.Resolve(err)
 		s.Equal(http.StatusBadRequest, status, tc.label)
@@ -258,11 +258,11 @@ func (s *FileServiceTestSuite) TestList_FolderSizes() {
 	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{docs.ID}))
 
 	for _, label := range []string{"before the trash job", "after the trash job"} {
-		atRoot, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByName})
+		atRoot, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByName, FoldersFirst: true})
 		s.Require().NoError(err)
 		s.Equal(map[string]int64{"Docs": 7, "Empty": 0, "root.txt": 1}, fileSizes(atRoot.Data), label)
 
-		inDocs, err := svc.List(context.Background(), userID, file.ListQuery{ParentID: docs.ID, Sort: file.SortByName})
+		inDocs, err := svc.List(context.Background(), userID, file.ListQuery{ParentID: docs.ID, Sort: file.SortByName, FoldersFirst: true})
 		s.Require().NoError(err)
 		s.Equal(map[string]int64{"Work": 3, "a.txt": 4}, fileSizes(inDocs.Data), label)
 
@@ -270,7 +270,7 @@ func (s *FileServiceTestSuite) TestList_FolderSizes() {
 		s.Require().NoError(err)
 		s.Equal(int64(7), details.SizeBytes, label)
 
-		favorites, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName})
+		favorites, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true})
 		s.Require().NoError(err)
 		s.Require().Len(favorites.Data, 1)
 		s.Equal(int64(7), favorites.Data[0].SizeBytes, label)
@@ -294,9 +294,9 @@ func (s *FileServiceTestSuite) TestList_SortByModified() {
 	_, err = svc.Rename(context.Background(), userID, x, "x2.txt")
 	s.Require().NoError(err)
 
-	asc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified})
+	asc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified, FoldersFirst: true})
 	s.Require().NoError(err)
-	desc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified, Desc: true})
+	desc, err := svc.List(context.Background(), userID, file.ListQuery{Sort: file.SortByModified, Desc: true, FoldersFirst: true})
 	s.Require().NoError(err)
 
 	s.Equal([]string{"B", "A2", "y.txt", "x2.txt"}, fileNames(asc.Data))
@@ -802,6 +802,90 @@ func (s *FileServiceTestSuite) TestList_FoldersFirst() {
 	s.Equal([]string{"A", "B", "y.txt", "z.txt"}, fileNames(result.Data))
 }
 
+// With the setting off, the folders sort among the files, in one part.
+func (s *FileServiceTestSuite) TestList_FoldersAmongFiles() {
+	userID := s.seedUser()
+	s.seedFile(userID, "z.txt")
+	s.createFolder(userID, 0, "B")
+	s.seedFile(userID, "c.txt")
+	s.createFolder(userID, 0, "y")
+
+	for _, desc := range []bool{false, true} {
+		want := []string{"B", "c.txt", "y", "z.txt"}
+		if desc {
+			slices.Reverse(want)
+		}
+		q := file.ListQuery{Sort: file.SortByName, Desc: desc}
+
+		result, err := s.TC.Services.FileService.List(context.Background(), userID, q)
+		s.Require().NoError(err)
+		s.Equal(want, fileNames(result.Data), "desc=%t", desc)
+
+		q.PageSize = 1
+		s.Equal(want, slices.Concat(s.walkPages(userID, q)...), "desc=%t", desc)
+	}
+}
+
+// Favorites first splits the list before folders first: favorite folders, favorite files, other folders, other files.
+// A descending sort reverses each part, not the order of the parts. Page breaks fall inside and between the parts.
+func (s *FileServiceTestSuite) TestList_FavoritesFirst() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	s.createFolder(userID, 0, "alpha")
+	s.createFolder(userID, 0, "Beta")
+	gamma := s.createFolder(userID, 0, "Gamma")
+	s.seedFile(userID, "d.txt")
+	b := s.seedFile(userID, "b.txt")
+	c := s.seedFile(userID, "c.txt")
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{gamma.ID, b, c}))
+
+	cases := []struct {
+		foldersFirst bool
+		desc         bool
+		want         []string
+	}{
+		{true, false, []string{"Gamma", "b.txt", "c.txt", "alpha", "Beta", "d.txt"}},
+		{true, true, []string{"Gamma", "c.txt", "b.txt", "Beta", "alpha", "d.txt"}},
+		{false, false, []string{"b.txt", "c.txt", "Gamma", "alpha", "Beta", "d.txt"}},
+		{false, true, []string{"Gamma", "c.txt", "b.txt", "d.txt", "Beta", "alpha"}},
+	}
+	for _, tc := range cases {
+		q := file.ListQuery{Sort: file.SortByName, Desc: tc.desc, FavoritesFirst: true, FoldersFirst: tc.foldersFirst}
+
+		result, err := svc.List(context.Background(), userID, q)
+		s.Require().NoError(err)
+		s.Equal(tc.want, fileNames(result.Data), "folders first %t desc=%t", tc.foldersFirst, tc.desc)
+
+		for _, pageSize := range []int{1, 2, 4} {
+			q.PageSize = pageSize
+			pages := s.walkPages(userID, q)
+			s.Equal(tc.want, slices.Concat(pages...), "folders first %t desc=%t page size %d", tc.foldersFirst, tc.desc, pageSize)
+		}
+	}
+}
+
+// The favorites and the trash take the folders first setting too.
+func (s *FileServiceTestSuite) TestListFavoritesAndTrash_FoldersAmongFiles() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+	ids := []int64{
+		s.seedFile(userID, "z.txt"),
+		s.createFolder(userID, 0, "B").ID,
+		s.seedFile(userID, "c.txt"),
+		s.createFolder(userID, 0, "y").ID,
+	}
+	s.Require().NoError(svc.AddFavorites(context.Background(), userID, ids))
+
+	favorites, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Equal([]string{"B", "c.txt", "y", "z.txt"}, favoriteNames(favorites.Data))
+
+	s.Require().NoError(svc.Trash(context.Background(), userID, ids))
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByName})
+	s.Require().NoError(err)
+	s.Equal([]string{"B", "c.txt", "y", "z.txt"}, trashNames(trash.Data))
+}
+
 // Folder names and file names differ in case, so a byte-order sort would give another order.
 // Folders tie on size and type, and a descending sort reverses the tie too.
 func (s *FileServiceTestSuite) TestList_SortByEachColumn() {
@@ -828,7 +912,7 @@ func (s *FileServiceTestSuite) TestList_SortByEachColumn() {
 	}
 	for _, tc := range cases {
 		result, err := s.TC.Services.FileService.List(context.Background(), userID,
-			file.ListQuery{PageSize: 10, Sort: tc.sort, Desc: tc.desc})
+			file.ListQuery{PageSize: 10, Sort: tc.sort, Desc: tc.desc, FoldersFirst: true})
 
 		s.Require().NoError(err)
 		s.Equal(tc.want, fileNames(result.Data), "%s desc=%t", tc.sort, tc.desc)
@@ -858,7 +942,7 @@ func (s *FileServiceTestSuite) TestList_Search() {
 	}
 	for _, tc := range cases {
 		result, err := svc.List(context.Background(), userID,
-			file.ListQuery{PageSize: 10, Search: tc.search, Sort: file.SortByName})
+			file.ListQuery{PageSize: 10, Search: tc.search, Sort: file.SortByName, FoldersFirst: true})
 
 		s.Require().NoError(err)
 		s.Equal(tc.want, fileNames(result.Data), tc.search)
@@ -1145,7 +1229,7 @@ func (s *FileServiceTestSuite) TestFavorites_FollowTheItem() {
 
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{docs.ID}))
 	s.workTrashJobs()
-	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Require().Len(trash.Data, 1)
 	s.True(trash.Data[0].IsFavorite)
@@ -1179,7 +1263,7 @@ func (s *FileServiceTestSuite) TestListFavorites_FromAllFolders() {
 	_, err := svc.Rename(context.Background(), alice, docs.ID, "Papers")
 	s.Require().NoError(err)
 
-	result, err := svc.ListFavorites(context.Background(), alice, file.FavoriteQuery{Sort: file.SortByName})
+	result, err := svc.ListFavorites(context.Background(), alice, file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true})
 
 	s.Require().NoError(err)
 	s.Nil(result.NextCursor)
@@ -1194,7 +1278,7 @@ func (s *FileServiceTestSuite) TestListFavorites_FromAllFolders() {
 		s.True(item.IsFavorite, item.Name)
 	}
 
-	empty, err := svc.ListFavorites(context.Background(), s.seedUserWithEmail("carol@example.com"), file.FavoriteQuery{Sort: file.SortByName})
+	empty, err := svc.ListFavorites(context.Background(), s.seedUserWithEmail("carol@example.com"), file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.NotNil(empty.Data)
 	s.Empty(empty.Data)
@@ -1277,11 +1361,11 @@ func (s *FileServiceTestSuite) TestListFavorites_HiddenOnlyWithToggle() {
 	s.Require().NoError(svc.AddFavorites(context.Background(), userID, []int64{secret.ID, inner.ID, shown.ID}))
 	s.Require().NoError(svc.SetHidden(context.Background(), userID, []int64{secret.ID}, true))
 
-	result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName})
+	result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Equal([]string{"inner.txt", "shown.txt"}, favoriteNames(result.Data))
 
-	all, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true})
+	all, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Equal([]string{"Secret", "inner.txt", "shown.txt"}, favoriteNames(all.Data))
 	s.True(all.Data[0].IsHidden)
@@ -1307,11 +1391,11 @@ func (s *FileServiceTestSuite) TestListFavorites_WalkEverySort() {
 	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
 		var full [2][]string
 		for i, desc := range []bool{false, true} {
-			result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{PageSize: 100, Sort: sort, Desc: desc})
+			result, err := svc.ListFavorites(context.Background(), userID, file.FavoriteQuery{PageSize: 100, Sort: sort, Desc: desc, FoldersFirst: true})
 			s.Require().NoError(err)
 			full[i] = favoriteNames(result.Data)
 
-			pages := s.walkFavorites(userID, file.FavoriteQuery{PageSize: 2, Sort: sort, Desc: desc})
+			pages := s.walkFavorites(userID, file.FavoriteQuery{PageSize: 2, Sort: sort, Desc: desc, FoldersFirst: true})
 			s.Equal(full[i], slices.Concat(pages...), "%s desc=%t", sort, desc)
 			for _, page := range pages[:len(pages)-1] {
 				s.Len(page, 2, "%s desc=%t", sort, desc)
@@ -3362,7 +3446,7 @@ func (s *FileServiceTestSuite) TestTrashSubtrees_RestoreMidJobStopsIt() {
 	result, err := svc.List(context.Background(), userID, newestFirst(sub.ID))
 	s.Require().NoError(err)
 	s.Equal([]string{"x.txt"}, fileNames(result.Data))
-	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Empty(trash.Data)
 }
@@ -3404,7 +3488,7 @@ func (s *FileServiceTestSuite) TestListTrash_OnlyDeletedItems() {
 	s.moveTrashedAt(b, 2)
 	s.moveTrashedAt(photos.ID, 2)
 
-	result, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByDate, Desc: true})
+	result, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByDate, Desc: true, FoldersFirst: true})
 
 	s.Require().NoError(err)
 	s.Nil(result.NextCursor)
@@ -3414,7 +3498,7 @@ func (s *FileServiceTestSuite) TestListTrash_OnlyDeletedItems() {
 	s.True(result.Data[1].TrashedAt.After(result.Data[2].TrashedAt))
 	s.False(result.Data[1].TrashedAt.IsZero())
 
-	empty, err := svc.ListTrash(context.Background(), s.seedUserWithEmail("carol@example.com"), file.TrashQuery{Sort: file.SortByDate})
+	empty, err := svc.ListTrash(context.Background(), s.seedUserWithEmail("carol@example.com"), file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.NotNil(empty.Data)
 	s.Empty(empty.Data)
@@ -3440,11 +3524,11 @@ func (s *FileServiceTestSuite) TestListTrash_WalkEverySort() {
 	for _, sort := range []file.SortField{file.SortByName, file.SortBySize, file.SortByType, file.SortByDate} {
 		var full [2][]string
 		for i, desc := range []bool{false, true} {
-			result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 100, Sort: sort, Desc: desc})
+			result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 100, Sort: sort, Desc: desc, FoldersFirst: true})
 			s.Require().NoError(err)
 			full[i] = trashNames(result.Data)
 
-			pages := s.walkTrash(userID, file.TrashQuery{PageSize: 2, Sort: sort, Desc: desc})
+			pages := s.walkTrash(userID, file.TrashQuery{PageSize: 2, Sort: sort, Desc: desc, FoldersFirst: true})
 			s.Equal(full[i], slices.Concat(pages...), "%s desc=%t", sort, desc)
 		}
 
@@ -3470,7 +3554,7 @@ func (s *FileServiceTestSuite) TestListTrash_FolderSizes() {
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{photos.ID}))
 
 	for _, label := range []string{"before the trash job", "after the trash job"} {
-		result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByName})
+		result, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByName, FoldersFirst: true})
 		s.Require().NoError(err)
 		files := make([]*file.File, len(result.Data))
 		for i, item := range result.Data {
@@ -3489,14 +3573,14 @@ func (s *FileServiceTestSuite) TestListTrash_BadCursor() {
 	b := s.seedFile(userID, "b.txt")
 	s.Require().NoError(svc.Trash(context.Background(), userID, []int64{a, b}))
 
-	first, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 1, Sort: file.SortByName})
+	first, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{PageSize: 1, Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Require().NotNil(first.NextCursor)
 
 	for _, q := range []file.TrashQuery{
-		{Cursor: *first.NextCursor, Sort: file.SortByDate},
-		{Cursor: *first.NextCursor, Sort: file.SortByName, Desc: true},
-		{Cursor: cursorOf(`{"s":"date","p":1,"v":["not a time","1"]}`), Sort: file.SortByDate},
+		{Cursor: *first.NextCursor, Sort: file.SortByDate, FoldersFirst: true},
+		{Cursor: *first.NextCursor, Sort: file.SortByName, Desc: true, FoldersFirst: true},
+		{Cursor: cursorOf(`{"s":"date","p":1,"v":["not a time","1"]}`), Sort: file.SortByDate, FoldersFirst: true},
 	} {
 		_, err := svc.ListTrash(context.Background(), userID, q)
 
@@ -3528,7 +3612,7 @@ func (s *FileServiceTestSuite) TestRestore_BringsBackFolderAndEverythingUnder() 
 	s.True(s.changedSince(photos.ID, oldUpdatedAt))
 	s.False(s.changedSince(cars.ID, oldUpdatedAt))
 
-	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Empty(trash.Data)
 }
@@ -3713,7 +3797,7 @@ func (s *FileServiceTestSuite) TestPurge_DeletesRowsAndBytes() {
 
 	s.Require().NoError(svc.Purge(context.Background(), userID, []int64{gone.ID, docs.ID, gone.ID}))
 
-	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Empty(trash.Data)
 	s.Equal([]jobs.PurgeGroupsArgs{{UserID: userID, RootIDs: []int64{docs.ID, gone.ID}}}, s.purgeJobs())
@@ -3775,7 +3859,7 @@ func (s *FileServiceTestSuite) TestPurge_AllOrNone() {
 		s.Equal("item not found", msg)
 	}
 
-	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName})
+	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Equal([]string{"Docs", "a.txt"}, trashNames(trash.Data))
 	s.Equal([]jobs.PurgeGroupsArgs{{UserID: alice, RootIDs: []int64{marked}}}, s.purgeJobs())
@@ -3812,7 +3896,7 @@ func (s *FileServiceTestSuite) TestPurgeGroups_MovesItemDeletedEarlierHome() {
 	s.Equal([]map[string]any{
 		{"user_id": userID, "root_ids": []any{docs.ID}, "rows": int64(1), "files": int64(0), "moved_home": int64(1)},
 	}, s.logs("purged trash groups"))
-	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate})
+	trash, err := svc.ListTrash(context.Background(), userID, file.TrashQuery{Sort: file.SortByDate, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Require().Len(trash.Data, 1)
 	s.Equal("old.txt", trash.Data[0].Name)
@@ -3934,7 +4018,7 @@ func (s *FileServiceTestSuite) TestSweepTrash_PurgesExpiredItems() {
 
 	s.Require().NoError(svc.SweepTrash(context.Background()))
 
-	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName})
+	trash, err := svc.ListTrash(context.Background(), alice, file.TrashQuery{Sort: file.SortByName, FoldersFirst: true})
 	s.Require().NoError(err)
 	s.Equal([]string{"b.txt"}, trashNames(trash.Data))
 	s.Equal([]jobs.PurgeGroupsArgs{
@@ -4304,7 +4388,7 @@ func (s *FileServiceTestSuite) moveCreatedAt(id int64, hoursAgo int) {
 }
 
 func newestFirst(parentID int64) file.ListQuery {
-	return file.ListQuery{ParentID: parentID, Sort: file.SortByDate, Desc: true}
+	return file.ListQuery{ParentID: parentID, Sort: file.SortByDate, Desc: true, FoldersFirst: true}
 }
 
 func (s *FileServiceTestSuite) walkPages(userID int64, q file.ListQuery) [][]string {

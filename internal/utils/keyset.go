@@ -52,6 +52,31 @@ type KeysetList[S ~string] struct {
 	Parts []string
 }
 
+// Split returns a copy of the list in parts. Each split divides every part of the splits before it, so two splits of
+// two give four parts, such as favorite folders, favorite files, other folders, other files. A nil split is skipped.
+// A cursor keeps only its part's index, so a list must page with the same splits from start to end.
+func (l KeysetList[S]) Split(splits ...[]string) KeysetList[S] {
+	parts := []string{""}
+	for _, split := range splits {
+		if len(split) == 0 {
+			continue
+		}
+		next := make([]string, 0, len(parts)*len(split))
+		for _, part := range parts {
+			for _, cond := range split {
+				if part == "" {
+					next = append(next, cond)
+				} else {
+					next = append(next, "("+part+") AND ("+cond+")")
+				}
+			}
+		}
+		parts = next
+	}
+	l.Parts = parts
+	return l
+}
+
 type PageQuery[S ~string] struct {
 	Args     []any
 	Sort     S

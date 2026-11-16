@@ -226,6 +226,8 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 				r.Use(authMiddleware.WebClientAuthentication)
 
 				r.Mount("/users", h.User.Routes())
+				r.Get("/settings", h.User.GetSettings)
+				r.Put("/settings", h.User.SaveSettings)
 				r.Get("/files", h.File.List)
 				r.Post("/files", h.File.CreateFile)
 				r.Get("/files/{id}", h.File.GetItem)

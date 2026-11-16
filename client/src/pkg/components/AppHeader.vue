@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useConfirm } from "primevue/useconfirm";
 import { useAuthStore } from "../stores/auth_store.ts";
 import { useDownloadStore } from "../stores/download_store.ts";
@@ -31,6 +31,7 @@ const { user } = storeToRefs(authStore);
 const { pendingCount } = storeToRefs(downloadStore);
 const confirm = useConfirm();
 const route = useRoute();
+const router = useRouter();
 
 const darkMode = computed<boolean>({
     get: () => themeStore.isDark,
@@ -44,7 +45,10 @@ const downloadsLabel = computed<string>(() =>
     pendingCount.value > 0 ? `Downloads, ${pendingCount.value} waiting` : "Downloads",
 );
 
-const menuItems: MenuItem[] = [{ label: "Sign out", icon: "pi pi-sign-out", command: signOut }];
+const menuItems: MenuItem[] = [
+    { label: "Settings", icon: "pi pi-cog", command: openSettings },
+    { label: "Sign out", icon: "pi pi-sign-out", command: signOut },
+];
 
 const initials = computed<string>(() =>
     (user.value?.display_name ?? "")
@@ -58,6 +62,10 @@ const initials = computed<string>(() =>
 
 function toggleMenu(event: Event): void {
     menuRef.value?.toggle(event);
+}
+
+async function openSettings(): Promise<void> {
+    await router.push({ name: "settings" });
 }
 
 function signOut(): void {

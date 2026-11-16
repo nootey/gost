@@ -5,6 +5,8 @@ import Trash from "../../domains/file/pages/Trash.vue";
 import Favorites from "../../domains/file/pages/Favorites.vue";
 import Recents from "../../domains/file/pages/Recents.vue";
 import Activity from "../../domains/file/pages/Activity.vue";
+import Settings from "../../domains/user/pages/Settings.vue";
+import FilesSettings from "../../domains/user/pages/settings/FilesSettings.vue";
 import Login from "../../domains/auth/pages/Login.vue";
 import SignUp from "../../domains/auth/pages/SignUp.vue";
 import ForgotPassword from "../../domains/auth/pages/ForgotPassword.vue";
@@ -53,6 +55,15 @@ const routes: RouteRecordRaw[] = [
         name: "trash",
         meta: { title: "Trash", requiresAuth: true },
         component: Trash,
+    },
+    {
+        path: "/settings",
+        meta: { title: "Settings", requiresAuth: true },
+        component: Settings,
+        children: [
+            { path: "", name: "settings", redirect: { name: "settings.files" } },
+            { path: "files", name: "settings.files", component: FilesSettings },
+        ],
     },
     {
         path: "/login",

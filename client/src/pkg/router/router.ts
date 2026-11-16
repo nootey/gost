@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 import routes from "./routes";
 import { useAuthStore } from "../stores/auth_store.ts";
+import { useSettingsStore } from "../stores/settings_store.ts";
 import { usePermissions } from "../utils/use_permissions.ts";
 
 const router = createRouter({
@@ -24,6 +25,12 @@ router.beforeEach(async (to) => {
 
     if (requiresAuth && !auth.isAuthenticated) {
         return { name: "login", query: { redirect: to.fullPath } };
+    }
+
+    // The lists read the settings when they mount, so the settings load first.
+    const settings = useSettingsStore();
+    if (requiresAuth && !settings.loaded) {
+        await settings.init();
     }
 
     // // Logged in but NOT verified
