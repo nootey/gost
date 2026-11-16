@@ -85,6 +85,17 @@ export interface FavoriteQuery {
     show_hidden: boolean;
 }
 
+// One of the user's newest added or changed files. path names the folders from the root down to the file's folder. A
+// file in the root has an empty path.
+export interface RecentFile extends StoredFile {
+    path: string[];
+}
+
+// The user's newest added or changed files, newest first.
+export interface RecentList {
+    files: RecentFile[];
+}
+
 // An item the user deleted. parent_id is the folder it was in.
 export interface TrashedFile extends StoredFile {
     trashed_at: string;

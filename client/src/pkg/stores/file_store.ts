@@ -19,6 +19,7 @@ import type {
     ListQuery,
     NewItemForm,
     PasteForm,
+    RecentList,
     RenameForm,
     RenameResponse,
     StoredFile,
@@ -152,6 +153,11 @@ export const useFileStore = defineStore("file", {
 
         async listFavorites(query: FavoriteQuery): Promise<Page<Favorite>> {
             const response = await apiClient.get<Page<Favorite>>("favorites", { params: { ...query } });
+            return response.data;
+        },
+
+        async listRecents(): Promise<RecentList> {
+            const response = await apiClient.get<RecentList>("recents");
             return response.data;
         },
 

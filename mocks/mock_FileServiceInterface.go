@@ -951,6 +951,74 @@ func (_c *MockFileServiceInterface_ListFavorites_Call) RunAndReturn(run func(ctx
 	return _c
 }
 
+// ListRecents provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) ListRecents(ctx context.Context, userID int64) ([]*file.RecentFile, error) {
+	ret := _mock.Called(ctx, userID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListRecents")
+	}
+
+	var r0 []*file.RecentFile
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([]*file.RecentFile, error)); ok {
+		return returnFunc(ctx, userID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) []*file.RecentFile); ok {
+		r0 = returnFunc(ctx, userID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*file.RecentFile)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, userID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_ListRecents_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListRecents'
+type MockFileServiceInterface_ListRecents_Call struct {
+	*mock.Call
+}
+
+// ListRecents is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+func (_e *MockFileServiceInterface_Expecter) ListRecents(ctx any, userID any) *MockFileServiceInterface_ListRecents_Call {
+	return &MockFileServiceInterface_ListRecents_Call{Call: _e.mock.On("ListRecents", ctx, userID)}
+}
+
+func (_c *MockFileServiceInterface_ListRecents_Call) Run(run func(ctx context.Context, userID int64)) *MockFileServiceInterface_ListRecents_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListRecents_Call) Return(recentFiles []*file.RecentFile, err error) *MockFileServiceInterface_ListRecents_Call {
+	_c.Call.Return(recentFiles, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_ListRecents_Call) RunAndReturn(run func(ctx context.Context, userID int64) ([]*file.RecentFile, error)) *MockFileServiceInterface_ListRecents_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListTrash provides a mock function for the type MockFileServiceInterface
 func (_mock *MockFileServiceInterface) ListTrash(ctx context.Context, userID int64, q file.TrashQuery) (*utils.Page[*file.TrashedFile], error) {
 	ret := _mock.Called(ctx, userID, q)

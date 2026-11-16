@@ -1200,6 +1200,72 @@ func (s *FileServiceTestSuite) TestListFavorites_FromAllFolders() {
 	s.Empty(empty.Data)
 }
 
+// The recents hold the user's newest added or changed files from all folders, newest first. A rename, a move, a
+// restore and a copy each put a file on top. Folders, hidden files, files in the trash and other users' files stay
+// out. Each file names the path of its folder and keeps its favorite mark.
+func (s *FileServiceTestSuite) TestListRecents_NewestChangesFirst() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	svc := s.TC.Services.FileService
+	docs := s.createFolder(alice, 0, "Docs")
+	work := s.createFolder(alice, docs.ID, "Work")
+	report := s.upload(alice, work.ID, "report.txt", "r")
+	notes := s.upload(alice, 0, "notes.txt", "n")
+	s.upload(alice, 0, "old.txt", "o")
+	moved := s.upload(alice, 0, "moved.txt", "m")
+	restored := s.upload(alice, 0, "restored.txt", "x")
+	hidden := s.upload(alice, 0, "hidden.txt", "h")
+	trashed := s.upload(alice, 0, "trashed.txt", "t")
+	s.upload(bob, 0, "bob.txt", "b")
+	s.Require().NoError(svc.Trash(context.Background(), alice, []int64{restored.ID, trashed.ID}))
+	s.Require().NoError(svc.SetHidden(context.Background(), alice, []int64{hidden.ID}, true))
+	s.Require().NoError(svc.AddFavorites(context.Background(), alice, []int64{notes.ID}))
+	// Every row gets the same old time, so only the changes below set the order, and the id breaks the tie.
+	_, err := s.TC.DB.ExecContext(context.Background(), `UPDATE files SET updated_at = $1 WHERE user_id = $2`, oldUpdatedAt, alice)
+	s.Require().NoError(err)
+	_, err = svc.Rename(context.Background(), alice, notes.ID, "notes-v2.txt")
+	s.Require().NoError(err)
+	s.Require().NoError(svc.Move(context.Background(), alice, docs.ID, []int64{moved.ID}))
+	s.Require().NoError(svc.Restore(context.Background(), alice, []int64{restored.ID}))
+	s.Require().NoError(svc.Copy(context.Background(), alice, docs.ID, []int64{report.ID}))
+
+	list, err := svc.ListRecents(context.Background(), alice)
+
+	s.Require().NoError(err)
+	s.Equal([]string{
+		"Docs/report.txt",
+		"restored.txt",
+		"Docs/moved.txt",
+		"notes-v2.txt",
+		"old.txt",
+		"Docs/Work/report.txt",
+	}, recentEntries(list))
+	s.True(list[0].IsCopying)
+	for _, item := range list {
+		s.Equal(item.ID == notes.ID, item.IsFavorite, item.Name)
+	}
+
+	empty, err := svc.ListRecents(context.Background(), s.seedUserWithEmail("carol@example.com"))
+	s.Require().NoError(err)
+	s.NotNil(empty)
+	s.Empty(empty)
+}
+
+// The recents stop at the newest 10 files.
+func (s *FileServiceTestSuite) TestListRecents_NewestTenOnly() {
+	userID := s.seedUser()
+	for i := range 12 {
+		s.upload(userID, 0, fmt.Sprintf("file-%02d.txt", i), "f")
+	}
+
+	list, err := s.TC.Services.FileService.ListRecents(context.Background(), userID)
+
+	s.Require().NoError(err)
+	s.Require().Len(list, 10)
+	s.Equal("file-11.txt", list[0].Name)
+	s.Equal("file-02.txt", list[9].Name)
+}
+
 // Hidden favorites show only with ShowHidden. Like the file list, the check looks at the item only, so an item in a
 // hidden folder still shows.
 func (s *FileServiceTestSuite) TestListFavorites_HiddenOnlyWithToggle() {
@@ -4312,6 +4378,15 @@ func favoritePaths(items []*file.Favorite) map[string][]string {
 		paths[item.Name] = item.Path
 	}
 	return paths
+}
+
+// recentEntries names each recent file by its path, such as "Docs/report.txt".
+func recentEntries(items []*file.RecentFile) []string {
+	entries := make([]string, len(items))
+	for i, item := range items {
+		entries[i] = strings.Join(append(slices.Clone(item.Path), item.Name), "/")
+	}
+	return entries
 }
 
 func trashNames(items []*file.TrashedFile) []string {

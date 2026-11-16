@@ -219,6 +219,23 @@ func (h *FileHandler) ListDownloads(w http.ResponseWriter, r *http.Request) {
 	h.resp.JSON(w, http.StatusOK, DownloadList{Downloads: list})
 }
 
+// ListRecents sends the user's newest added or changed files, newest first.
+func (h *FileHandler) ListRecents(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	list, err := h.service.ListRecents(r.Context(), userID)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, RecentList{Files: list})
+}
+
 func (h *FileHandler) RemoveDownload(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

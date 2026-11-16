@@ -58,6 +58,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/favorites", suite.handler.ListFavorites)
 	suite.router.Post("/favorites", suite.handler.AddFavorites)
 	suite.router.Post("/favorites/remove", suite.handler.RemoveFavorites)
+	suite.router.Get("/recents", suite.handler.ListRecents)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
 	suite.router.Get("/files/{id}", suite.handler.GetItem)
 	suite.router.Get("/files/{id}/activity", suite.handler.ListActivity)
@@ -1112,6 +1113,59 @@ func (suite *FileHandlerTestSuite) TestListDownloads_ServiceError() {
 	suite.mockService.EXPECT().ListDownloads(mock.Anything, testUserID).Return(nil, assert.AnError).Once()
 
 	w := suite.getPath("/downloads", true)
+
+	suite.Equal(http.StatusInternalServerError, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestListRecents_Success() {
+	suite.mockService.EXPECT().
+		ListRecents(mock.Anything, testUserID).
+		Return([]*file.RecentFile{
+			{File: file.File{ID: 3, Name: "c.txt", IsFavorite: true}, Path: []string{"Docs", "Work"}},
+			{File: file.File{ID: 4, Name: "d.txt"}, Path: []string{}},
+		}, nil).
+		Once()
+
+	w := suite.getPath("/recents", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp struct {
+		Files []struct {
+			ID         int64    `json:"id"`
+			Name       string   `json:"name"`
+			IsFavorite bool     `json:"is_favorite"`
+			Path       []string `json:"path"`
+		} `json:"files"`
+	}
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Files, 2)
+	suite.Equal(int64(3), resp.Files[0].ID)
+	suite.Equal("c.txt", resp.Files[0].Name)
+	suite.True(resp.Files[0].IsFavorite)
+	suite.Equal([]string{"Docs", "Work"}, resp.Files[0].Path)
+	suite.Equal([]string{}, resp.Files[1].Path)
+}
+
+// An empty list is an empty array, not null, so the client needs no check.
+func (suite *FileHandlerTestSuite) TestListRecents_Empty() {
+	suite.mockService.EXPECT().ListRecents(mock.Anything, testUserID).Return([]*file.RecentFile{}, nil).Once()
+
+	w := suite.getPath("/recents", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	suite.JSONEq(`{"files":[]}`, w.Body.String())
+}
+
+func (suite *FileHandlerTestSuite) TestListRecents_Unauthenticated() {
+	w := suite.getPath("/recents", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestListRecents_ServiceError() {
+	suite.mockService.EXPECT().ListRecents(mock.Anything, testUserID).Return(nil, assert.AnError).Once()
+
+	w := suite.getPath("/recents", true)
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
 }

@@ -3,6 +3,7 @@ import NotFound from "../../domains/index/NotFound.vue";
 import Dashboard from "../../domains/index/Dashboard.vue";
 import Trash from "../../domains/file/pages/Trash.vue";
 import Favorites from "../../domains/file/pages/Favorites.vue";
+import Recents from "../../domains/file/pages/Recents.vue";
 import Login from "../../domains/auth/pages/Login.vue";
 import SignUp from "../../domains/auth/pages/SignUp.vue";
 import ForgotPassword from "../../domains/auth/pages/ForgotPassword.vue";
@@ -27,6 +28,12 @@ const routes: RouteRecordRaw[] = [
         name: "dashboard",
         meta: { title: "Files", requiresAuth: true },
         component: Dashboard,
+    },
+    {
+        path: "/recents",
+        name: "recents",
+        meta: { title: "Recent", requiresAuth: true },
+        component: Recents,
     },
     {
         path: "/favorites",

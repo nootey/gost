@@ -887,6 +887,63 @@ func (q *Queries) ListPurgeRoots(ctx context.Context, arg ListPurgeRootsParams) 
 	return items, nil
 }
 
+const listRecentFiles = `-- name: ListRecentFiles :many
+SELECT id, user_id, name, storage_key, content_type, size_bytes, created_at, updated_at, parent_id, trashed_at, trash_root_id, purge_requested_at, copied_from_id, copy_requested_at, hidden_at FROM files
+WHERE user_id = $1
+  AND storage_key IS NOT NULL
+  AND trashed_at IS NULL
+  AND hidden_at IS NULL
+ORDER BY updated_at DESC, id DESC
+LIMIT $2
+`
+
+type ListRecentFilesParams struct {
+	UserID   int64 `json:"user_id"`
+	RowLimit int32 `json:"row_limit"`
+}
+
+// The user's newest added or changed files, from all folders: an upload, a new file, a copy, a rename, a move or a
+// restore. Folders and hidden files stay out. Like the favorites, the hidden check looks at the file only, not at the
+// folders above it. storage_key IS NOT NULL and trashed_at IS NULL must stay as they are, so the recent index matches.
+func (q *Queries) ListRecentFiles(ctx context.Context, arg ListRecentFilesParams) ([]File, error) {
+	rows, err := q.db.QueryContext(ctx, listRecentFiles, arg.UserID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ParentID,
+			&i.TrashedAt,
+			&i.TrashRootID,
+			&i.PurgeRequestedAt,
+			&i.CopiedFromID,
+			&i.CopyRequestedAt,
+			&i.HiddenAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStaleCopies = `-- name: ListStaleCopies :many
 SELECT user_id, array_agg(id ORDER BY id)::bigint[] AS root_ids
 FROM files
