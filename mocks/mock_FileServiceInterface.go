@@ -8,7 +8,6 @@ import (
 	"context"
 	"gost/internal/domains/file"
 	"gost/internal/utils"
-	"io"
 
 	mock "github.com/stretchr/testify/mock"
 )
@@ -108,6 +107,81 @@ func (_c *MockFileServiceInterface_AddFavorites_Call) Return(err error) *MockFil
 }
 
 func (_c *MockFileServiceInterface_AddFavorites_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_AddFavorites_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CheckUpload provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) CheckUpload(ctx context.Context, userID int64, parentID int64, name string, size int64) error {
+	ret := _mock.Called(ctx, userID, parentID, name, size)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CheckUpload")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, int64) error); ok {
+		r0 = returnFunc(ctx, userID, parentID, name, size)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockFileServiceInterface_CheckUpload_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CheckUpload'
+type MockFileServiceInterface_CheckUpload_Call struct {
+	*mock.Call
+}
+
+// CheckUpload is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - parentID int64
+//   - name string
+//   - size int64
+func (_e *MockFileServiceInterface_Expecter) CheckUpload(ctx any, userID any, parentID any, name any, size any) *MockFileServiceInterface_CheckUpload_Call {
+	return &MockFileServiceInterface_CheckUpload_Call{Call: _e.mock.On("CheckUpload", ctx, userID, parentID, name, size)}
+}
+
+func (_c *MockFileServiceInterface_CheckUpload_Call) Run(run func(ctx context.Context, userID int64, parentID int64, name string, size int64)) *MockFileServiceInterface_CheckUpload_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 int64
+		if args[4] != nil {
+			arg4 = args[4].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CheckUpload_Call) Return(err error) *MockFileServiceInterface_CheckUpload_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CheckUpload_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string, size int64) error) *MockFileServiceInterface_CheckUpload_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -257,6 +331,172 @@ func (_c *MockFileServiceInterface_CreateFolder_Call) Return(file1 *file.File, e
 }
 
 func (_c *MockFileServiceInterface_CreateFolder_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string) (*file.File, error)) *MockFileServiceInterface_CreateFolder_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateFolderTree provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) CreateFolderTree(ctx context.Context, userID int64, parentID int64, paths []string) (map[string]int64, error) {
+	ret := _mock.Called(ctx, userID, parentID, paths)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateFolderTree")
+	}
+
+	var r0 map[string]int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, []string) (map[string]int64, error)); ok {
+		return returnFunc(ctx, userID, parentID, paths)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, []string) map[string]int64); ok {
+		r0 = returnFunc(ctx, userID, parentID, paths)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]int64)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, []string) error); ok {
+		r1 = returnFunc(ctx, userID, parentID, paths)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_CreateFolderTree_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateFolderTree'
+type MockFileServiceInterface_CreateFolderTree_Call struct {
+	*mock.Call
+}
+
+// CreateFolderTree is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - parentID int64
+//   - paths []string
+func (_e *MockFileServiceInterface_Expecter) CreateFolderTree(ctx any, userID any, parentID any, paths any) *MockFileServiceInterface_CreateFolderTree_Call {
+	return &MockFileServiceInterface_CreateFolderTree_Call{Call: _e.mock.On("CreateFolderTree", ctx, userID, parentID, paths)}
+}
+
+func (_c *MockFileServiceInterface_CreateFolderTree_Call) Run(run func(ctx context.Context, userID int64, parentID int64, paths []string)) *MockFileServiceInterface_CreateFolderTree_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		var arg3 []string
+		if args[3] != nil {
+			arg3 = args[3].([]string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CreateFolderTree_Call) Return(stringToInt64 map[string]int64, err error) *MockFileServiceInterface_CreateFolderTree_Call {
+	_c.Call.Return(stringToInt64, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_CreateFolderTree_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, paths []string) (map[string]int64, error)) *MockFileServiceInterface_CreateFolderTree_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FinishUpload provides a mock function for the type MockFileServiceInterface
+func (_mock *MockFileServiceInterface) FinishUpload(ctx context.Context, userID int64, parentID int64, name string, path string) (*file.File, error) {
+	ret := _mock.Called(ctx, userID, parentID, name, path)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FinishUpload")
+	}
+
+	var r0 *file.File
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, string) (*file.File, error)); ok {
+		return returnFunc(ctx, userID, parentID, name, path)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, string) *file.File); ok {
+		r0 = returnFunc(ctx, userID, parentID, name, path)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*file.File)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, string, string) error); ok {
+		r1 = returnFunc(ctx, userID, parentID, name, path)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockFileServiceInterface_FinishUpload_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FinishUpload'
+type MockFileServiceInterface_FinishUpload_Call struct {
+	*mock.Call
+}
+
+// FinishUpload is a helper method to define mock.On call
+//   - ctx context.Context
+//   - userID int64
+//   - parentID int64
+//   - name string
+//   - path string
+func (_e *MockFileServiceInterface_Expecter) FinishUpload(ctx any, userID any, parentID any, name any, path any) *MockFileServiceInterface_FinishUpload_Call {
+	return &MockFileServiceInterface_FinishUpload_Call{Call: _e.mock.On("FinishUpload", ctx, userID, parentID, name, path)}
+}
+
+func (_c *MockFileServiceInterface_FinishUpload_Call) Run(run func(ctx context.Context, userID int64, parentID int64, name string, path string)) *MockFileServiceInterface_FinishUpload_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		var arg2 int64
+		if args[2] != nil {
+			arg2 = args[2].(int64)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 string
+		if args[4] != nil {
+			arg4 = args[4].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockFileServiceInterface_FinishUpload_Call) Return(file1 *file.File, err error) *MockFileServiceInterface_FinishUpload_Call {
+	_c.Call.Return(file1, err)
+	return _c
+}
+
+func (_c *MockFileServiceInterface_FinishUpload_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string, path string) (*file.File, error)) *MockFileServiceInterface_FinishUpload_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1530,92 +1770,6 @@ func (_c *MockFileServiceInterface_Trash_Call) Return(err error) *MockFileServic
 }
 
 func (_c *MockFileServiceInterface_Trash_Call) RunAndReturn(run func(ctx context.Context, userID int64, ids []int64) error) *MockFileServiceInterface_Trash_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// Upload provides a mock function for the type MockFileServiceInterface
-func (_mock *MockFileServiceInterface) Upload(ctx context.Context, userID int64, parentID int64, name string, src io.Reader) (*file.File, error) {
-	ret := _mock.Called(ctx, userID, parentID, name, src)
-
-	if len(ret) == 0 {
-		panic("no return value specified for Upload")
-	}
-
-	var r0 *file.File
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, io.Reader) (*file.File, error)); ok {
-		return returnFunc(ctx, userID, parentID, name, src)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64, int64, string, io.Reader) *file.File); ok {
-		r0 = returnFunc(ctx, userID, parentID, name, src)
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*file.File)
-		}
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int64, int64, string, io.Reader) error); ok {
-		r1 = returnFunc(ctx, userID, parentID, name, src)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockFileServiceInterface_Upload_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Upload'
-type MockFileServiceInterface_Upload_Call struct {
-	*mock.Call
-}
-
-// Upload is a helper method to define mock.On call
-//   - ctx context.Context
-//   - userID int64
-//   - parentID int64
-//   - name string
-//   - src io.Reader
-func (_e *MockFileServiceInterface_Expecter) Upload(ctx any, userID any, parentID any, name any, src any) *MockFileServiceInterface_Upload_Call {
-	return &MockFileServiceInterface_Upload_Call{Call: _e.mock.On("Upload", ctx, userID, parentID, name, src)}
-}
-
-func (_c *MockFileServiceInterface_Upload_Call) Run(run func(ctx context.Context, userID int64, parentID int64, name string, src io.Reader)) *MockFileServiceInterface_Upload_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 int64
-		if args[1] != nil {
-			arg1 = args[1].(int64)
-		}
-		var arg2 int64
-		if args[2] != nil {
-			arg2 = args[2].(int64)
-		}
-		var arg3 string
-		if args[3] != nil {
-			arg3 = args[3].(string)
-		}
-		var arg4 io.Reader
-		if args[4] != nil {
-			arg4 = args[4].(io.Reader)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-			arg3,
-			arg4,
-		)
-	})
-	return _c
-}
-
-func (_c *MockFileServiceInterface_Upload_Call) Return(file1 *file.File, err error) *MockFileServiceInterface_Upload_Call {
-	_c.Call.Return(file1, err)
-	return _c
-}
-
-func (_c *MockFileServiceInterface_Upload_Call) RunAndReturn(run func(ctx context.Context, userID int64, parentID int64, name string, src io.Reader) (*file.File, error)) *MockFileServiceInterface_Upload_Call {
 	_c.Call.Return(run)
 	return _c
 }

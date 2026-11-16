@@ -150,7 +150,6 @@ func testConfig() *config.Config {
 	cfg.WebClient.Port = "5173"
 	cfg.Token.ConfirmTTLHours = 24
 	cfg.Token.ResetTTLMinutes = 60
-	cfg.Upload.MaxSizeMB = 1
 	cfg.Upload.TimeoutSeconds = 60
 	cfg.Download.TimeoutSeconds = 60
 	cfg.Download.MaxZipMB = 1

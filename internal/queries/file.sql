@@ -8,6 +8,22 @@ INSERT INTO files (user_id, parent_id, name, content_type, size_bytes)
 VALUES ($1, $2, $3, '', 0)
     RETURNING *;
 
+-- name: NextFileIDs :many
+-- Takes count new file IDs, so one insert can add folders together with the folders under them.
+SELECT nextval(pg_get_serial_sequence('files', 'id'))::bigint AS id
+FROM generate_series(1, sqlc.arg(count)::bigint);
+
+-- name: CreateFolders :exec
+-- Adds many folders in one statement, with IDs from NextFileIDs. The arrays hold one row each at the same index.
+-- A parent ID of 0 is the root.
+INSERT INTO files (id, user_id, parent_id, name, content_type, size_bytes)
+SELECT t.id, sqlc.arg(user_id)::bigint, NULLIF(t.parent_id, 0), t.name, '', 0
+FROM (
+    SELECT unnest(sqlc.arg(ids)::bigint[]) AS id,
+           unnest(sqlc.arg(parent_ids)::bigint[]) AS parent_id,
+           unnest(sqlc.arg(names)::text[]) AS name
+) AS t;
+
 -- name: FolderExists :one
 -- A folder that still copies does not count: nothing goes into it until the copy job ends.
 SELECT EXISTS (

@@ -67,7 +67,7 @@ watch(routeDir, openFolder, { immediate: true });
             <p class="text-sm text-fg-muted">Files are stored on this server's disk. Only you can see your files.</p>
         </div>
 
-        <UploadDropzone :folder-id="folderId" :folder-name="folderName" @uploaded="onChanged" />
+        <UploadDropzone :folder-id="folderId" :folder-name="folderName" @changed="onChanged" />
 
         <div class="flex flex-col gap-3">
             <div class="flex items-center justify-between gap-3">

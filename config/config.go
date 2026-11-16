@@ -87,7 +87,6 @@ type TokenConfig struct {
 
 type UploadConfig struct {
 	Dir            string `mapstructure:"dir" validate:"required"`
-	MaxSizeMB      int64  `mapstructure:"max_size_mb" validate:"gt=0"`
 	TimeoutSeconds int    `mapstructure:"timeout_seconds" validate:"gt=0"`
 }
 
@@ -148,7 +147,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("token.reset_ttl_minutes", 60)
 
 	v.SetDefault("upload.dir", "./storage/uploads")
-	v.SetDefault("upload.max_size_mb", 50)
 	v.SetDefault("upload.timeout_seconds", 300)
 
 	v.SetDefault("download.timeout_seconds", 3600)

@@ -1,6 +1,8 @@
 import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
+import { startUpload } from "../api/upload_client.ts";
 import type { Page, SuccessResponse } from "../api/api_models.ts";
+import type { ChunkedUpload } from "../api/upload_client.ts";
 import type {
     Activity,
     ActivityQuery,
@@ -11,6 +13,8 @@ import type {
     FolderForm,
     FolderPath,
     FolderResponse,
+    FolderTreeForm,
+    FolderTreeResponse,
     ItemsForm,
     ListQuery,
     PasteForm,
@@ -27,6 +31,7 @@ export const useFileStore = defineStore("file", {
     state: () => ({
         apiPrefix: "files",
         folderPrefix: "folders",
+        uploadPrefix: "uploads/",
         trashPrefix: "trash",
         downloadPrefix: "downloads",
     }),
@@ -36,17 +41,24 @@ export const useFileStore = defineStore("file", {
             return response.data;
         },
 
-        async upload(file: File, folderId: number | null): Promise<UploadResponse> {
-            const body = new FormData();
-            body.append("file", file);
-            const response = await apiClient.post<UploadResponse>(this.apiPrefix, body, {
-                params: { parent_id: folderId },
-            });
-            return response.data;
+        // The file goes up in chunks, so a file of any size works, and a broken upload goes on from where it stopped.
+        upload(
+            file: File,
+            folderId: number | null,
+            onProgress: (sent: number, total: number) => void,
+        ): ChunkedUpload<UploadResponse> {
+            const metadata: Record<string, string> = { filename: file.name };
+            if (folderId !== null) metadata.parent_id = String(folderId);
+            return startUpload<UploadResponse>(this.uploadPrefix, file, metadata, onProgress);
         },
 
         async createFolder(form: FolderForm): Promise<FolderResponse> {
             const response = await apiClient.post<FolderResponse>(this.folderPrefix, form);
+            return response.data;
+        },
+
+        async createFolderTree(form: FolderTreeForm): Promise<FolderTreeResponse> {
+            const response = await apiClient.post<FolderTreeResponse>(`${this.folderPrefix}/tree`, form);
             return response.data;
         },
 

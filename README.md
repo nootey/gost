@@ -159,11 +159,12 @@ fmt.Println(cfg.Server.Port)
 
 Uploads are stored on local disk. The database keeps the owner, name, size and type of each file.
 
+Files go up in 32 MB chunks over the [tus](https://tus.io) protocol at `/api/uploads/`, so a file of any size works, and a broken upload goes on from where it stopped. Uploads in progress wait in `UPLOAD_DIR/.partial/`. A job removes the ones that get no new bytes for 24 hours.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. Docker mounts the `uploads` named volume here. |
-| `UPLOAD_MAX_SIZE_MB` | `50` | Largest file the API accepts. |
-| `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request. |
+| `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request, which carries one chunk. |
 
 ### File downloads
 

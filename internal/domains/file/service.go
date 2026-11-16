@@ -1,7 +1,6 @@
 package file
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,11 +10,10 @@ import (
 	"gost/internal/apperr"
 	"gost/internal/database"
 	"gost/internal/jobs"
+	"gost/internal/uploads"
 	"gost/internal/utils"
-	"io"
 	"io/fs"
 	"maps"
-	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -45,6 +43,13 @@ const purgeRetryHours = 24
 // orphanGraceHours is how long a file with no row stays before the orphan sweep removes it. Upload gives the bytes
 // their key before the row commits, so a newer file can still get its row.
 const orphanGraceHours = 24
+
+// maxTreeFolders caps the folders one folder upload makes, so its transaction stays short.
+const maxTreeFolders = 10000
+
+// uploadIdleHours is how long a chunked upload may get no new bytes before the upload sweep removes it. The client
+// can go on after a short break, but a large partial upload holds as much disk as it got.
+const uploadIdleHours = 24
 
 // orphanBatchSize caps the file names the orphan sweep checks in one query.
 const orphanBatchSize = 1000
@@ -97,8 +102,10 @@ const zipFailedMessage = "the zip could not be built"
 
 // A parentID of 0 means the root folder.
 type FileServiceInterface interface {
-	Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error)
+	CheckUpload(ctx context.Context, userID, parentID int64, name string, size int64) error
+	FinishUpload(ctx context.Context, userID, parentID int64, name, path string) (*File, error)
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
+	CreateFolderTree(ctx context.Context, userID, parentID int64, paths []string) (map[string]int64, error)
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
 	ResolveFolder(ctx context.Context, userID int64, names []string) (*FolderPath, error)
 	GetItem(ctx context.Context, userID, id int64) (*File, error)
@@ -201,29 +208,31 @@ func toDownloadModel(dl database.Download) *Download {
 	}
 }
 
-func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name string, src io.Reader) (*File, error) {
+// CheckUpload checks a chunked upload before any bytes come in, so a bad name or folder fails at once.
+func (s *FileService) CheckUpload(ctx context.Context, userID, parentID int64, name string, size int64) error {
+	if err := utils.ValidateName(name, utils.FileName); err != nil {
+		return err
+	}
+	if size < 1 {
+		return errEmptyFile
+	}
+	return s.checkFolder(ctx, s.queries, userID, parentID)
+}
+
+// FinishUpload adds a finished chunked upload as a file. Its bytes at path move into the store, so path must be in
+// the upload dir. The folder is checked again, because it can go to the trash while the bytes come in.
+func (s *FileService) FinishUpload(ctx context.Context, userID, parentID int64, name, path string) (*File, error) {
 	if err := utils.ValidateName(name, utils.FileName); err != nil {
 		return nil, err
 	}
-	// Check the folder before writing bytes, so a bad folder leaves nothing on disk.
-	if err := s.checkFolder(ctx, s.queries, userID, parentID); err != nil {
+
+	key, size, err := utils.AdoptFile(s.cfg.Dir, path)
+	if err != nil {
 		return nil, err
 	}
-
-	br := bufio.NewReader(src)
-	head, err := br.Peek(512)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("failed to read upload: %w", err)
-	}
-	if len(head) == 0 {
-		return nil, errEmptyFile
-	}
-
-	key, size, err := utils.StoreFile(s.cfg.Dir, br, s.cfg.MaxSizeMB<<20)
+	contentType, err := utils.SniffStoredFile(s.cfg.Dir, key)
 	if err != nil {
-		if errors.Is(err, utils.ErrFileTooLarge) {
-			return nil, apperr.New(apperr.KindTooLarge, fmt.Sprintf("file is larger than the %d MB limit", s.cfg.MaxSizeMB))
-		}
+		_ = utils.RemoveStoredFile(s.cfg.Dir, key)
 		return nil, err
 	}
 
@@ -233,7 +242,7 @@ func (s *FileService) Upload(ctx context.Context, userID, parentID int64, name s
 			ParentID:    sql.NullInt64{Int64: parentID, Valid: parentID != 0},
 			Name:        freeName,
 			StorageKey:  sql.NullString{String: key, Valid: true},
-			ContentType: http.DetectContentType(head),
+			ContentType: contentType,
 			SizeBytes:   size,
 		})
 	})
@@ -263,6 +272,84 @@ func (s *FileService) CreateFolder(ctx context.Context, userID, parentID int64, 
 	}
 
 	return toFileModel(dbFile), nil
+}
+
+// CreateFolderTree makes the folders of a folder upload in one transaction and returns the ID for each path, such as
+// "Photos/2024". The folders above a path are made too. Only the folders on top can clash with a name in the folder,
+// and they get a free name like "Photos (1)". The folders under them are new, so their names never clash.
+// The IDs are taken before the transaction, so one insert adds the whole tree.
+func (s *FileService) CreateFolderTree(ctx context.Context, userID, parentID int64, paths []string) (map[string]int64, error) {
+	folders, err := utils.TreeFolders(paths, maxTreeFolders)
+	if err != nil {
+		return nil, err
+	}
+	newIDs, err := s.queries.NextFileIDs(ctx, int64(len(folders)))
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make(map[string]int64, len(folders))
+	insert := database.CreateFoldersParams{
+		UserID:    userID,
+		Ids:       newIDs,
+		ParentIds: make([]int64, len(folders)),
+		Names:     make([]string, len(folders)),
+	}
+	// The folders on top come first.
+	var top []string
+	for i, f := range folders {
+		ids[f.Path] = newIDs[i]
+		insert.ParentIds[i], insert.Names[i] = ids[f.Parent], f.Name
+		if f.Parent == "" {
+			insert.ParentIds[i] = parentID
+			top = append(top, f.Name)
+		}
+	}
+
+	for range maxNameAttempts {
+		err := utils.InTx(ctx, s.db, func(tx *sql.Tx) error {
+			q := s.queries.WithTx(tx)
+			if err := q.LockUserTree(ctx, userID); err != nil {
+				return err
+			}
+			if err := s.checkFolder(ctx, q, userID, parentID); err != nil {
+				return err
+			}
+
+			rows, err := q.ListNamesByParentsAndPrefixes(ctx, database.ListNamesByParentsAndPrefixesParams{
+				UserID:    userID,
+				ParentIds: []int64{parentID},
+				Prefixes:  top,
+			})
+			if err != nil {
+				return err
+			}
+			taken := make([]string, len(rows))
+			for i, row := range rows {
+				taken[i] = row.Name
+			}
+			// Each name a folder on top takes is taken for the folders after it.
+			for i, name := range top {
+				if insert.Names[i], err = utils.FreeName(name, utils.FolderName, taken); err != nil {
+					return err
+				}
+				taken = append(taken, insert.Names[i])
+			}
+
+			if err := q.CreateFolders(ctx, insert); err != nil {
+				return err
+			}
+			return q.LogItems(ctx, database.LogItemsParams{Event: string(EventCreated), Extra: noExtra, UserID: userID, Ids: newIDs})
+		})
+		if utils.IsUniqueViolation(err, nameIndex) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return ids, nil
+	}
+	return nil, errNameTaken
 }
 
 func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error) {
@@ -1212,6 +1299,26 @@ func (s *FileService) SweepDownloads(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// SweepUploads removes the chunked uploads that got no new bytes for uploadIdleHours, and any half left of one.
+// An upload that comes back after that gets 404, and the client starts it again.
+func (s *FileService) SweepUploads(ctx context.Context) error {
+	stale, err := uploads.ListStale(s.cfg.Dir, time.Now().Add(-uploadIdleHours*time.Hour))
+	if err != nil {
+		return err
+	}
+	for _, p := range stale {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := uploads.Remove(s.cfg.Dir, p.ID); err != nil {
+			return err
+		}
+		s.logger.Info("removed a stale upload", zap.String("upload_id", p.ID), zap.Int64("user_id", p.UserID),
+			zap.Int64("size_bytes", p.Size), zap.Int64("length_bytes", p.Length), zap.Time("modified_at", p.ModTime))
+	}
+	return nil
 }
 
 // SweepOrphans removes the files in the upload dir that no row points to, such as the bytes of an upload that never got its row.

@@ -27,6 +27,19 @@ export interface FolderResponse {
     folder: StoredFile;
 }
 
+// The folders of a folder upload by their paths, such as "Photos/2024". The API makes the folders above a path too.
+export interface FolderTreeForm {
+    parent_id: number | null;
+    paths: string[];
+}
+
+// The ID of each new folder by its path.
+export interface FolderTreeResponse {
+    title: string;
+    message: string;
+    folders: Record<string, number>;
+}
+
 export interface RenameResponse {
     title: string;
     message: string;

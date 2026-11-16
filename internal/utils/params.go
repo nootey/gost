@@ -12,7 +12,11 @@ import (
 
 // OptionalQueryID reads a positive id from the query string. A missing value is 0.
 func OptionalQueryID(r *http.Request, key string) (int64, error) {
-	raw := r.URL.Query().Get(key)
+	return OptionalID(r.URL.Query().Get(key), key)
+}
+
+// OptionalID checks an optional positive id given as text, such as in upload metadata. An empty value is 0.
+func OptionalID(raw, key string) (int64, error) {
 	if raw == "" {
 		return 0, nil
 	}

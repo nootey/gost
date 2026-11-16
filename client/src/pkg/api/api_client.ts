@@ -58,6 +58,14 @@ async function handleResponse<T>(response: Response, options: RequestOptions): P
 // credentials, an already-dead session), not a signal to tear down auth state.
 const authEndpointPattern = /\/auth\/(login|register|logout|me)/;
 
+// endSession logs the app out after a 401 outside the auth endpoints: the session is gone.
+export async function endSession(): Promise<void> {
+    const auth = useAuthStore();
+    if (auth.isAuthenticated) {
+        await auth.logoutUser();
+    }
+}
+
 async function request<T>(method: string, path: string, body: unknown, options: RequestOptions): Promise<{ data: T }> {
     let response: Response;
 
@@ -76,10 +84,7 @@ async function request<T>(method: string, path: string, body: unknown, options: 
         }
 
         if (response.status === 401 && !authEndpointPattern.test(`/${path}`)) {
-            const auth = useAuthStore();
-            if (auth.isAuthenticated) {
-                await auth.logoutUser();
-            }
+            await endSession();
         }
 
         const msg = (data as { message?: string } | null)?.message ?? response.statusText;
