@@ -275,6 +275,37 @@ func (h *FileHandler) serveContent(
 	http.ServeContent(w, r, content.Name, content.ModTime, content.Content)
 }
 
+func (h *FileHandler) CreateFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	var req CreateFileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.resp.Error(w, r, errInvalidBody)
+		return
+	}
+
+	parentID, err := utils.OptionalBodyID(req.ParentID, "parent_id")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	f, err := h.service.CreateFile(r.Context(), userID, parentID, req.Name)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusCreated, FileResponse{
+		SuccessResponse: apperr.SuccessResponse{Title: "Success", Message: f.Name + " created."},
+		File:            f,
+	})
+}
+
 func (h *FileHandler) CreateFolder(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {

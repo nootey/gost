@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import { useClipboardStore } from "../../../pkg/stores/clipboard_store.ts";
 import { useDownloadStore } from "../../../pkg/stores/download_store.ts";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
@@ -19,7 +18,6 @@ import PictureViewer from "./PictureViewer.vue";
 import RenameDialog from "./RenameDialog.vue";
 import type {
     DataTablePageEvent,
-    DataTableRowClickEvent,
     DataTableRowContextMenuEvent,
     DataTableSelectAllChangeEvent,
     DataTableSortEvent,
@@ -62,7 +60,6 @@ const fileStore = useFileStore();
 const clipboardStore = useClipboardStore();
 const downloadStore = useDownloadStore();
 const toastStore = useToastStore();
-const router = useRouter();
 const { viewRoute } = useViewRoute();
 
 const PASTE_ACTIONS: Record<ClipboardMode, (form: PasteForm) => Promise<SuccessResponse>> = {
@@ -176,9 +173,8 @@ function openRoute(item: StoredFile): RouteLocationRaw | null {
 
 function rowClass(item: StoredFile): string {
     if (item.is_copying) return COPYING_ROW;
-    const row = itemView(item).row;
-    if (clipboardStore.isCut(item.id)) return `${row} opacity-50`;
-    return item.is_hidden ? `${row} opacity-60` : row;
+    if (clipboardStore.isCut(item.id)) return "opacity-50";
+    return item.is_hidden ? "opacity-60" : "";
 }
 
 function onSelectionChange(rows: StoredFile[]): void {
@@ -197,15 +193,6 @@ function onRowContextMenu(event: DataTableRowContextMenuEvent): void {
         return;
     }
     showMenu(event);
-}
-
-// The whole row of a folder or a picture opens it. A click on the name link already navigates by itself.
-async function onRowClick(event: DataTableRowClickEvent<StoredFile>): Promise<void> {
-    const to = openRoute(event.data);
-    if (to === null) return;
-    const target = event.originalEvent.target;
-    if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
-    await router.push(to);
 }
 
 function notOneTarget(): boolean {
@@ -369,7 +356,6 @@ defineExpose({ refresh });
             @sort="onSort"
             @update:selection="onSelectionChange"
             @select-all-change="onSelectAllChange"
-            @row-click="onRowClick"
             @row-contextmenu="onRowContextMenu"
         >
             <template #header>
@@ -457,11 +443,11 @@ defineExpose({ refresh });
                     </template>
                     <template v-else-if="folderId === null">
                         <span class="font-medium text-fg">No files yet</span>
-                        <span class="text-sm text-fg-muted">Files and folders you add show up here.</span>
+                        <span class="text-sm text-fg-muted">Upload files, or drop them on this page.</span>
                     </template>
                     <template v-else>
                         <span class="font-medium text-fg">This folder is empty</span>
-                        <span class="text-sm text-fg-muted">Upload files or create a folder here.</span>
+                        <span class="text-sm text-fg-muted">Upload files, or drop them on this page.</span>
                     </template>
                 </div>
             </template>
@@ -471,7 +457,7 @@ defineExpose({ refresh });
             <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
                     <div class="flex min-w-0 items-center gap-3">
-                        <ItemIcon :item="data" />
+                        <ItemIcon :item="data" :to="openRoute(data)" />
                         <div class="flex min-w-0 flex-col">
                             <div class="flex min-w-0 items-center gap-2">
                                 <router-link

@@ -149,6 +149,16 @@ type FolderPath struct {
 	Path []*PathEntry `json:"path"`
 }
 
+type CreateFileRequest struct {
+	Name     string `json:"name"`
+	ParentID *int64 `json:"parent_id"`
+}
+
+type FileResponse struct {
+	apperr.SuccessResponse
+	File *File `json:"file"`
+}
+
 type CreateFolderRequest struct {
 	Name     string `json:"name"`
 	ParentID *int64 `json:"parent_id"`

@@ -455,6 +455,76 @@ func (s *FileServiceTestSuite) TestFinishUpload_FolderGoneLeavesNothingBehind() 
 	s.NoFileExists(path)
 }
 
+// A new file is empty bytes on disk. Its type is sniffed like an upload's, so the name's extension does not set it.
+func (s *FileServiceTestSuite) TestCreateFile_StoresEmptyFile() {
+	userID := s.seedUser()
+	folder := s.createFolder(userID, 0, "Docs")
+
+	f, err := s.TC.Services.FileService.CreateFile(context.Background(), userID, folder.ID, "  report.png  ")
+
+	s.Require().NoError(err)
+	s.Equal("report.png", f.Name)
+	s.False(f.IsFolder)
+	s.Equal(folder.ID, *f.ParentID)
+	s.Equal(int64(0), f.SizeBytes)
+	s.Equal("text/plain; charset=utf-8", f.ContentType)
+	content, err := os.ReadFile(filepath.Join(s.TC.UploadDir, s.storageKey(f.ID)))
+	s.Require().NoError(err)
+	s.Empty(content)
+	s.Equal([]map[string]any{{"event": "created", "name": "report.png", "folder": "Docs"}}, s.activity(userID, f.ID))
+}
+
+// A name with no extension gets its number at the end, and one with an extension gets it before the extension.
+func (s *FileServiceTestSuite) TestCreateFile_RenamesOnClash() {
+	userID := s.seedUser()
+	svc := s.TC.Services.FileService
+
+	cases := []struct{ name, want string }{
+		{"README", "README"},
+		{"README", "README (1)"},
+		{"notes.txt", "notes.txt"},
+		{"notes.txt", "notes (1).txt"},
+	}
+	for _, tc := range cases {
+		f, err := svc.CreateFile(context.Background(), userID, 0, tc.name)
+
+		s.Require().NoError(err)
+		s.Equal(tc.want, f.Name)
+	}
+}
+
+// A bad name or folder fails before or after the bytes are made, and no row or bytes stay behind.
+func (s *FileServiceTestSuite) TestCreateFile_FailureLeavesNothingBehind() {
+	alice := s.seedUserWithEmail("alice@example.com")
+	bob := s.seedUserWithEmail("bob@example.com")
+	bobFolder := s.createFolder(bob, 0, "Bob")
+	svc := s.TC.Services.FileService
+	rows := s.fileRows()
+	before := s.dirEntries()
+
+	cases := []struct {
+		parentID int64
+		name     string
+		status   int
+		message  string
+	}{
+		{0, "   ", http.StatusBadRequest, "file name is required"},
+		{0, "a/b.txt", http.StatusBadRequest, "file name has invalid characters"},
+		{0, strings.Repeat("a", 256), http.StatusBadRequest, "file name is too long"},
+		{999, "a.txt", http.StatusNotFound, "folder not found"},
+		{bobFolder.ID, "a.txt", http.StatusNotFound, "folder not found"},
+	}
+	for _, tc := range cases {
+		_, err := svc.CreateFile(context.Background(), alice, tc.parentID, tc.name)
+
+		status, msg := apperr.Resolve(err)
+		s.Equal(tc.status, status, tc.message)
+		s.Equal(tc.message, msg)
+	}
+	s.Equal(rows, s.fileRows())
+	s.Equal(before, s.dirEntries())
+}
+
 func (s *FileServiceTestSuite) TestCreateFolder_AtRootAndNested() {
 	userID := s.seedUser()
 

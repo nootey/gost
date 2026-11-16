@@ -6,14 +6,12 @@ export interface ItemView {
     icon: string;
     type: string;
     size: string;
-    row: string;
 }
 
 const FOLDER_VIEW: Omit<ItemView, "size"> = {
     iconBox: "bg-accent-soft text-accent",
     icon: "pi pi-folder",
     type: "Folder",
-    row: "cursor-pointer",
 };
 
 // The sniffed types an <img> shows. The server never sniffs an SVG as an image, so a script in one never runs here.
@@ -25,7 +23,6 @@ export function isPicture(item: StoredFile): boolean {
 }
 
 // A folder's size_bytes is the total of the files under it, so a folder shows a size like a file.
-// A folder row and a picture row open on a click.
 export function itemView(item: StoredFile): ItemView {
     const size = vueHelper.formatBytes(item.size_bytes);
     if (item.is_folder) return { ...FOLDER_VIEW, size };
@@ -34,6 +31,5 @@ export function itemView(item: StoredFile): ItemView {
         icon: vueHelper.fileIcon(item.content_type),
         type: vueHelper.mimeType(item.content_type),
         size,
-        row: isPicture(item) ? "cursor-pointer" : "",
     };
 }

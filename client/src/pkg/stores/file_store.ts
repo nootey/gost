@@ -10,13 +10,14 @@ import type {
     DownloadResponse,
     Favorite,
     FavoriteQuery,
-    FolderForm,
+    FileResponse,
     FolderPath,
     FolderResponse,
     FolderTreeForm,
     FolderTreeResponse,
     ItemsForm,
     ListQuery,
+    NewItemForm,
     PasteForm,
     RenameForm,
     RenameResponse,
@@ -52,7 +53,12 @@ export const useFileStore = defineStore("file", {
             return startUpload<UploadResponse>(this.uploadPrefix, file, metadata, onProgress);
         },
 
-        async createFolder(form: FolderForm): Promise<FolderResponse> {
+        async createFile(form: NewItemForm): Promise<FileResponse> {
+            const response = await apiClient.post<FileResponse>(this.apiPrefix, form);
+            return response.data;
+        },
+
+        async createFolder(form: NewItemForm): Promise<FolderResponse> {
             const response = await apiClient.post<FolderResponse>(this.folderPrefix, form);
             return response.data;
         },
