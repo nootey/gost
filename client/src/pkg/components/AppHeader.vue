@@ -72,13 +72,13 @@ function signOut(): void {
 </script>
 
 <template>
-    <div class="flex h-16 items-center justify-between gap-2 sm:gap-4">
+    <div class="flex h-16 items-center justify-between gap-1 sm:gap-4">
         <div class="flex min-w-0 items-center gap-2 sm:gap-6">
-            <router-link to="/" class="no-underline" aria-label="Gost home">
-                <BrandMark compact />
+            <router-link to="/" class="hidden no-underline sm:block" aria-label="Gost home">
+                <BrandMark />
             </router-link>
 
-            <nav class="flex items-center gap-1" aria-label="Main">
+            <nav class="flex items-center sm:gap-1" aria-label="Main">
                 <Button
                     v-for="link in NAV_LINKS"
                     :key="link.name"
@@ -87,17 +87,23 @@ function signOut(): void {
                     text
                     size="small"
                     severity="secondary"
-                    class="gap-2 px-2 no-underline sm:px-2.5"
+                    class="group gap-0 px-2 no-underline sm:px-2.5"
                     :class="{ 'bg-inset text-fg': route.name === link.name }"
                     :aria-label="link.label"
                 >
                     <i :class="link.icon" />
-                    <span class="hidden sm:inline">{{ link.label }}</span>
+                    <span
+                        class="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-300 ease-out group-aria-[current=page]:grid-cols-[1fr] group-aria-[current=page]:opacity-100 motion-reduce:transition-none xl:grid-cols-[1fr] xl:opacity-100"
+                    >
+                        <span class="min-w-0 overflow-hidden whitespace-nowrap">
+                            <span class="pl-2">{{ link.label }}</span>
+                        </span>
+                    </span>
                 </Button>
             </nav>
         </div>
 
-        <div class="flex shrink-0 items-center gap-2">
+        <div class="flex shrink-0 items-center gap-1 sm:gap-2">
             <span class="relative">
                 <Button
                     icon="pi pi-download"
@@ -120,18 +126,18 @@ function signOut(): void {
                 text
                 rounded
                 severity="secondary"
-                class="gap-2 p-1 sm:pr-3"
+                class="gap-2 p-1 md:pr-3"
                 aria-haspopup="true"
                 aria-controls="account-menu"
                 aria-label="Account menu"
                 @click="toggleMenu"
             >
                 <Avatar :label="initials" shape="circle" class="bg-accent-soft text-xs font-semibold text-accent" />
-                <span class="hidden max-w-40 truncate text-sm font-medium text-fg sm:block">
+                <span class="hidden max-w-40 truncate text-sm font-medium text-fg md:block">
                     {{ user?.display_name }}
                 </span>
                 <!-- The icon font sets display on .pi, so hidden goes on a wrapper. -->
-                <span class="hidden sm:block"><i class="pi pi-chevron-down text-xs text-fg-muted" /></span>
+                <span class="hidden md:block"><i class="pi pi-chevron-down text-xs text-fg-muted" /></span>
             </Button>
         </div>
 
