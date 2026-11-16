@@ -114,7 +114,7 @@ func (s *UserServiceTestSuite) TestGetSettings_Defaults() {
 	settings, err := s.TC.Services.UserService.GetSettings(context.Background(), u.ID)
 
 	s.Require().NoError(err)
-	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true}, settings)
+	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true, Use24HourClock: true}, settings)
 }
 
 // The first save makes the row, a later save changes it, and each user keeps their own settings.
@@ -124,12 +124,16 @@ func (s *UserServiceTestSuite) TestSaveSettings() {
 	u := s.seedUser("test1@example.com", "Test User 1")
 	other := s.seedUser("test2@example.com", "Test User 2")
 
-	first := user.Settings{SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false}
+	first := user.Settings{
+		SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false, Use24HourClock: false,
+	}
 	saved, err := svc.SaveSettings(ctx, u.ID, first)
 	s.Require().NoError(err)
 	s.Equal(&first, saved)
 
-	second := user.Settings{SortFavoritesFirst: false, SortFoldersFirst: true, ShowHidden: true, ShowExtensions: true}
+	second := user.Settings{
+		SortFavoritesFirst: false, SortFoldersFirst: true, ShowHidden: true, ShowExtensions: true, Use24HourClock: true,
+	}
 	saved, err = svc.SaveSettings(ctx, u.ID, second)
 	s.Require().NoError(err)
 	s.Equal(&second, saved)
@@ -140,7 +144,7 @@ func (s *UserServiceTestSuite) TestSaveSettings() {
 
 	got, err = svc.GetSettings(ctx, other.ID)
 	s.Require().NoError(err)
-	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true}, got)
+	s.Equal(&user.Settings{SortFoldersFirst: true, ShowExtensions: true, Use24HourClock: true}, got)
 
 	var rows int
 	s.Require().NoError(s.TC.DB.QueryRowContext(ctx, `SELECT count(*) FROM user_settings`).Scan(&rows))

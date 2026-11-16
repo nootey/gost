@@ -11,23 +11,42 @@ This guide helps you set up and run Gost with Docker Compose.
 
 ### Configure your environment
 
-Docker Compose reads a `.env` file next to `docker-compose.yaml`.
-Traefik gets a TLS certificate from Let's Encrypt, so your domain must point to the server, and ports 80 and 443 must be open.
+All config lives in one `.env` file next to `docker-compose.yaml`. Copy `.env.example` to `.env` and edit it.
+Compose reads it, and the app containers get all of it. Inside Docker, Compose sets only the container hosts, ports and the upload folder.
+
+These are the values to set for a deployment:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HOST` | `localhost` | Your domain. |
+| `WEB_CLIENT_DOMAIN` | `localhost` | Your domain. Traefik routes it, and email links use it. |
+| `APP_ENVIRONMENT` | `local` | `production` on a server with Traefik. `development` on an ARM board, which has no HTTPS. |
 | `TRAEFIK_EMAIL` | `support@example.com` | Email for Let's Encrypt. |
-| `POSTGRES_USER` | `postgres` | Database user. |
-| `POSTGRES_PASSWORD` | `postgres` | Database password. |
-| `POSTGRES_DB` | `gost` | Database name. |
+| `DATABASE_USER` | `postgres` | Database user. |
+| `DATABASE_PASSWORD` | `postgres` | Database password. |
+| `DATABASE_NAME` | `gost` | Database name. |
+| `REDIS_PASSWORD` | empty | Redis password. Required in production. |
+| `SEED_ROOT_USER` | `root@local.host` | Email of the first user. |
+| `SEED_ROOT_PASSWORD` | `password` | Password of the first user. |
+| `APP_ALLOW_SIGNUP` | `false` | Lets anyone who reaches the app make an account. |
+| `MAILER_HOST` | empty | SMTP server for email links. Empty writes the links to the API log. |
 | `GRAFANA_PASSWORD` | `admin` | Grafana admin password. |
+| `WEB_CLIENT_PORT` | `5173` | ARM only: the host port of the app. |
+| `GRAFANA_PORT` | `3000` | ARM only: the host port of Grafana. |
 
 > ⚠️ **Warning:** The defaults are not safe. Set your own passwords before you deploy publicly.
 
-### Run the app
+### Images
+
+`docker-compose.yaml` pulls the published images, `nootey/gost` and `nootey/gost-client`.
+Each release builds them for amd64 and arm64. `docker-compose.build.yaml` builds them from source instead.
+
+## Run on a server
+
+Traefik gets a TLS certificate from Let's Encrypt, so your domain must point to the server, and ports 80 and 443 must be open.
+These commands build the images from source.
 
 For the first time setup, you must run the migrations and seed the root user.
+The seed makes the user from `SEED_ROOT_USER` and `SEED_ROOT_PASSWORD`, and skips a user that already exists.
 
 ```sh
 make docker-migrate
@@ -44,11 +63,44 @@ Gost is then available at `https://<your-domain>`.
 The observability stack (Prometheus, Loki, Grafana) is included by default.
 Grafana is available at `https://grafana.<your-domain>`.
 
-To stop all services, use:
+To restart or stop all services, use:
 
 ```sh
+make docker-restart
 make docker-down
 ```
+
+## Run on an ARM board
+
+For a Raspberry Pi or another ARM board. The board runs no Traefik.
+The client serves the app on `WEB_CLIENT_PORT`, and Grafana runs on `GRAFANA_PORT`.
+Set `APP_ENVIRONMENT=development`: production needs HTTPS for its cookies.
+
+```sh
+make docker-arm-migrate
+make docker-arm-seed
+make docker-arm-up
+```
+
+Gost is then available at `http://<WEB_CLIENT_DOMAIN>:<WEB_CLIENT_PORT>`.
+Each command pulls the latest published images, so `make docker-arm-up` also updates the app.
+To build on the board instead, add `build=1`, for example `make docker-arm-up build=1`.
+
+To restart or stop all services, use:
+
+```sh
+make docker-arm-restart
+make docker-arm-down
+```
+
+## Users
+
+Sign up is off by default, so only the root user can log in.
+To add another user, set `APP_ALLOW_SIGNUP=true`, start the app again, and make the account on the sign up page.
+Then set it back to `false` and start the app again.
+
+The new account must confirm its email before it can log in.
+Set the `MAILER_*` values to send the email. With no mailer, the API writes the link to its log: `docker compose logs api`.
 
 ## Configuration
 
@@ -62,7 +114,7 @@ Uploads in progress wait in `UPLOAD_DIR/.partial/`. A job removes the ones that 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. Docker mounts the `uploads` named volume here. |
+| `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. In Docker, Compose sets it to the `uploads` named volume. |
 | `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request, which carries one chunk. |
 
 ### File downloads

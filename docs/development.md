@@ -38,7 +38,8 @@ GitHub Actions runs these workflows:
 
 - **Lint** - client and server
 - **Tests** - all server tests with coverage
-- **Release** - creates Git tags and GitHub releases
+- **Build Docker Image** - builds the API and client images for amd64 and arm64 on each push to `main` or `develop`
+- **Release** - creates Git tags and GitHub releases, then pushes the images to Docker Hub
 
 ### Release automation
 
@@ -46,9 +47,13 @@ Create these labels in GitHub (Settings → Labels):
 
 | Name | Color | Description |
 |------|-------|-------------|
-| `release:major` | `#d73a4a` | Breaking changes (v1.0.0 → v2.0.0) |
 | `release:minor` | `#fbca04` | New features (v1.0.0 → v1.1.0) |
-| `release:patch` | `#0e8a16` | Bug fixes (v1.0.0 → v1.0.1) |
+| `release:fix` | `#0e8a16` | Bug fixes (v1.0.0 → v1.0.1) |
+
+Add these secrets in GitHub (Settings → Secrets and variables → Actions), so a release can push the images:
+
+- `DOCKER_HUB_USERNAME`
+- `DOCKER_HUB_ACCESS_TOKEN`
 
 To make a release:
 
@@ -56,4 +61,4 @@ To make a release:
 2. Add one of the `release:*` labels
 3. Merge the PR
 
-The workflow then creates the tag and the release.
+The workflow then creates the tag and the release, and pushes `nootey/gost` and `nootey/gost-client` with the version tag and `latest`.

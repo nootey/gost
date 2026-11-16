@@ -30,10 +30,11 @@ export interface Permission {
     description: string | null;
 }
 
-// The user's own settings for the file lists. The server keeps them, so every device shares them.
+// The user's own settings for the file lists and how times show. The server keeps them, so every device shares them.
 export interface Settings {
     sort_favorites_first: boolean;
     sort_folders_first: boolean;
     show_hidden: boolean;
     show_extensions: boolean;
+    use_24_hour_clock: boolean;
 }

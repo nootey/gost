@@ -93,6 +93,7 @@ func (s *UserService) SaveSettings(ctx context.Context, userID int64, settings S
 		SortFoldersFirst:   settings.SortFoldersFirst,
 		ShowHidden:         settings.ShowHidden,
 		ShowExtensions:     settings.ShowExtensions,
+		Use24HourClock:     settings.Use24HourClock,
 	})
 	if err != nil {
 		return nil, err
@@ -106,5 +107,6 @@ func toSettingsModel(row database.UserSetting) *Settings {
 		SortFoldersFirst:   row.SortFoldersFirst,
 		ShowHidden:         row.ShowHidden,
 		ShowExtensions:     row.ShowExtensions,
+		Use24HourClock:     row.Use24HourClock,
 	}
 }

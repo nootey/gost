@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import apiClient from "../api/api_client.ts";
 import { useSettingsStore } from "./settings_store.ts";
 import type { User } from "../../domains/user/models.ts";
-import type { AuthForm } from "../../domains/auth/models.ts";
+import type { AuthForm, SignupStatus } from "../../domains/auth/models.ts";
 import router from "../router/router.ts";
 
 export const useAuthStore = defineStore("auth", {
@@ -24,6 +24,11 @@ export const useAuthStore = defineStore("auth", {
             const response = await apiClient.post(`${this.apiPrefix}/login`, form);
             await this.init();
             return response;
+        },
+
+        async signupAllowed(): Promise<boolean> {
+            const response = await apiClient.get<SignupStatus>(`${this.apiPrefix}/signup`);
+            return response.data.allow_signup;
         },
 
         async signUp(form: AuthForm, invitation_id: number | null = null) {

@@ -499,7 +499,7 @@ defineExpose({ refresh });
                                 />
                             </div>
                             <span class="truncate text-xs text-fg-subtle sm:hidden">
-                                {{ vueHelper.formatDate(data.created_at) }}
+                                {{ vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock) }}
                             </span>
                         </div>
                     </div>
@@ -536,7 +536,9 @@ defineExpose({ refresh });
                 body-class="hidden sm:table-cell"
             >
                 <template #body="{ data }">
-                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.created_at) }}</span>
+                    <span class="text-sm tabular-nums text-fg-muted">
+                        {{ vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
 
@@ -548,7 +550,9 @@ defineExpose({ refresh });
                 body-class="hidden xl:table-cell"
             >
                 <template #body="{ data }">
-                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.updated_at) }}</span>
+                    <span class="text-sm tabular-nums text-fg-muted">
+                        {{ vueHelper.formatDate(data.updated_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
         </DataTable>

@@ -18,8 +18,8 @@ type User struct {
 	DeletedAt      *time.Time `json:"-"`
 }
 
-// Settings are the user's own choices for the file lists. The list routes take the order as params, so the client
-// sends these along with each list request.
+// Settings are the user's own choices for the file lists and how times show. The list routes take the order as
+// params, so the client sends these along with each list request.
 type Settings struct {
 	// SortFavoritesFirst puts the favorites on top of the file list, before the folders-first split.
 	SortFavoritesFirst bool `json:"sort_favorites_first"`
@@ -28,10 +28,12 @@ type Settings struct {
 	ShowHidden bool `json:"show_hidden"`
 	// ShowExtensions false shows file names without their last extension.
 	ShowExtensions bool `json:"show_extensions"`
+	// Use24HourClock false shows times on a 12-hour clock, such as 2:30 PM.
+	Use24HourClock bool `json:"use_24_hour_clock"`
 }
 
 // defaultSettings are the settings of a user who never saved any. They match the lists before settings existed.
-var defaultSettings = Settings{SortFoldersFirst: true, ShowExtensions: true}
+var defaultSettings = Settings{SortFoldersFirst: true, ShowExtensions: true, Use24HourClock: true}
 
 // SettingsRequest sets every setting at once. A missing value is an error, not false.
 type SettingsRequest struct {
@@ -39,6 +41,7 @@ type SettingsRequest struct {
 	SortFoldersFirst   *bool `json:"sort_folders_first"`
 	ShowHidden         *bool `json:"show_hidden"`
 	ShowExtensions     *bool `json:"show_extensions"`
+	Use24HourClock     *bool `json:"use_24_hour_clock"`
 }
 
 type sortField string

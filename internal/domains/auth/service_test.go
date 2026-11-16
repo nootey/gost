@@ -4,6 +4,8 @@ package auth_test
 
 import (
 	"context"
+	"gost/config"
+	"gost/internal/apperr"
 	"gost/internal/domains/auth"
 	"gost/tests/integration"
 	"net/url"
@@ -40,6 +42,23 @@ func (s *AuthServiceTestSuite) TestRegister_UnconfirmedUserCannotLogin() {
 	// Unconfirmed account: login is blocked.
 	_, err = svc.ValidateCredentials(ctx, "jane@example.com", "supersecret")
 	s.ErrorIs(err, auth.ErrEmailNotConfirmed)
+}
+
+func (s *AuthServiceTestSuite) TestRegister_SignupOff() {
+	svc := auth.NewAuthService(s.TC.Queries, nil, s.TC.Mailer, &config.Config{})
+	ctx := context.Background()
+
+	s.False(svc.SignupAllowed())
+	err := svc.Register(ctx, "Jane", "jane@example.com", "supersecret")
+
+	var appErr *apperr.Error
+	s.Require().ErrorAs(err, &appErr)
+	s.Equal(apperr.KindForbidden, appErr.Kind)
+	s.Empty(s.TC.Mailer.ConfirmationLink)
+
+	var users int
+	s.Require().NoError(s.TC.DB.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&users))
+	s.Zero(users)
 }
 
 func (s *AuthServiceTestSuite) TestConfirmEmail_UnlocksLogin() {

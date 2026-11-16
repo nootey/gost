@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ApiError } from "../../../pkg/api/api_models.ts";
 import { useAuthStore } from "../../../pkg/stores/auth_store.ts";
@@ -17,6 +17,16 @@ const router = useRouter();
 const route = useRoute();
 
 const loading = ref<boolean>(false);
+
+const signupAllowed = ref<boolean>(false);
+
+onMounted(async () => {
+    try {
+        signupAllowed.value = await authStore.signupAllowed();
+    } catch (error) {
+        toastStore.errorResponseToast(error);
+    }
+});
 
 const form = ref<AuthForm>({
     email: "",
@@ -143,7 +153,7 @@ function forgotPassword() {
                 />
             </div>
 
-            <div class="flex items-center justify-center gap-2 mt-4 pt-3 border-t border-edge">
+            <div v-if="signupAllowed" class="flex items-center justify-center gap-2 mt-4 pt-3 border-t border-edge">
                 <span class="text-sm text-fg-muted">Don't have an account?</span>
                 <span
                     class="text-sm font-medium text-accent hover:underline underline-offset-4 cursor-pointer"
