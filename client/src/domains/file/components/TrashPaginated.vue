@@ -204,7 +204,7 @@ onMounted(getData);
                                 {{ shownName(data, settingsStore.settings.show_extensions) }}
                             </span>
                             <span class="truncate text-xs text-fg-subtle sm:hidden">
-                                {{ vueHelper.formatDate(data.trashed_at) }}
+                                {{ vueHelper.formatDate(data.trashed_at, settingsStore.settings.use_24_hour_clock) }}
                             </span>
                         </div>
                     </div>
@@ -241,7 +241,9 @@ onMounted(getData);
                 body-class="hidden sm:table-cell"
             >
                 <template #body="{ data }">
-                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.trashed_at) }}</span>
+                    <span class="text-sm tabular-nums text-fg-muted">
+                        {{ vueHelper.formatDate(data.trashed_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
         </DataTable>

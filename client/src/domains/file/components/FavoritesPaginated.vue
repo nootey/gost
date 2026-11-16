@@ -230,9 +230,7 @@ onMounted(getData);
             <template #empty>
                 <div class="flex flex-col items-center gap-1 py-8 text-center">
                     <span class="font-medium text-fg">No favorites yet</span>
-                    <span class="text-sm text-fg-muted">
-                        Right-click an item in Files and pick "Add to favorites".
-                    </span>
+                    <span class="text-sm text-fg-muted">Right-click an item in Files and pick "Add to favorites".</span>
                 </div>
             </template>
 
@@ -318,7 +316,9 @@ onMounted(getData);
                 body-class="hidden sm:table-cell"
             >
                 <template #body="{ data }">
-                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.created_at) }}</span>
+                    <span class="text-sm tabular-nums text-fg-muted">
+                        {{ vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
         </DataTable>

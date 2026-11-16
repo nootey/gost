@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { EVENT_VIEWS, eventText } from "../../../pkg/utils/activity_view.ts";
@@ -10,6 +11,7 @@ import type { Activity } from "../models.ts";
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 
 const rowOptions = [25, 50, 100];
 
@@ -83,7 +85,7 @@ onMounted(getData);
                             </span>
                             <span class="break-words text-xs text-fg-muted">{{ eventText(data) }}</span>
                             <span class="text-xs text-fg-subtle tabular-nums sm:hidden">
-                                {{ vueHelper.formatDate(data.created_at) }}
+                                {{ vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock) }}
                             </span>
                         </div>
                     </div>
@@ -92,7 +94,9 @@ onMounted(getData);
 
             <Column header="When" header-class="hidden w-48 sm:table-cell" body-class="hidden sm:table-cell">
                 <template #body="{ data }">
-                    <span class="text-sm text-fg-muted tabular-nums">{{ vueHelper.formatDate(data.created_at) }}</span>
+                    <span class="text-sm text-fg-muted tabular-nums">
+                        {{ vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
         </DataTable>

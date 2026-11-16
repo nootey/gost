@@ -163,7 +163,9 @@ onMounted(getData);
 
             <Column header="Modified" header-class="hidden w-48 sm:table-cell" body-class="hidden sm:table-cell">
                 <template #body="{ data }">
-                    <span class="text-sm tabular-nums text-fg-muted">{{ vueHelper.formatDate(data.updated_at) }}</span>
+                    <span class="text-sm tabular-nums text-fg-muted">
+                        {{ vueHelper.formatDate(data.updated_at, settingsStore.settings.use_24_hour_clock) }}
+                    </span>
                 </template>
             </Column>
         </DataTable>
@@ -177,7 +179,11 @@ onMounted(getData);
             </template>
         </ContextMenu>
 
-        <DetailsDialog v-model:visible="detailsVisible" :item="detailsTarget" :dir="namesDir(detailsTarget?.path ?? [])" />
+        <DetailsDialog
+            v-model:visible="detailsVisible"
+            :item="detailsTarget"
+            :dir="namesDir(detailsTarget?.path ?? [])"
+        />
         <FileViewer :items="items" />
     </div>
 </template>

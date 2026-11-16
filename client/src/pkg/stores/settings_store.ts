@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: Settings = {
     sort_folders_first: true,
     show_hidden: false,
     show_extensions: true,
+    use_24_hour_clock: true,
 };
 
 export const useSettingsStore = defineStore("settings", {
@@ -30,7 +31,7 @@ export const useSettingsStore = defineStore("settings", {
             }
         },
 
-        // The server needs every setting, so a change sends all four.
+        // The server needs every setting, so a change sends all of them.
         async save(settings: Settings): Promise<void> {
             const response = await apiClient.put<Settings>(this.apiPrefix, settings);
             this.settings = response.data;

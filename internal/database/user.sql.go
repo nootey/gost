@@ -119,7 +119,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 }
 
 const getUserSettings = `-- name: GetUserSettings :one
-SELECT user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at FROM user_settings
+SELECT user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at, use_24_hour_clock FROM user_settings
 WHERE user_id = $1
 `
 
@@ -133,20 +133,22 @@ func (q *Queries) GetUserSettings(ctx context.Context, userID int64) (UserSettin
 		&i.ShowHidden,
 		&i.ShowExtensions,
 		&i.UpdatedAt,
+		&i.Use24HourClock,
 	)
 	return i, err
 }
 
 const saveUserSettings = `-- name: SaveUserSettings :one
-INSERT INTO user_settings (user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO user_settings (user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, use_24_hour_clock)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id) DO UPDATE SET
     sort_favorites_first = EXCLUDED.sort_favorites_first,
     sort_folders_first = EXCLUDED.sort_folders_first,
     show_hidden = EXCLUDED.show_hidden,
     show_extensions = EXCLUDED.show_extensions,
+    use_24_hour_clock = EXCLUDED.use_24_hour_clock,
     updated_at = NOW()
-RETURNING user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at
+RETURNING user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, updated_at, use_24_hour_clock
 `
 
 type SaveUserSettingsParams struct {
@@ -155,6 +157,7 @@ type SaveUserSettingsParams struct {
 	SortFoldersFirst   bool  `json:"sort_folders_first"`
 	ShowHidden         bool  `json:"show_hidden"`
 	ShowExtensions     bool  `json:"show_extensions"`
+	Use24HourClock     bool  `json:"use_24_hour_clock"`
 }
 
 func (q *Queries) SaveUserSettings(ctx context.Context, arg SaveUserSettingsParams) (UserSetting, error) {
@@ -164,6 +167,7 @@ func (q *Queries) SaveUserSettings(ctx context.Context, arg SaveUserSettingsPara
 		arg.SortFoldersFirst,
 		arg.ShowHidden,
 		arg.ShowExtensions,
+		arg.Use24HourClock,
 	)
 	var i UserSetting
 	err := row.Scan(
@@ -173,6 +177,7 @@ func (q *Queries) SaveUserSettings(ctx context.Context, arg SaveUserSettingsPara
 		&i.ShowHidden,
 		&i.ShowExtensions,
 		&i.UpdatedAt,
+		&i.Use24HourClock,
 	)
 	return i, err
 }

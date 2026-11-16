@@ -68,7 +68,8 @@ func (h *UserHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 
 	var req SettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-		req.SortFavoritesFirst == nil || req.SortFoldersFirst == nil || req.ShowHidden == nil || req.ShowExtensions == nil {
+		req.SortFavoritesFirst == nil || req.SortFoldersFirst == nil || req.ShowHidden == nil || req.ShowExtensions == nil ||
+		req.Use24HourClock == nil {
 		h.resp.Error(w, r, errInvalidSettings)
 		return
 	}
@@ -78,6 +79,7 @@ func (h *UserHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 		SortFoldersFirst:   *req.SortFoldersFirst,
 		ShowHidden:         *req.ShowHidden,
 		ShowExtensions:     *req.ShowExtensions,
+		Use24HourClock:     *req.Use24HourClock,
 	})
 	if err != nil {
 		h.resp.Error(w, r, err)

@@ -144,6 +144,7 @@ func (s *ServiceIntegrationSuite) SetupSuite() {
 func testConfig() *config.Config {
 	cfg := &config.Config{}
 	cfg.App.Environment = "local"
+	cfg.App.AllowSignup = true
 	cfg.Server.Host = "localhost"
 	cfg.Server.Port = "8080"
 	cfg.WebClient.Domain = "localhost"

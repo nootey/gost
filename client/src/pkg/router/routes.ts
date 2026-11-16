@@ -19,6 +19,7 @@ declare module "vue-router" {
         hideNavigation?: boolean;
         requiresAuth?: boolean;
         guestOnly?: boolean;
+        requiresSignup?: boolean; // open only when the server allows sign up
         emailConfirmed?: boolean;
         permsAny?: string[]; // allow if the user has ANY of these
         permsAll?: string[]; // allow only if the user has ALL of these
@@ -74,7 +75,7 @@ const routes: RouteRecordRaw[] = [
     {
         path: "/signup",
         name: "sign.up",
-        meta: { title: "Sign up", guestOnly: true, hideNavigation: true },
+        meta: { title: "Sign up", guestOnly: true, requiresSignup: true, hideNavigation: true },
         component: SignUp,
     },
     {

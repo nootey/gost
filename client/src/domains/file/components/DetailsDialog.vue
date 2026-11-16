@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useFileStore } from "../../../pkg/stores/file_store.ts";
+import { useSettingsStore } from "../../../pkg/stores/settings_store.ts";
 import { useToastStore } from "../../../pkg/stores/toast_store.ts";
 import vueHelper from "../../../pkg/utils/vue_helper.ts";
 import { itemView } from "../../../pkg/utils/item_view.ts";
@@ -19,6 +20,7 @@ const visible = defineModel<boolean>("visible", { required: true });
 
 const fileStore = useFileStore();
 const toastStore = useToastStore();
+const settingsStore = useSettingsStore();
 
 // The row shows at once. The server's copy replaces it, so the dialog shows the item as it is now.
 const details = ref<StoredFile | null>(null);
@@ -116,9 +118,13 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
                 <dt class="text-fg-muted">Location</dt>
                 <dd class="min-w-0 truncate text-fg" :title="location">{{ location }}</dd>
                 <dt class="text-fg-muted">Added</dt>
-                <dd class="text-fg tabular-nums">{{ vueHelper.formatDate(details.created_at) }}</dd>
+                <dd class="text-fg tabular-nums">
+                    {{ vueHelper.formatDate(details.created_at, settingsStore.settings.use_24_hour_clock) }}
+                </dd>
                 <dt class="text-fg-muted">Changed</dt>
-                <dd class="text-fg tabular-nums">{{ vueHelper.formatDate(details.updated_at) }}</dd>
+                <dd class="text-fg tabular-nums">
+                    {{ vueHelper.formatDate(details.updated_at, settingsStore.settings.use_24_hour_clock) }}
+                </dd>
             </dl>
 
             <div class="flex flex-col gap-2">
@@ -153,7 +159,12 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
                                     <div class="flex min-w-0 flex-col">
                                         <span class="break-words">{{ eventText(data) }}</span>
                                         <span class="text-xs text-fg-subtle tabular-nums sm:hidden">
-                                            {{ vueHelper.formatDate(data.created_at) }}
+                                            {{
+                                                vueHelper.formatDate(
+                                                    data.created_at,
+                                                    settingsStore.settings.use_24_hour_clock,
+                                                )
+                                            }}
                                         </span>
                                     </div>
                                 </div>
@@ -167,7 +178,9 @@ async function onPage(event: DataTablePageEvent): Promise<void> {
                         >
                             <template #body="{ data }">
                                 <span class="text-sm text-fg-muted tabular-nums">
-                                    {{ vueHelper.formatDate(data.created_at) }}
+                                    {{
+                                        vueHelper.formatDate(data.created_at, settingsStore.settings.use_24_hour_clock)
+                                    }}
                                 </span>
                             </template>
                         </Column>

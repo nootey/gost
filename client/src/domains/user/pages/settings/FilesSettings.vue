@@ -49,6 +49,12 @@ const SETTING_GROUPS: SettingGroup[] = [
                 description: "When off, report.pdf shows as report.",
                 icon: "pi pi-file",
             },
+            {
+                key: "use_24_hour_clock",
+                label: "Use 24-hour clock",
+                description: "When off, 14:30 shows as 2:30 PM.",
+                icon: "pi pi-clock",
+            },
         ],
     },
 ];

@@ -193,4 +193,5 @@ type UserSetting struct {
 	ShowHidden         bool      `json:"show_hidden"`
 	ShowExtensions     bool      `json:"show_extensions"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	Use24HourClock     bool      `json:"use_24_hour_clock"`
 }

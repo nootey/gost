@@ -14,7 +14,11 @@ const ICON_BY_GROUP: Partial<Record<string, string>> = {
     text: "pi pi-file-edit",
 };
 
-const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+// Keyed by the 24-hour clock setting.
+const DATE_FORMATS: Record<`${boolean}`, Intl.DateTimeFormat> = {
+    true: new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" }),
+    false: new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", hourCycle: "h12" }),
+};
 
 const RELATIVE_FORMAT = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
@@ -44,8 +48,8 @@ const vueHelper = {
         return ICON_BY_TYPE[mimeType] ?? ICON_BY_GROUP[mimeType.split("/")[0]] ?? "pi pi-file";
     },
 
-    formatDate(iso: string): string {
-        return DATE_FORMAT.format(new Date(iso));
+    formatDate(iso: string, use24HourClock: boolean): string {
+        return DATE_FORMATS[`${use24HourClock}`].format(new Date(iso));
     },
 
     // formatTimeLeft says how far off a time is, such as "in 23 hours". Under an hour it counts minutes.

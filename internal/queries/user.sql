@@ -29,12 +29,13 @@ SELECT * FROM user_settings
 WHERE user_id = $1;
 
 -- name: SaveUserSettings :one
-INSERT INTO user_settings (user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO user_settings (user_id, sort_favorites_first, sort_folders_first, show_hidden, show_extensions, use_24_hour_clock)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id) DO UPDATE SET
     sort_favorites_first = EXCLUDED.sort_favorites_first,
     sort_folders_first = EXCLUDED.sort_folders_first,
     show_hidden = EXCLUDED.show_hidden,
     show_extensions = EXCLUDED.show_extensions,
+    use_24_hour_clock = EXCLUDED.use_24_hour_clock,
     updated_at = NOW()
 RETURNING *;

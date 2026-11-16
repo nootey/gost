@@ -144,14 +144,14 @@ func (suite *UserHandlerTestSuite) TestListUsers_DefaultPagination() {
 func (suite *UserHandlerTestSuite) TestGetSettings_Success() {
 	suite.mockService.EXPECT().
 		GetSettings(mock.Anything, testUserID).
-		Return(&user.Settings{SortFoldersFirst: true, ShowHidden: true}, nil).
+		Return(&user.Settings{SortFoldersFirst: true, ShowHidden: true, Use24HourClock: true}, nil).
 		Once()
 
 	w := suite.settingsRequest(http.MethodGet, "", true)
 
 	suite.Equal(http.StatusOK, w.Code)
-	suite.JSONEq(`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":true,"show_extensions":false}`,
-		w.Body.String())
+	suite.JSONEq(`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":true,"show_extensions":false,`+
+		`"use_24_hour_clock":true}`, w.Body.String())
 }
 
 func (suite *UserHandlerTestSuite) TestGetSettings_ServiceError() {
@@ -166,18 +166,20 @@ func (suite *UserHandlerTestSuite) TestGetSettings_ServiceError() {
 }
 
 func (suite *UserHandlerTestSuite) TestSaveSettings_Success() {
-	saved := user.Settings{SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false}
+	saved := user.Settings{
+		SortFavoritesFirst: true, SortFoldersFirst: false, ShowHidden: true, ShowExtensions: false, Use24HourClock: false,
+	}
 	suite.mockService.EXPECT().
 		SaveSettings(mock.Anything, testUserID, saved).
 		Return(&saved, nil).
 		Once()
 
-	w := suite.settingsRequest(http.MethodPut,
-		`{"sort_favorites_first":true,"sort_folders_first":false,"show_hidden":true,"show_extensions":false}`, true)
+	body := `{"sort_favorites_first":true,"sort_folders_first":false,"show_hidden":true,"show_extensions":false,` +
+		`"use_24_hour_clock":false}`
+	w := suite.settingsRequest(http.MethodPut, body, true)
 
 	suite.Equal(http.StatusOK, w.Code)
-	suite.JSONEq(`{"sort_favorites_first":true,"sort_folders_first":false,"show_hidden":true,"show_extensions":false}`,
-		w.Body.String())
+	suite.JSONEq(body, w.Body.String())
 }
 
 // Every setting needs a value, so a missing one never turns into false.
@@ -185,9 +187,11 @@ func (suite *UserHandlerTestSuite) TestSaveSettings_InvalidBody() {
 	for _, body := range []string{
 		`not json`,
 		`{}`,
-		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true}`,
-		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true,"show_extensions":null}`,
-		`{"sort_favorites_first":true,"sort_folders_first":"yes","show_hidden":true,"show_extensions":true}`,
+		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true,"show_extensions":true}`,
+		`{"sort_favorites_first":true,"sort_folders_first":true,"show_hidden":true,"show_extensions":null,` +
+			`"use_24_hour_clock":true}`,
+		`{"sort_favorites_first":true,"sort_folders_first":"yes","show_hidden":true,"show_extensions":true,` +
+			`"use_24_hour_clock":true}`,
 	} {
 		w := suite.settingsRequest(http.MethodPut, body, true)
 
@@ -196,22 +200,24 @@ func (suite *UserHandlerTestSuite) TestSaveSettings_InvalidBody() {
 	}
 }
 
+// validSettingsBody is a save request with every setting, for the tests that do not check the values.
+const validSettingsBody = `{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":false,` +
+	`"show_extensions":true,"use_24_hour_clock":true}`
+
 func (suite *UserHandlerTestSuite) TestSaveSettings_ServiceError() {
 	suite.mockService.EXPECT().
 		SaveSettings(mock.Anything, testUserID, mock.Anything).
 		Return(nil, assert.AnError).
 		Once()
 
-	w := suite.settingsRequest(http.MethodPut,
-		`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":false,"show_extensions":true}`, true)
+	w := suite.settingsRequest(http.MethodPut, validSettingsBody, true)
 
 	suite.Equal(http.StatusInternalServerError, w.Code)
 }
 
 func (suite *UserHandlerTestSuite) TestSettings_Unauthenticated() {
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		w := suite.settingsRequest(method,
-			`{"sort_favorites_first":false,"sort_folders_first":true,"show_hidden":false,"show_extensions":true}`, false)
+		w := suite.settingsRequest(method, validSettingsBody, false)
 
 		suite.Equal(http.StatusUnauthorized, w.Code, method)
 	}

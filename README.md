@@ -1,177 +1,44 @@
 # Gost
 
-A Go web application with clean architecture, testing, and CI/CD workflows.
+A simple and lean self-hosted file host.
+Built as an alternative to Nextcloud, for those who want to keep their files on their own server while retaining a minimal UI. You upload documents, pictures and videos, keep them in folders, and open them in the browser.
+No calendar, no office suite, no app store. Just a file host behind a login.
 
-## Quick Start
+![Files](docs/dash.png)
 
-### Clone the Repository
-```bash
-git clone https://github.com/nootey/gost.git
-cd gost
-```
+## Hosting
 
-### Install Dependencies
-```bash
-go mod download
-```
+The app can currently only be self-hosted with [Docker](./docs/docker.md).
 
-### Setup Environment
-```bash
-cp .env.example .env
-```
+## Local development
 
-### Run Migrations
-```bash
+The instructions below are for anyone that wants to run the app locally.
+
+### Requirements
+
+- Go >= 1.27
+- Node >= 22.12 and pnpm
+- PostgreSQL
+- Redis
+- Docker (`make run` starts the observability stack with Docker Compose)
+
+### Getting started
+
+Create the configuration files from their examples and edit them
+
+- `./.env.example` -> `./.env`
+- `./client/.env.example` -> `./client/.env` (optional, defaults work for local dev)
+
+Run the migrations and seeders, then start the server and the client
+
+```sh
 make migrate-up
-```
-
-### Seed Database
-```bash
-# Core data only (roles, permissions, root user)
 make seed
-```
-
-### Run the Application
-```bash
 make run
+cd client && pnpm install && pnpm run dev
 ```
 
-Visit: `http://127.0.0.1:8080/health`
+By default, the app will be available at http://localhost:3030.
+Log in with the root user from `.env` (`SEED_ROOT_USER` and `SEED_ROOT_PASSWORD`).
 
----
-
-## Architecture
-
-### Adding a New Resource
-
-1. **Create migration:**
-```bash
-   make migrate-create NAME=create_posts_table
-```
-
-2. **Write SQL queries** in `queries/post.sql`:
-```sql
-   -- name: GetPost :one
-   SELECT * FROM posts WHERE id = $1;
-   
-   -- name: CreatePost :one
-   INSERT INTO posts (title, content, user_id)
-   VALUES ($1, $2, $3)
-   RETURNING *;
-```
-
-3. **Generate code:**
-```bash
-   make sqlc-generate
-```
-
-4. **Create service**:
-```go
-   type PostService struct {
-       queries *database.Queries
-       logger  *zap.Logger
-   }
-```
-
-5. **Create handler**:
-```go
-   func (h *PostHandler) Routes() chi.Router {
-       r := chi.NewRouter()
-       r.Get("/", h.ListPosts)
-       r.Post("/", h.CreatePost)
-       return r
-   }
-```
-
-6. **Wire it up** in `cmd/api/main.go`:
-```go
-   postService := services.NewPostService(queries, logger)
-   postHandler := handlers.NewPostHandler(postService, logger)
-   r.Mount("/posts", postHandler.Routes())
-```
-
----
-
-## Testing
-
-### Integration Tests (with real DB)
-```bash
-go test -v ./internal/services/
-```
-
-Uses Testcontainers to spin up PostgreSQL automatically.
-
-### Unit Tests (with mocks)
-```bash
-go test -v ./internal/handlers/
-```
-
-Uses generated mocks to test handlers in isolation.
-
----
-
-## CI/CD
-
-### GitHub Actions Workflows
-
-The template includes workflows:
-
-- **Lint**:
-    - Client and server
-
-- **Tests**:
-    - Runs all tests with coverage
-
-**Release**:
-    - Auto-creates Git tags and GitHub releases
-
-### Setup Release Automation
-
--  **Create labels** in GitHub (Settings → Labels):
-
-   | Name | Color | Description |
-      |------|-------|-------------|
-   | `release:major` | `#d73a4a` | Breaking changes (v1.0.0 → v2.0.0) |
-   | `release:minor` | `#fbca04` | New features (v1.0.0 → v1.1.0) |
-   | `release:patch` | `#0e8a16` | Bug fixes (v1.0.0 → v1.0.1) |
-
-- **Usage:**
-    - Create a PR to `main`
-    - Add one of the `release:*` labels
-    - Merge the PR
-    - Workflow automatically creates tag and release!
-
----
-
-## Configuration
-
-All configuration is managed through environment variables (`.env`).
-
-Access config anywhere:
-```go
-import "gost/config"
-
-cfg := config.Get()
-fmt.Println(cfg.Server.Port)
-```
-
-### File uploads
-
-Uploads are stored on local disk. The database keeps the owner, name, size and type of each file.
-
-Files go up in 32 MB chunks over the [tus](https://tus.io) protocol at `/api/uploads/`, so a file of any size works, and a broken upload goes on from where it stopped. Uploads in progress wait in `UPLOAD_DIR/.partial/`. A job removes the ones that get no new bytes for 24 hours.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `UPLOAD_DIR` | `./storage/uploads` | Folder for uploaded files. Docker mounts the `uploads` named volume here. |
-| `UPLOAD_TIMEOUT_SECONDS` | `300` | Time limit for one upload request, which carries one chunk. |
-
-### File downloads
-
-One file downloads as it is. A folder or many items download as one zip. A background job builds the zip, and the app keeps it for 24 hours.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DOWNLOAD_TIMEOUT_SECONDS` | `3600` | Time limit for one download request. |
-| `DOWNLOAD_MAX_ZIP_MB` | `10240` | Largest zip the app builds. |
-| `DOWNLOAD_ZIP_CHECK_SECONDS` | `1` | How often a zip job checks that its download still exists. |
+See [docs/development.md](./docs/development.md) for tests, linting and releases.
