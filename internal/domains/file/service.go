@@ -107,6 +107,7 @@ type FileServiceInterface interface {
 	AddFavorites(ctx context.Context, userID int64, ids []int64) error
 	SetHidden(ctx context.Context, userID int64, ids []int64, hidden bool) error
 	RemoveFavorites(ctx context.Context, userID int64, ids []int64) error
+	ListFavorites(ctx context.Context, userID int64, q FavoriteQuery) (*utils.Page[*Favorite], error)
 	OpenFile(ctx context.Context, userID, id int64) (*FileContent, error)
 	RequestZip(ctx context.Context, userID int64, ids []int64) (*Download, error)
 	ListDownloads(ctx context.Context, userID int64) ([]*Download, error)
@@ -287,6 +288,9 @@ func (s *FileService) List(ctx context.Context, userID int64, q ListQuery) (*uti
 	if err := s.markFavorites(ctx, userID, files); err != nil {
 		return nil, err
 	}
+	if err := s.addFolderSizes(ctx, userID, files); err != nil {
+		return nil, err
+	}
 
 	return &utils.Page[*File]{Data: files, NextCursor: page.NextCursor}, nil
 }
@@ -324,6 +328,9 @@ func (s *FileService) GetItem(ctx context.Context, userID, id int64) (*File, err
 
 	f := toFileModel(dbFile)
 	if err := s.markFavorites(ctx, userID, []*File{f}); err != nil {
+		return nil, err
+	}
+	if err := s.addFolderSizes(ctx, userID, []*File{f}); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -396,6 +403,9 @@ func (s *FileService) Rename(ctx context.Context, userID, id int64, name string)
 	if err := s.markFavorites(ctx, userID, []*File{f}); err != nil {
 		return nil, err
 	}
+	if err := s.addFolderSizes(ctx, userID, []*File{f}); err != nil {
+		return nil, err
+	}
 	return f, nil
 }
 
@@ -446,6 +456,50 @@ func (s *FileService) SetHidden(ctx context.Context, userID int64, ids []int64, 
 // RemoveFavorites drops the favorite mark of the items. An id that is not a favorite of the user changes nothing.
 func (s *FileService) RemoveFavorites(ctx context.Context, userID int64, ids []int64) error {
 	return s.queries.RemoveFavorites(ctx, database.RemoveFavoritesParams{UserID: userID, Ids: ids})
+}
+
+// ListFavorites reads one page of the user's live favorites from all folders. Each item comes with the path of its
+// folder, so the client can open that folder.
+func (s *FileService) ListFavorites(ctx context.Context, userID int64, q FavoriteQuery) (*utils.Page[*Favorite], error) {
+	page, err := utils.FetchPage(ctx, s.db, favoriteList, utils.PageQuery[SortField]{
+		Args:     []any{userID, q.ShowHidden},
+		Sort:     q.Sort,
+		Desc:     q.Desc,
+		Cursor:   q.Cursor,
+		PageSize: q.PageSize,
+	}, fileFields)
+	if err != nil {
+		return nil, err
+	}
+
+	// An item in the root has no folder, and its id 0 is in no path.
+	folderIDs := make([]int64, len(page.Data))
+	for i, dbFile := range page.Data {
+		folderIDs[i] = dbFile.ParentID.Int64
+	}
+	paths := map[int64][]string{0: {}}
+	if len(folderIDs) > 0 {
+		rows, err := s.queries.ListFolderPaths(ctx, database.ListFolderPathsParams{UserID: userID, Ids: folderIDs})
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			paths[row.FolderID] = row.Names
+		}
+	}
+
+	items := make([]*Favorite, len(page.Data))
+	files := make([]*File, len(page.Data))
+	for i, dbFile := range page.Data {
+		items[i] = &Favorite{File: *toFileModel(dbFile), Path: paths[dbFile.ParentID.Int64]}
+		items[i].IsFavorite = true
+		files[i] = &items[i].File
+	}
+	if err := s.addFolderSizes(ctx, userID, files); err != nil {
+		return nil, err
+	}
+
+	return &utils.Page[*Favorite]{Data: items, NextCursor: page.NextCursor}, nil
 }
 
 // OpenFile opens one live file of the user for a download. A folder downloads as a zip, and a file that still copies
@@ -1216,6 +1270,9 @@ func (s *FileService) ListTrash(ctx context.Context, userID int64, q TrashQuery)
 	if err := s.markFavorites(ctx, userID, files); err != nil {
 		return nil, err
 	}
+	if err := s.addFolderSizes(ctx, userID, files); err != nil {
+		return nil, err
+	}
 
 	return &utils.Page[*TrashedFile]{Data: items, NextCursor: page.NextCursor}, nil
 }
@@ -1235,6 +1292,35 @@ func (s *FileService) markFavorites(ctx context.Context, userID int64, items []*
 	}
 	for _, item := range items {
 		item.IsFavorite = slices.Contains(favorites, item.ID)
+	}
+	return nil
+}
+
+// addFolderSizes sets the SizeBytes of each folder in items to the total of the files under it, with one query.
+// A folder row stores no size of its own, so the size sort still puts the folders in name order.
+func (s *FileService) addFolderSizes(ctx context.Context, userID int64, items []*File) error {
+	var ids []int64
+	for _, item := range items {
+		if item.IsFolder {
+			ids = append(ids, item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := s.queries.ListFolderSizes(ctx, database.ListFolderSizesParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return err
+	}
+	sizes := make(map[int64]int64, len(rows))
+	for _, row := range rows {
+		sizes[row.FolderID] = row.SizeBytes
+	}
+	for _, item := range items {
+		if item.IsFolder {
+			item.SizeBytes = sizes[item.ID]
+		}
 	}
 	return nil
 }

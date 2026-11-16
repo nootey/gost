@@ -66,6 +66,14 @@ type Querier interface {
 	// The folder and every folder above it, up to the root. No rows means the folder is not a live folder of the user,
 	// or it still copies. UNION, not UNION ALL, so a loop in the data cannot make the walk run forever.
 	ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsParams) ([]int64, error)
+	// The path of each folder in ids: the folder names from the root down to the folder. A repeated id gives one row.
+	// The walk keeps the ids it passed, so a loop in the data ends the walk, and that folder gets no row.
+	ListFolderPaths(ctx context.Context, arg ListFolderPathsParams) ([]ListFolderPathsRow, error)
+	// The total size of the files at any depth under each folder in ids. Hidden files count. A live folder counts its live
+	// rows. A folder in the trash counts the rows deleted with it, and the rows the trash job has not marked yet. A row in
+	// another trash group is gone from the folder, so it does not count, and the walk does not go under it. UNION drops a
+	// row it has already seen, so a loop in the data ends the walk.
+	ListFolderSizes(ctx context.Context, arg ListFolderSizesParams) ([]ListFolderSizesRow, error)
 	// The folders right under parent_ids in one of the root_ids groups: the next level of the trash job.
 	// It skips the group roots, because the job starts from them.
 	ListGroupFolders(ctx context.Context, arg ListGroupFoldersParams) ([]int64, error)

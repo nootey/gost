@@ -260,6 +260,43 @@ WITH RECURSIVE up AS (
 )
 SELECT id FROM up;
 
+-- name: ListFolderPaths :many
+-- The path of each folder in ids: the folder names from the root down to the folder. A repeated id gives one row.
+-- The walk keeps the ids it passed, so a loop in the data ends the walk, and that folder gets no row.
+WITH RECURSIVE up AS (
+    SELECT files.id AS folder_id, files.parent_id, ARRAY[files.name]::text[] AS names, ARRAY[files.id]::bigint[] AS seen
+    FROM files
+    WHERE files.user_id = sqlc.arg(user_id)
+      AND files.id = ANY(sqlc.arg(ids)::bigint[])
+    UNION ALL
+    SELECT up.folder_id, f.parent_id, array_prepend(f.name, up.names), array_prepend(f.id, up.seen)
+    FROM files f
+    JOIN up ON f.id = up.parent_id
+    WHERE f.id <> ALL(up.seen)
+)
+SELECT folder_id::bigint AS folder_id, names::text[] AS names FROM up
+WHERE parent_id IS NULL;
+
+-- name: ListFolderSizes :many
+-- The total size of the files at any depth under each folder in ids. Hidden files count. A live folder counts its live
+-- rows. A folder in the trash counts the rows deleted with it, and the rows the trash job has not marked yet. A row in
+-- another trash group is gone from the folder, so it does not count, and the walk does not go under it. UNION drops a
+-- row it has already seen, so a loop in the data ends the walk.
+WITH RECURSIVE down AS (
+    SELECT files.id AS folder_id, files.id, files.trash_root_id AS group_id, 0::bigint AS size_bytes
+    FROM files
+    WHERE files.user_id = sqlc.arg(user_id)
+      AND files.id = ANY(sqlc.arg(ids)::bigint[])
+      AND files.storage_key IS NULL
+    UNION
+    SELECT down.folder_id, f.id, down.group_id, f.size_bytes
+    FROM files f
+    JOIN down ON f.parent_id = down.id
+    WHERE f.trashed_at IS NULL OR f.trash_root_id = down.group_id
+)
+SELECT folder_id::bigint AS folder_id, SUM(size_bytes)::bigint AS size_bytes FROM down
+GROUP BY folder_id;
+
 -- name: ListTakenNames :many
 -- The names in names that a live item in the folder already has.
 SELECT name FROM files

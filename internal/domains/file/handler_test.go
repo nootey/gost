@@ -47,6 +47,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router.Get("/files", suite.handler.List)
 	suite.router.Post("/files", suite.handler.Upload)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
+	suite.router.Get("/favorites", suite.handler.ListFavorites)
 	suite.router.Post("/favorites", suite.handler.AddFavorites)
 	suite.router.Post("/favorites/remove", suite.handler.RemoveFavorites)
 	suite.router.Get("/folders/resolve", suite.handler.ResolveFolder)
@@ -293,6 +294,7 @@ func (suite *FileHandlerTestSuite) TestList_SortAndSearch() {
 		{"?sort=name&order=asc", file.ListQuery{Sort: file.SortByName}},
 		{"?sort=size&order=desc", file.ListQuery{Sort: file.SortBySize, Desc: true}},
 		{"?sort=type", file.ListQuery{Sort: file.SortByType, Desc: true}},
+		{"?sort=modified&order=asc", file.ListQuery{Sort: file.SortByModified}},
 		{"?order=asc", file.ListQuery{Sort: file.SortByDate}},
 		{"?search=%20Report%25_", file.ListQuery{Search: " Report%_", Sort: file.SortByDate, Desc: true}},
 		{"?search=" + atNameLimit, file.ListQuery{Search: atNameLimit, Sort: file.SortByDate, Desc: true}},
@@ -1161,6 +1163,103 @@ func (suite *FileHandlerTestSuite) TestRemoveFavorites_ServiceError() {
 	suite.Equal(http.StatusInternalServerError, w.Code)
 }
 
+func (suite *FileHandlerTestSuite) TestListFavorites_Success() {
+	next := "next-page"
+	suite.mockService.EXPECT().
+		ListFavorites(mock.Anything, testUserID, file.FavoriteQuery{Cursor: "this-page", PageSize: 5, Sort: file.SortByName}).
+		Return(&utils.Page[*file.Favorite]{
+			Data: []*file.Favorite{
+				{File: file.File{ID: 3, Name: "c.txt", IsFavorite: true}, Path: []string{"Docs", "Work"}},
+				{File: file.File{ID: 4, Name: "d.txt", IsFavorite: true}, Path: []string{}},
+			},
+			NextCursor: &next,
+		}, nil).
+		Once()
+
+	w := suite.getPath("/favorites?cursor=this-page&page_size=5", true)
+
+	suite.Equal(http.StatusOK, w.Code)
+	var resp struct {
+		Data []struct {
+			Name       string   `json:"name"`
+			IsFavorite bool     `json:"is_favorite"`
+			Path       []string `json:"path"`
+		} `json:"data"`
+		NextCursor *string `json:"next_cursor"`
+	}
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Require().Len(resp.Data, 2)
+	suite.Equal("c.txt", resp.Data[0].Name)
+	suite.True(resp.Data[0].IsFavorite)
+	suite.Equal([]string{"Docs", "Work"}, resp.Data[0].Path)
+	suite.Equal([]string{}, resp.Data[1].Path)
+	suite.Require().NotNil(resp.NextCursor)
+	suite.Equal(next, *resp.NextCursor)
+}
+
+// The list sorts by name, A to Z, unless the query asks for another sort. A bad page size reaches the service as zero.
+func (suite *FileHandlerTestSuite) TestListFavorites_Query() {
+	cases := []struct {
+		query string
+		want  file.FavoriteQuery
+	}{
+		{"", file.FavoriteQuery{Sort: file.SortByName}},
+		{"?page_size=-x", file.FavoriteQuery{Sort: file.SortByName}},
+		{"?sort=date&order=desc", file.FavoriteQuery{Sort: file.SortByDate, Desc: true}},
+		{"?sort=size", file.FavoriteQuery{Sort: file.SortBySize}},
+		{"?sort=type&order=asc", file.FavoriteQuery{Sort: file.SortByType}},
+		{"?show_hidden=true", file.FavoriteQuery{Sort: file.SortByName, ShowHidden: true}},
+		{"?show_hidden=false", file.FavoriteQuery{Sort: file.SortByName}},
+	}
+	for _, tc := range cases {
+		suite.mockService.EXPECT().
+			ListFavorites(mock.Anything, testUserID, tc.want).
+			Return(&utils.Page[*file.Favorite]{Data: []*file.Favorite{}}, nil).
+			Once()
+
+		w := suite.getPath("/favorites"+tc.query, true)
+
+		suite.Equal(http.StatusOK, w.Code, tc.query)
+		suite.JSONEq(`{"data":[],"next_cursor":null}`, w.Body.String(), tc.query)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestListFavorites_InvalidQuery() {
+	cases := []struct {
+		query   string
+		message string
+	}{
+		{"?sort=created_at", "invalid sort"},
+		{"?sort=modified", "invalid sort"},
+		{"?order=DESC", "invalid order"},
+		{"?show_hidden=yes", "invalid show_hidden"},
+	}
+	for _, tc := range cases {
+		w := suite.getPath("/favorites"+tc.query, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, tc.query)
+		suite.Equal(tc.message, suite.errorMessage(w), tc.query)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestListFavorites_Unauthenticated() {
+	w := suite.getPath("/favorites", false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestListFavorites_ServiceError() {
+	suite.mockService.EXPECT().
+		ListFavorites(mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, apperr.New(apperr.KindInvalid, "invalid cursor")).
+		Once()
+
+	w := suite.getPath("/favorites?cursor=bad", true)
+
+	suite.Equal(http.StatusBadRequest, w.Code)
+	suite.Equal("invalid cursor", suite.errorMessage(w))
+}
+
 func (suite *FileHandlerTestSuite) TestHide_Success() {
 	cases := []struct {
 		path    string
@@ -1446,6 +1545,7 @@ func (suite *FileHandlerTestSuite) TestListTrash_InvalidSort() {
 		message string
 	}{
 		{"?sort=trashed_at", "invalid sort"},
+		{"?sort=modified", "invalid sort"},
 		{"?order=DESC", "invalid order"},
 	}
 	for _, tc := range cases {

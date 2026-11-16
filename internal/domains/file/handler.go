@@ -49,7 +49,7 @@ func (h *FileHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sort, err := utils.QueryChoice(r, "sort", SortByDate, SortByName, SortBySize, SortByType, SortByDate)
+	sort, err := utils.QueryChoice(r, "sort", SortByDate, SortByName, SortBySize, SortByType, SortByDate, SortByModified)
 	if err != nil {
 		h.resp.Error(w, r, err)
 		return
@@ -420,6 +420,50 @@ func (h *FileHandler) RemoveFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.resp.Success(w, http.StatusOK, "Removed from favorites.")
+}
+
+// ListFavorites sends one page of the user's favorites from all folders, by name with folders first unless the query
+// asks for another sort.
+func (h *FileHandler) ListFavorites(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
+		h.resp.Error(w, r, apperr.New(apperr.KindUnauthorized, "unauthenticated"))
+		return
+	}
+
+	sort, err := utils.QueryChoice(r, "sort", SortByName, SortByName, SortBySize, SortByType, SortByDate)
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	order, err := utils.QueryChoice(r, "order", "asc", "asc", "desc")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	showHidden, err := utils.QueryChoice(r, "show_hidden", "false", "true", "false")
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	result, err := h.service.ListFavorites(r.Context(), userID, FavoriteQuery{
+		Cursor:     r.URL.Query().Get("cursor"),
+		PageSize:   pageSize,
+		Sort:       sort,
+		Desc:       order == "desc",
+		ShowHidden: showHidden == "true",
+	})
+	if err != nil {
+		h.resp.Error(w, r, err)
+		return
+	}
+
+	h.resp.JSON(w, http.StatusOK, result)
 }
 
 func (h *FileHandler) Hide(w http.ResponseWriter, r *http.Request) {

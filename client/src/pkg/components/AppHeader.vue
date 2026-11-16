@@ -18,6 +18,7 @@ interface NavLink {
 
 const NAV_LINKS: NavLink[] = [
     { name: "dashboard", label: "Files", icon: "pi pi-folder" },
+    { name: "favorites", label: "Favorites", icon: "pi pi-star" },
     { name: "trash", label: "Trash", icon: "pi pi-trash" },
 ];
 

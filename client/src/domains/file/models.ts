@@ -35,15 +35,34 @@ export interface RenameResponse {
 
 export type SortField = "name" | "size" | "type" | "date";
 
+// Only the file list sorts by modified: the time of the last rename, move or restore, or of the add if none.
+export type ListSortField = SortField | "modified";
+
 // A null parent_id is the root. A null cursor is the first page. A null search matches every name.
 // show_hidden adds the hidden items.
 export interface ListQuery {
     parent_id: number | null;
     cursor: string | null;
     page_size: number;
-    sort: SortField;
+    sort: ListSortField;
     order: "asc" | "desc";
     search: string | null;
+    show_hidden: boolean;
+}
+
+// One of the user's favorites. path names the folders from the root down to the item's folder. An item in the root
+// has an empty path.
+export interface Favorite extends StoredFile {
+    path: string[];
+}
+
+// A null cursor is the first page. The date sort is the time the item was added, not the time it became a favorite.
+// show_hidden adds the hidden items.
+export interface FavoriteQuery {
+    cursor: string | null;
+    page_size: number;
+    sort: SortField;
+    order: "asc" | "desc";
     show_hidden: boolean;
 }
 

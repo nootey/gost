@@ -6,6 +6,8 @@ import type {
     ActivityQuery,
     DownloadList,
     DownloadResponse,
+    Favorite,
+    FavoriteQuery,
     FolderForm,
     FolderPath,
     FolderResponse,
@@ -108,6 +110,11 @@ export const useFileStore = defineStore("file", {
 
         async unhide(form: ItemsForm): Promise<SuccessResponse> {
             const response = await apiClient.post<SuccessResponse>(`${this.apiPrefix}/unhide`, form);
+            return response.data;
+        },
+
+        async listFavorites(query: FavoriteQuery): Promise<Page<Favorite>> {
+            const response = await apiClient.get<Page<Favorite>>("favorites", { params: { ...query } });
             return response.data;
         },
 

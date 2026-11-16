@@ -468,6 +468,111 @@ func (q *Queries) ListFolderPathIDs(ctx context.Context, arg ListFolderPathIDsPa
 	return items, nil
 }
 
+const listFolderPaths = `-- name: ListFolderPaths :many
+WITH RECURSIVE up AS (
+    SELECT files.id AS folder_id, files.parent_id, ARRAY[files.name]::text[] AS names, ARRAY[files.id]::bigint[] AS seen
+    FROM files
+    WHERE files.user_id = $1
+      AND files.id = ANY($2::bigint[])
+    UNION ALL
+    SELECT up.folder_id, f.parent_id, array_prepend(f.name, up.names), array_prepend(f.id, up.seen)
+    FROM files f
+    JOIN up ON f.id = up.parent_id
+    WHERE f.id <> ALL(up.seen)
+)
+SELECT folder_id::bigint AS folder_id, names::text[] AS names FROM up
+WHERE parent_id IS NULL
+`
+
+type ListFolderPathsParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type ListFolderPathsRow struct {
+	FolderID int64    `json:"folder_id"`
+	Names    []string `json:"names"`
+}
+
+// The path of each folder in ids: the folder names from the root down to the folder. A repeated id gives one row.
+// The walk keeps the ids it passed, so a loop in the data ends the walk, and that folder gets no row.
+func (q *Queries) ListFolderPaths(ctx context.Context, arg ListFolderPathsParams) ([]ListFolderPathsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFolderPaths, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFolderPathsRow
+	for rows.Next() {
+		var i ListFolderPathsRow
+		if err := rows.Scan(&i.FolderID, pq.Array(&i.Names)); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFolderSizes = `-- name: ListFolderSizes :many
+WITH RECURSIVE down AS (
+    SELECT files.id AS folder_id, files.id, files.trash_root_id AS group_id, 0::bigint AS size_bytes
+    FROM files
+    WHERE files.user_id = $1
+      AND files.id = ANY($2::bigint[])
+      AND files.storage_key IS NULL
+    UNION
+    SELECT down.folder_id, f.id, down.group_id, f.size_bytes
+    FROM files f
+    JOIN down ON f.parent_id = down.id
+    WHERE f.trashed_at IS NULL OR f.trash_root_id = down.group_id
+)
+SELECT folder_id::bigint AS folder_id, SUM(size_bytes)::bigint AS size_bytes FROM down
+GROUP BY folder_id
+`
+
+type ListFolderSizesParams struct {
+	UserID int64   `json:"user_id"`
+	Ids    []int64 `json:"ids"`
+}
+
+type ListFolderSizesRow struct {
+	FolderID  int64 `json:"folder_id"`
+	SizeBytes int64 `json:"size_bytes"`
+}
+
+// The total size of the files at any depth under each folder in ids. Hidden files count. A live folder counts its live
+// rows. A folder in the trash counts the rows deleted with it, and the rows the trash job has not marked yet. A row in
+// another trash group is gone from the folder, so it does not count, and the walk does not go under it. UNION drops a
+// row it has already seen, so a loop in the data ends the walk.
+func (q *Queries) ListFolderSizes(ctx context.Context, arg ListFolderSizesParams) ([]ListFolderSizesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFolderSizes, arg.UserID, pq.Array(arg.Ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFolderSizesRow
+	for rows.Next() {
+		var i ListFolderSizesRow
+		if err := rows.Scan(&i.FolderID, &i.SizeBytes); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listGroupFolders = `-- name: ListGroupFolders :many
 SELECT id FROM files
 WHERE user_id = $1
