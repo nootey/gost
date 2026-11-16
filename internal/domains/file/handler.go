@@ -156,6 +156,11 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	h.serveContent(w, r, h.service.OpenFile)
 }
 
+// Thumbnail sends the small copy of a picture that the file list shows.
+func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
+	h.serveContent(w, r, h.service.OpenThumbnail)
+}
+
 // DownloadZip sends a ready zip.
 func (h *FileHandler) DownloadZip(w http.ResponseWriter, r *http.Request) {
 	h.serveContent(w, r, h.service.OpenZip)
