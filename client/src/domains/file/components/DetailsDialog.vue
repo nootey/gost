@@ -24,7 +24,7 @@ function folderName(folder: string | null | undefined): string {
 
 const EVENT_VIEWS: Record<ActivityEvent, EventView> = {
     uploaded: { icon: "pi pi-upload", text: (m) => `Uploaded to ${folderName(m.folder)}` },
-    created: { icon: "pi pi-folder-plus", text: (m) => `Created in ${folderName(m.folder)}` },
+    created: { icon: "pi pi-plus", text: (m) => `Created in ${folderName(m.folder)}` },
     copied: { icon: "pi pi-copy", text: (m) => `Copied into ${folderName(m.folder)}` },
     renamed: { icon: "pi pi-pencil", text: (m) => `Renamed from ${m.old_name ?? ""} to ${m.name}` },
     moved: { icon: "pi pi-file-export", text: (m) => `Moved from ${folderName(m.from)} to ${folderName(m.folder)}` },

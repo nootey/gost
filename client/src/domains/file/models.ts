@@ -21,6 +21,12 @@ export interface UploadResponse {
     file: StoredFile;
 }
 
+export interface FileResponse {
+    title: string;
+    message: string;
+    file: StoredFile;
+}
+
 export interface FolderResponse {
     title: string;
     message: string;
@@ -92,7 +98,9 @@ export interface TrashQuery {
     order: "asc" | "desc";
 }
 
-export interface FolderForm {
+export type NewItemKind = "folder" | "file";
+
+export interface NewItemForm {
     name: string;
     parent_id: number | null;
 }

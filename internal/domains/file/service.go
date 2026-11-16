@@ -120,6 +120,7 @@ const zipFailedMessage = "the zip could not be built"
 type FileServiceInterface interface {
 	CheckUpload(ctx context.Context, userID, parentID int64, name string, size int64) error
 	FinishUpload(ctx context.Context, userID, parentID int64, name, path string) (*File, error)
+	CreateFile(ctx context.Context, userID, parentID int64, name string) (*File, error)
 	CreateFolder(ctx context.Context, userID, parentID int64, name string) (*File, error)
 	CreateFolderTree(ctx context.Context, userID, parentID int64, paths []string) (map[string]int64, error)
 	List(ctx context.Context, userID int64, q ListQuery) (*utils.Page[*File], error)
@@ -264,6 +265,40 @@ func (s *FileService) FinishUpload(ctx context.Context, userID, parentID int64, 
 			StorageKey:  sql.NullString{String: key, Valid: true},
 			ContentType: contentType,
 			SizeBytes:   size,
+		})
+	})
+	if err != nil {
+		_ = utils.RemoveStoredFile(s.cfg.Dir, key)
+		return nil, err
+	}
+
+	return toFileModel(dbFile), nil
+}
+
+// CreateFile adds an empty file. Its type is sniffed from its bytes, the same as an upload, never taken from the name.
+func (s *FileService) CreateFile(ctx context.Context, userID, parentID int64, name string) (*File, error) {
+	name = strings.TrimSpace(name)
+	if err := utils.ValidateName(name, utils.FileName); err != nil {
+		return nil, err
+	}
+
+	key, err := utils.CreateEmptyFile(s.cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+	contentType, err := utils.SniffStoredFile(s.cfg.Dir, key)
+	if err != nil {
+		_ = utils.RemoveStoredFile(s.cfg.Dir, key)
+		return nil, err
+	}
+
+	dbFile, err := s.insertWithFreeName(ctx, userID, parentID, name, utils.FileName, EventCreated, func(q *database.Queries, freeName string) (database.File, error) {
+		return q.CreateFile(ctx, database.CreateFileParams{
+			UserID:      userID,
+			ParentID:    sql.NullInt64{Int64: parentID, Valid: parentID != 0},
+			Name:        freeName,
+			StorageKey:  sql.NullString{String: key, Valid: true},
+			ContentType: contentType,
 		})
 	})
 	if err != nil {

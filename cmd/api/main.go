@@ -227,6 +227,7 @@ func setupRouter(cfg *config.Config, h *Handlers, authMiddleware *mWare.AuthMidd
 
 				r.Mount("/users", h.User.Routes())
 				r.Get("/files", h.File.List)
+				r.Post("/files", h.File.CreateFile)
 				r.Get("/files/{id}", h.File.GetItem)
 				r.Get("/files/{id}/activity", h.File.ListActivity)
 				r.Patch("/files/{id}", h.File.Rename)

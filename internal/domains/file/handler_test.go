@@ -52,6 +52,7 @@ func (suite *FileHandlerTestSuite) SetupTest() {
 	suite.router = chi.NewRouter()
 	suite.router.Mount("/uploads", uploadHandler)
 	suite.router.Get("/files", suite.handler.List)
+	suite.router.Post("/files", suite.handler.CreateFile)
 	suite.router.Post("/folders", suite.handler.CreateFolder)
 	suite.router.Post("/folders/tree", suite.handler.CreateFolderTree)
 	suite.router.Get("/favorites", suite.handler.ListFavorites)
@@ -420,6 +421,78 @@ func (suite *FileHandlerTestSuite) createFolder(body string, authenticated bool)
 	w := httptest.NewRecorder()
 	suite.router.ServeHTTP(w, req)
 	return w
+}
+
+func (suite *FileHandlerTestSuite) createFile(body string, authenticated bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/files", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authenticated {
+		req = req.WithContext(middleware.WithUserID(req.Context(), testUserID))
+	}
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, req)
+	return w
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFile_Success() {
+	parentID := int64(12)
+	suite.mockService.EXPECT().
+		CreateFile(mock.Anything, testUserID, int64(12), "notes.txt").
+		Return(&file.File{ID: 4, ParentID: &parentID, Name: "notes.txt"}, nil).
+		Once()
+
+	w := suite.createFile(`{"name":"notes.txt","parent_id":12}`, true)
+
+	suite.Equal(http.StatusCreated, w.Code)
+	var resp file.FileResponse
+	suite.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	suite.Equal("notes.txt created.", resp.Message)
+	suite.Require().NotNil(resp.File)
+	suite.Equal(&parentID, resp.File.ParentID)
+}
+
+// A missing or null parent_id reaches the service as 0, the root.
+func (suite *FileHandlerTestSuite) TestCreateFile_AtRoot() {
+	suite.mockService.EXPECT().
+		CreateFile(mock.Anything, testUserID, int64(0), "README").
+		Return(&file.File{ID: 4, Name: "README"}, nil).
+		Twice()
+
+	suite.Equal(http.StatusCreated, suite.createFile(`{"name":"README"}`, true).Code)
+	suite.Equal(http.StatusCreated, suite.createFile(`{"name":"README","parent_id":null}`, true).Code)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFile_BadRequests() {
+	cases := []struct{ body, message string }{
+		{`not json`, "invalid request body"},
+		{`{"name":"a.txt","parent_id":"12"}`, "invalid request body"},
+		{`{"name":"a.txt","parent_id":0}`, "invalid parent_id"},
+		{`{"name":"a.txt","parent_id":-4}`, "invalid parent_id"},
+	}
+	for _, tc := range cases {
+		w := suite.createFile(tc.body, true)
+
+		suite.Equal(http.StatusBadRequest, w.Code, tc.body)
+		suite.Equal(tc.message, suite.errorMessage(w), tc.body)
+	}
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFile_Unauthenticated() {
+	w := suite.createFile(`{"name":"a.txt"}`, false)
+
+	suite.Equal(http.StatusUnauthorized, w.Code)
+}
+
+func (suite *FileHandlerTestSuite) TestCreateFile_ServiceError() {
+	suite.mockService.EXPECT().
+		CreateFile(mock.Anything, testUserID, int64(99), "a.txt").
+		Return(nil, apperr.New(apperr.KindNotFound, "folder not found")).
+		Once()
+
+	w := suite.createFile(`{"name":"a.txt","parent_id":99}`, true)
+
+	suite.Equal(http.StatusNotFound, w.Code)
+	suite.Equal("folder not found", suite.errorMessage(w))
 }
 
 func (suite *FileHandlerTestSuite) TestCreateFolder_Success() {

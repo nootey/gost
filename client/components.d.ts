@@ -21,7 +21,6 @@ declare module 'vue' {
     ContextMenu: typeof import('primevue/contextmenu')['default']
     DataTable: typeof import('primevue/datatable')['default']
     Dialog: typeof import('primevue/dialog')['default']
-    FileUpload: typeof import('primevue/fileupload')['default']
     Galleria: typeof import('primevue/galleria')['default']
     IconField: typeof import('primevue/iconfield')['default']
     InputIcon: typeof import('primevue/inputicon')['default']

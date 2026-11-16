@@ -12,7 +12,7 @@ import { useViewRoute } from "../../../pkg/utils/use_view_route.ts";
 import DetailsDialog from "./DetailsDialog.vue";
 import ItemIcon from "./ItemIcon.vue";
 import PictureViewer from "./PictureViewer.vue";
-import type { DataTablePageEvent, DataTableRowClickEvent, DataTableSortEvent } from "primevue/datatable";
+import type { DataTablePageEvent, DataTableSortEvent } from "primevue/datatable";
 import type { MenuItem } from "primevue/menuitem";
 import type { RouteLocationRaw } from "vue-router";
 import type { Favorite, SortField } from "../models.ts";
@@ -103,17 +103,7 @@ function openRoute(item: Favorite): RouteLocationRaw | null {
 }
 
 function rowClass(item: Favorite): string {
-    const row = itemView(item).row;
-    return item.is_hidden ? `${row} opacity-60` : row;
-}
-
-// The whole row of a folder or a picture opens it. A click on a link already navigates by itself.
-async function onRowClick(event: DataTableRowClickEvent<Favorite>): Promise<void> {
-    const to = openRoute(event.data);
-    if (to === null) return;
-    const target = event.originalEvent.target;
-    if (target instanceof Element && target.closest("a, [data-p-selection-column='true']")) return;
-    await router.push(to);
+    return item.is_hidden ? "opacity-60" : "";
 }
 
 function notOneTarget(): boolean {
@@ -190,7 +180,6 @@ onMounted(getData);
             context-menu
             @page="onPage"
             @sort="onSort"
-            @row-click="onRowClick"
             @row-contextmenu="showMenu"
         >
             <template #header>
@@ -248,7 +237,7 @@ onMounted(getData);
             <Column header="Name" sort-field="name" sortable>
                 <template #body="{ data }">
                     <div class="flex min-w-0 items-center gap-3">
-                        <ItemIcon :item="data" />
+                        <ItemIcon :item="data" :to="openRoute(data)" />
                         <div class="flex min-w-0 flex-col">
                             <div class="flex min-w-0 items-center gap-2">
                                 <router-link

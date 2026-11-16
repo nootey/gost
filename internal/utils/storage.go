@@ -73,6 +73,30 @@ func AdoptFile(dir, path string) (string, int64, error) {
 	return key, info.Size(), nil
 }
 
+// CreateEmptyFile makes an empty file under a new random key in dir and returns the key.
+func CreateEmptyFile(dir string) (string, error) {
+	key, err := NewStorageKey()
+	if err != nil {
+		return "", err
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to open upload dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	f, err := root.OpenFile(key, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if err != nil {
+		return "", fmt.Errorf("failed to create stored file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = root.Remove(key)
+		return "", fmt.Errorf("failed to create stored file: %w", err)
+	}
+	return key, nil
+}
+
 // CopyStoredFile writes a copy of the bytes under srcKey to dstKey and returns its size. The copy is new bytes with a
 // fresh modified time, never a link, so the orphan sweep sees it as new. A missing source gives ErrNoStoredFile.
 // A copy already under dstKey is replaced, so a job that runs again, or two runs at once, can write it twice.
