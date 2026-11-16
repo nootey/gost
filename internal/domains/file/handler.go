@@ -151,19 +151,24 @@ func (h *FileHandler) finishUpload(ctx context.Context, userID int64, meta map[s
 	}, nil
 }
 
-// Download sends one file.
+// Download sends one file to save.
 func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
-	h.serveContent(w, r, h.service.OpenFile)
+	h.serveContent(w, r, h.service.OpenFile, false)
+}
+
+// Content sends one file for the browser to show, such as a PDF in a frame. A type that is not safe to show saves.
+func (h *FileHandler) Content(w http.ResponseWriter, r *http.Request) {
+	h.serveContent(w, r, h.service.OpenFile, true)
 }
 
 // Thumbnail sends the small copy of a picture that the file list shows.
 func (h *FileHandler) Thumbnail(w http.ResponseWriter, r *http.Request) {
-	h.serveContent(w, r, h.service.OpenThumbnail)
+	h.serveContent(w, r, h.service.OpenThumbnail, false)
 }
 
 // DownloadZip sends a ready zip.
 func (h *FileHandler) DownloadZip(w http.ResponseWriter, r *http.Request) {
-	h.serveContent(w, r, h.service.OpenZip)
+	h.serveContent(w, r, h.service.OpenZip, false)
 }
 
 // RequestZip answers once the download row and its job are in place. The client reads the downloads list until the zip
@@ -237,11 +242,13 @@ func (h *FileHandler) RemoveDownload(w http.ResponseWriter, r *http.Request) {
 
 // serveContent sends the bytes open returns for the id in the URL. ServeContent answers range requests and the
 // If-None-Match and If-Modified-Since checks. The bytes come as an attachment with nosniff, so a user's HTML file
-// never runs as a page on this origin.
+// never runs as a page on this origin. With inline, a type on the allow list shows in the browser. The sandbox policy
+// blocks scripts in any file the browser shows, also in a PDF.
 func (h *FileHandler) serveContent(
 	w http.ResponseWriter,
 	r *http.Request,
 	open func(ctx context.Context, userID, id int64) (*FileContent, error),
+	inline bool,
 ) {
 	userID, ok := middleware.GetUserID(r)
 	if !ok {
@@ -265,10 +272,16 @@ func (h *FileHandler) serveContent(
 	}
 	defer func() { _ = content.Content.Close() }()
 
+	disposition := "attachment"
+	if inline && utils.ShowsInline(content.ContentType) {
+		disposition = "inline"
+	}
+
 	header := w.Header()
 	header.Set("Content-Type", cmp.Or(content.ContentType, "application/octet-stream"))
-	header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": content.Name}))
+	header.Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": content.Name}))
 	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", "sandbox")
 	header.Set("ETag", content.ETag)
 	// The browser can keep the bytes, but asks first, so it never shows a deleted file from its cache.
 	header.Set("Cache-Control", "private, no-cache")

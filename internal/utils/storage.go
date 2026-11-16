@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -156,6 +157,26 @@ func SniffStoredFile(dir, key string) (string, error) {
 		return "", fmt.Errorf("failed to read stored file: %w", err)
 	}
 	return http.DetectContentType(head[:n]), nil
+}
+
+// inlineTypes are the sniffed types that the browser may show, not save. HTML and XML can run scripts on this origin,
+// so they always save. The sniffer never gives an SVG type.
+var inlineTypes = map[string]bool{
+	"application/pdf": true,
+	"image/bmp":       true,
+	"image/gif":       true,
+	"image/jpeg":      true,
+	"image/png":       true,
+	"image/webp":      true,
+	"text/plain":      true,
+	"video/mp4":       true,
+	"video/webm":      true,
+}
+
+// ShowsInline says if the browser may show a file of the sniffed contentType.
+func ShowsInline(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && inlineTypes[mediaType]
 }
 
 // writeStoredFile writes src under key through a temp file, so a file over maxBytes, or one that fails mid-write,

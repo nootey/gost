@@ -34,6 +34,11 @@ const vueHelper = {
         return contentType.split(";")[0].trim();
     },
 
+    // charset gives the text encoding of a content type, such as utf-16le. The sniffer always names one for text.
+    charset(contentType: string): string {
+        return /;\s*charset=([^;\s]+)/i.exec(contentType)?.[1] ?? "utf-8";
+    },
+
     fileIcon(contentType: string): string {
         const mimeType = contentType.split(";")[0];
         return ICON_BY_TYPE[mimeType] ?? ICON_BY_GROUP[mimeType.split("/")[0]] ?? "pi pi-file";
